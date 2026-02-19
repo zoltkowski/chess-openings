@@ -57,8 +57,11 @@ select {
   margin-left: auto;
 }
 
-.move-list .controls-row > button:not(.hamburger-btn) {
-  min-width: 4.6rem;
+.move-list .controls-row > button:not(.hamburger-btn):not(.icon-toggle-btn) {
+  width: 2.6rem;
+  min-width: 2.6rem;
+  padding: 0.3rem 0.2rem;
+  font-size: 0.82rem;
   text-align: center;
 }
 
@@ -353,8 +356,8 @@ select {
 }
 
 .portrait-tabbar > button {
-  width: 5rem;
-  min-width: 5rem;
+  width: 2.5rem;
+  min-width: 2.5rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;

@@ -89,6 +89,34 @@ const ARROW_BRUSHES: DrawBrushes = {
   yellowSoft: { key: 'ys', color: '#e68f00', opacity: 0.5, lineWidth: 10 },
 };
 const ORIENTATION_STORAGE_KEY = 'opening-board-orientation';
+const FILTER_SETTINGS_STORAGE_KEY = 'opening-filter-settings';
+
+type PersistedFilterSettings = {
+  lichessSource?: LichessSource;
+  dateRange?: DateRange;
+  lichessArrowThreshold?: number;
+  engineDepth?: number;
+  selectedSpeeds?: string[];
+  selectedRatings?: number[];
+  showLichessOnTreeMoves?: boolean;
+};
+
+function clampInt(value: unknown, min: number, max: number, fallback: number) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  const rounded = Math.round(value);
+  return Math.min(max, Math.max(min, rounded));
+}
+
+function loadPersistedFilterSettings(): PersistedFilterSettings {
+  try {
+    const raw = window.localStorage.getItem(FILTER_SETTINGS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as PersistedFilterSettings;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
 
 function TabIconBase(props: { children: ReactNode; viewBox?: string }) {
   const { children, viewBox = '0 0 24 24' } = props;
@@ -517,6 +545,22 @@ function Board(props: {
 }
 
 function App() {
+  const [persistedFilterSettings] = useState<PersistedFilterSettings>(() => loadPersistedFilterSettings());
+  const initialLichessSource: LichessSource =
+    persistedFilterSettings.lichessSource === 'masters' ? 'masters' : 'lichess';
+  const initialDateRange: DateRange =
+    persistedFilterSettings.dateRange === '1y' || persistedFilterSettings.dateRange === '3y'
+      ? persistedFilterSettings.dateRange
+      : null;
+  const initialLichessArrowThreshold = clampInt(persistedFilterSettings.lichessArrowThreshold, 1, 100, 5);
+  const initialEngineDepth = clampInt(persistedFilterSettings.engineDepth, 6, 28, 16);
+  const initialSelectedSpeeds = (persistedFilterSettings.selectedSpeeds ?? []).filter((speed): speed is string =>
+    SPEEDS.includes(speed as (typeof SPEEDS)[number]),
+  );
+  const initialSelectedRatings = (persistedFilterSettings.selectedRatings ?? []).filter((rating): rating is number =>
+    RATINGS.includes(rating),
+  );
+
   const [trees, setTrees] = useState<Record<Side, MoveTree>>({
     white: createEmptyTree('white'),
     black: createEmptyTree('black'),
@@ -534,8 +578,8 @@ function App() {
     }
   });
   const [status, setStatus] = useState('Ready');
-  const [engineDepth, setEngineDepth] = useState(16);
-  const [engineDepthInput, setEngineDepthInput] = useState('16');
+  const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
+  const [engineDepthInput, setEngineDepthInput] = useState(String(initialEngineDepth));
   const [engineMultiPv, setEngineMultiPv] = useState(3);
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
@@ -545,14 +589,20 @@ function App() {
   const [lichessStatus, setLichessStatus] = useState('idle');
   const [showTreeArrows, setShowTreeArrows] = useState(true);
   const [showLichessArrows, setShowLichessArrows] = useState(true);
-  const [showLichessOnTreeMoves, setShowLichessOnTreeMoves] = useState(true);
+  const [showLichessOnTreeMoves, setShowLichessOnTreeMoves] = useState(
+    persistedFilterSettings.showLichessOnTreeMoves ?? true,
+  );
   const [isLichessFilterOpen, setIsLichessFilterOpen] = useState(false);
-  const [lichessSource, setLichessSource] = useState<LichessSource>('lichess');
-  const [dateRange, setDateRange] = useState<DateRange>(null);
-  const [lichessArrowThreshold, setLichessArrowThreshold] = useState(5);
-  const [lichessArrowThresholdInput, setLichessArrowThresholdInput] = useState('5');
-  const [selectedSpeeds, setSelectedSpeeds] = useState<string[]>(['blitz', 'rapid', 'classical']);
-  const [selectedRatings, setSelectedRatings] = useState<number[]>([1600, 1800, 2000, 2200]);
+  const [lichessSource, setLichessSource] = useState<LichessSource>(initialLichessSource);
+  const [dateRange, setDateRange] = useState<DateRange>(initialDateRange);
+  const [lichessArrowThreshold, setLichessArrowThreshold] = useState(initialLichessArrowThreshold);
+  const [lichessArrowThresholdInput, setLichessArrowThresholdInput] = useState(String(initialLichessArrowThreshold));
+  const [selectedSpeeds, setSelectedSpeeds] = useState<string[]>(
+    initialSelectedSpeeds.length > 0 ? initialSelectedSpeeds : ['blitz', 'rapid', 'classical'],
+  );
+  const [selectedRatings, setSelectedRatings] = useState<number[]>(
+    initialSelectedRatings.length > 0 ? initialSelectedRatings : [1600, 1800, 2000, 2200],
+  );
   const [undoStackBySide, setUndoStackBySide] = useState<Record<Side, UndoSnapshot[]>>({
     white: [],
     black: [],
@@ -669,6 +719,31 @@ function App() {
       // Ignore storage write errors.
     }
   }, [orientation]);
+
+  useEffect(() => {
+    try {
+      const payload: PersistedFilterSettings = {
+        lichessSource,
+        dateRange,
+        lichessArrowThreshold,
+        engineDepth,
+        selectedSpeeds,
+        selectedRatings,
+        showLichessOnTreeMoves,
+      };
+      window.localStorage.setItem(FILTER_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // Ignore storage write errors.
+    }
+  }, [
+    lichessSource,
+    dateRange,
+    lichessArrowThreshold,
+    engineDepth,
+    selectedSpeeds,
+    selectedRatings,
+    showLichessOnTreeMoves,
+  ]);
 
   useEffect(() => {
     setEngineDepthInput(String(engineDepth));
