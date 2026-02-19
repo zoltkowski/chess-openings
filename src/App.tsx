@@ -11,8 +11,8 @@ import '@lichess-org/chessground/assets/chessground.cburnett.css';
 import './App.css';
 
 type Side = 'white' | 'black';
-type LichessSource = 'lichess' | 'masters';
-type DateRange = '1y' | '3y' | null;
+type LichessSource = 'lichess' | 'masters' | 'player';
+type DateRange = '1m' | '3m' | '1y' | '3y' | '5y' | '10y' | '20y' | '30y' | '50y' | null;
 
 type MoveNode = {
   id: string;
@@ -70,7 +70,10 @@ type TrainingSession = {
 
 const START_FEN = 'start';
 const START_POS_FEN = new Chess().fen();
-const SPEEDS = ['bullet', 'blitz', 'rapid', 'classical'] as const;
+const FIXED_VARIANT = 'standard';
+const FIXED_SOURCE = 'analysis';
+const SPEEDS = ['bullet', 'blitz', 'rapid', 'classical', 'correspondence'] as const;
+const MODES = ['casual', 'rated'] as const;
 const RATINGS = [1200, 1400, 1600, 1800, 2000, 2200, 2500];
 const FIGURINES: Record<string, string> = {
   K: '♔',
@@ -93,11 +96,13 @@ const FILTER_SETTINGS_STORAGE_KEY = 'opening-filter-settings';
 
 type PersistedFilterSettings = {
   lichessSource?: LichessSource;
+  playerHandle?: string;
   dateRange?: DateRange;
   lichessArrowThreshold?: number;
   engineDepth?: number;
   selectedSpeeds?: string[];
   selectedRatings?: number[];
+  selectedModes?: string[];
   showLichessOnTreeMoves?: boolean;
 };
 
@@ -371,6 +376,120 @@ function formatAverageElo(move: LichessMove) {
   return `${Math.round(raw)}`;
 }
 
+function parseLastJsonObject<T>(raw: string): T | null {
+  const text = raw.trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    // Some Lichess explorer endpoints can stream multiple JSON snapshots in one response.
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let start = -1;
+  let lastParsed: T | null = null;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === '\\') {
+      if (inString) escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+      continue;
+    }
+    if (ch === '}') {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        const chunk = text.slice(start, i + 1);
+        try {
+          lastParsed = JSON.parse(chunk) as T;
+        } catch {
+          // Ignore malformed chunk and continue.
+        }
+        start = -1;
+      }
+    }
+  }
+
+  return lastParsed;
+}
+
+function extractJsonObjects<T>(raw: string): { objects: T[]; rest: string } {
+  if (!raw) return { objects: [], rest: '' };
+
+  const objects: T[] = [];
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let start = -1;
+  let lastEnd = -1;
+
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === '\\') {
+      if (inString) escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+      continue;
+    }
+
+    if (ch === '}') {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        const chunk = raw.slice(start, i + 1);
+        try {
+          objects.push(JSON.parse(chunk) as T);
+          lastEnd = i + 1;
+        } catch {
+          // Ignore malformed chunk and continue scanning.
+        }
+        start = -1;
+      }
+    }
+  }
+
+  const rest =
+    depth > 0 && start >= 0
+      ? raw.slice(start)
+      : lastEnd >= 0
+        ? raw.slice(lastEnd)
+        : raw.length > 16_384
+          ? raw.slice(-8192)
+          : raw;
+
+  return { objects, rest };
+}
+
 function toFigurineSan(san: string) {
   return san
     .trim()
@@ -547,9 +666,21 @@ function Board(props: {
 function App() {
   const [persistedFilterSettings] = useState<PersistedFilterSettings>(() => loadPersistedFilterSettings());
   const initialLichessSource: LichessSource =
-    persistedFilterSettings.lichessSource === 'masters' ? 'masters' : 'lichess';
+    persistedFilterSettings.lichessSource === 'masters' || persistedFilterSettings.lichessSource === 'player'
+      ? persistedFilterSettings.lichessSource
+      : 'lichess';
+  const initialPlayerHandle =
+    typeof persistedFilterSettings.playerHandle === 'string' ? persistedFilterSettings.playerHandle : '';
   const initialDateRange: DateRange =
-    persistedFilterSettings.dateRange === '1y' || persistedFilterSettings.dateRange === '3y'
+    persistedFilterSettings.dateRange === '1m' ||
+    persistedFilterSettings.dateRange === '3m' ||
+    persistedFilterSettings.dateRange === '1y' ||
+    persistedFilterSettings.dateRange === '5y' ||
+    persistedFilterSettings.dateRange === '10y' ||
+    persistedFilterSettings.dateRange === '20y' ||
+    persistedFilterSettings.dateRange === '30y' ||
+    persistedFilterSettings.dateRange === '50y' ||
+    persistedFilterSettings.dateRange === '3y'
       ? persistedFilterSettings.dateRange
       : null;
   const initialLichessArrowThreshold = clampInt(persistedFilterSettings.lichessArrowThreshold, 0, 100, 5);
@@ -559,6 +690,9 @@ function App() {
   );
   const initialSelectedRatings = (persistedFilterSettings.selectedRatings ?? []).filter((rating): rating is number =>
     RATINGS.includes(rating),
+  );
+  const initialSelectedModes = (persistedFilterSettings.selectedModes ?? []).filter((mode): mode is string =>
+    MODES.includes(mode as (typeof MODES)[number]),
   );
 
   const [trees, setTrees] = useState<Record<Side, MoveTree>>({
@@ -594,14 +728,18 @@ function App() {
   );
   const [isLichessFilterOpen, setIsLichessFilterOpen] = useState(false);
   const [lichessSource, setLichessSource] = useState<LichessSource>(initialLichessSource);
+  const [playerHandle, setPlayerHandle] = useState(initialPlayerHandle);
   const [dateRange, setDateRange] = useState<DateRange>(initialDateRange);
   const [lichessArrowThreshold, setLichessArrowThreshold] = useState(initialLichessArrowThreshold);
   const [lichessArrowThresholdInput, setLichessArrowThresholdInput] = useState(String(initialLichessArrowThreshold));
   const [selectedSpeeds, setSelectedSpeeds] = useState<string[]>(
-    initialSelectedSpeeds.length > 0 ? initialSelectedSpeeds : ['blitz', 'rapid', 'classical'],
+    initialSelectedSpeeds.length > 0 ? initialSelectedSpeeds : [...SPEEDS],
   );
   const [selectedRatings, setSelectedRatings] = useState<number[]>(
     initialSelectedRatings.length > 0 ? initialSelectedRatings : [1600, 1800, 2000, 2200],
+  );
+  const [selectedModes, setSelectedModes] = useState<string[]>(
+    initialSelectedModes.length > 0 ? initialSelectedModes : [...MODES],
   );
   const [undoStackBySide, setUndoStackBySide] = useState<Record<Side, UndoSnapshot[]>>({
     white: [],
@@ -729,11 +867,13 @@ function App() {
     try {
       const payload: PersistedFilterSettings = {
         lichessSource,
+        playerHandle,
         dateRange,
         lichessArrowThreshold,
         engineDepth,
         selectedSpeeds,
         selectedRatings,
+        selectedModes,
         showLichessOnTreeMoves,
       };
       window.localStorage.setItem(FILTER_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
@@ -742,11 +882,13 @@ function App() {
     }
   }, [
     lichessSource,
+    playerHandle,
     dateRange,
     lichessArrowThreshold,
     engineDepth,
     selectedSpeeds,
     selectedRatings,
+    selectedModes,
     showLichessOnTreeMoves,
   ]);
 
@@ -899,41 +1041,165 @@ function App() {
     const controller = new AbortController();
 
     const run = async () => {
-      setLichessStatus('loading');
+      if (lichessSource === 'player' && playerHandle.trim().length === 0) {
+        setLichessData(null);
+        setLichessStatus('idle');
+        return;
+      }
+
       const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
       const params = new URLSearchParams({
         fen,
-        variant: 'standard',
-        moves: '30',
+        variant: FIXED_VARIANT,
       });
-      if (lichessSource === 'lichess') {
+      params.set('color', activeSide);
+      if (lichessSource === 'lichess' || lichessSource === 'player') {
         if (selectedSpeeds.length) params.set('speeds', selectedSpeeds.join(','));
+      }
+      if (lichessSource === 'lichess') {
         if (selectedRatings.length) params.set('ratings', selectedRatings.join(','));
       }
+      if (lichessSource === 'player') {
+        params.set('player', playerHandle.trim());
+        params.set('play', '');
+        params.set('modes', (selectedModes.length > 0 ? selectedModes : [...MODES]).join(','));
+        params.set('source', FIXED_SOURCE);
+      }
 
-      if (dateRange) {
+      const normalizedDateRange: DateRange =
+        lichessSource === 'player'
+          ? dateRange
+          : lichessSource === 'masters'
+            ? dateRange === '1m' || dateRange === '3m'
+              ? null
+              : dateRange
+            : dateRange === '1m' ||
+                dateRange === '3m' ||
+                dateRange === '10y' ||
+                dateRange === '20y' ||
+                dateRange === '30y' ||
+                dateRange === '50y'
+            ? null
+            : dateRange;
+      const effectiveDateRange: DateRange = normalizedDateRange;
+      if (effectiveDateRange) {
         const now = new Date();
-        const until = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-        const yearsBack = dateRange === '1y' ? 1 : 3;
         const sinceDate = new Date(now);
-        sinceDate.setFullYear(now.getFullYear() - yearsBack);
-        const since = `${sinceDate.getFullYear()}-${String(sinceDate.getMonth() + 1).padStart(2, '0')}`;
+        if (effectiveDateRange === '1m') {
+          sinceDate.setMonth(now.getMonth() - 1);
+        } else if (effectiveDateRange === '3m') {
+          sinceDate.setMonth(now.getMonth() - 3);
+        } else if (effectiveDateRange === '1y') {
+          sinceDate.setFullYear(now.getFullYear() - 1);
+        } else if (effectiveDateRange === '5y') {
+          sinceDate.setFullYear(now.getFullYear() - 5);
+        } else if (effectiveDateRange === '10y') {
+          sinceDate.setFullYear(now.getFullYear() - 10);
+        } else if (effectiveDateRange === '20y') {
+          sinceDate.setFullYear(now.getFullYear() - 20);
+        } else if (effectiveDateRange === '30y') {
+          sinceDate.setFullYear(now.getFullYear() - 30);
+        } else if (effectiveDateRange === '50y') {
+          sinceDate.setFullYear(now.getFullYear() - 50);
+        } else {
+          sinceDate.setFullYear(now.getFullYear() - 3);
+        }
+        const since =
+          lichessSource === 'masters'
+            ? `${sinceDate.getFullYear()}`
+            : `${sinceDate.getFullYear()}-${String(sinceDate.getMonth() + 1).padStart(2, '0')}`;
+        const until =
+          lichessSource === 'masters'
+            ? `${now.getFullYear()}`
+            : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
         params.set('since', since);
         params.set('until', until);
       }
 
+      const endpoint = lichessSource === 'player' ? 'player' : lichessSource;
+      const url = `https://explorer.lichess.ovh/${endpoint}?${params.toString()}`;
+
+      setLichessStatus('loading');
+      const requestTimeoutMs = 120000;
+      const idleTimeoutMs = 20000;
+      let abortedByIdle = false;
+      const requestTimeout = window.setTimeout(() => {
+        if (!controller.signal.aborted) {
+          controller.abort();
+        }
+      }, requestTimeoutMs);
+      let idleTimeout = window.setTimeout(() => {
+        if (!controller.signal.aborted) {
+          abortedByIdle = true;
+          controller.abort();
+        }
+      }, idleTimeoutMs);
+      const resetIdleTimeout = () => {
+        window.clearTimeout(idleTimeout);
+        idleTimeout = window.setTimeout(() => {
+          if (!controller.signal.aborted) {
+            abortedByIdle = true;
+            controller.abort();
+          }
+        }, idleTimeoutMs);
+      };
+
+      let latestData: LichessResponse | null = null;
       try {
-        const res = await fetch(`https://explorer.lichess.ovh/${lichessSource}?${params.toString()}`, {
+        const res = await fetch(url, {
           signal: controller.signal,
         });
         if (!res.ok) throw new Error('Lichess request failed');
-        const data = (await res.json()) as LichessResponse;
-        setLichessData(data);
+        const body = res.body;
+        if (body) {
+          const reader = body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          resetIdleTimeout();
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            resetIdleTimeout();
+            buffer += decoder.decode(value, { stream: true });
+            const parsed = extractJsonObjects<LichessResponse>(buffer);
+            buffer = parsed.rest;
+            if (parsed.objects.length > 0) {
+              latestData = parsed.objects[parsed.objects.length - 1];
+              setLichessData(latestData);
+            }
+          }
+
+          buffer += decoder.decode();
+          if (!latestData) {
+            const data = parseLastJsonObject<LichessResponse>(buffer);
+            if (data) {
+              latestData = data;
+              setLichessData(data);
+            }
+          }
+        } else {
+          const rawBody = await res.text();
+          const data = parseLastJsonObject<LichessResponse>(rawBody);
+          if (data) {
+            latestData = data;
+            setLichessData(data);
+          }
+        }
+
+        if (!latestData) throw new Error('Invalid Lichess payload');
         setLichessStatus('done');
       } catch {
-        if (!controller.signal.aborted) {
+        if (controller.signal.aborted && abortedByIdle && latestData) {
+          setLichessStatus('done');
+        } else if (!controller.signal.aborted) {
+          setLichessStatus('error');
+        } else {
           setLichessStatus('error');
         }
+      } finally {
+        window.clearTimeout(requestTimeout);
+        window.clearTimeout(idleTimeout);
       }
     };
 
@@ -942,7 +1208,16 @@ function App() {
       controller.abort();
       window.clearTimeout(timeout);
     };
-  }, [selectedNode.fen, selectedSpeeds, selectedRatings, dateRange, lichessSource]);
+  }, [
+    selectedNode.fen,
+    selectedSpeeds,
+    selectedRatings,
+    selectedModes,
+    dateRange,
+    lichessSource,
+    playerHandle,
+    activeSide,
+  ]);
 
   const clearTrainingHint = () => {
     setTrainingSession((prev) =>
@@ -1268,7 +1543,12 @@ function App() {
         <section className="left-panel">
           <div className={`board-row ${isTrainingActive ? 'training-mode' : ''}`}>
             {!isTrainingActive && <aside className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}>
-              {visibleLichessStatus && <div className="status">{visibleLichessStatus}</div>}
+              {(visibleLichessStatus || lichessStatus === 'loading') && (
+                <div className="status lichess-status-row">
+                  {lichessStatus === 'loading' && <span className="spinner" aria-hidden="true" />}
+                  <span>{visibleLichessStatus || 'loading'}</span>
+                </div>
+              )}
               {lichessData && (
                 <>
                   <div className="table">
@@ -1660,13 +1940,10 @@ function App() {
       {isLichessFilterOpen && (
         <div className="modal-backdrop" onClick={() => setIsLichessFilterOpen(false)}>
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <div className="card-head">
-              <h2>Lichess Filters</h2>
-            </div>
             <div className="filters-grid">
               <label>
                 Database
-                <span className="toggle-group">
+                <span className="toggle-group database-toggle">
                   <button
                     type="button"
                     className={lichessSource === 'masters' ? 'active' : ''}
@@ -1674,11 +1951,47 @@ function App() {
                   >
                     Masters
                   </button>
+                  <button
+                    type="button"
+                    className={lichessSource === 'player' ? 'active' : ''}
+                    onClick={() => setLichessSource((prev) => (prev === 'player' ? 'lichess' : 'player'))}
+                  >
+                    Player
+                  </button>
                 </span>
+                {lichessSource === 'player' && (
+                  <span className="player-handle-row">
+                    <input
+                      className="player-handle-input"
+                      type="text"
+                      value={playerHandle}
+                      onChange={(e) => setPlayerHandle(e.target.value)}
+                      placeholder="Lichess handle"
+                    />
+                  </span>
+                )}
               </label>
               <label>
                 Date range
-                <span className="toggle-group">
+                <span className="toggle-group date-range-toggle">
+                  {lichessSource === 'player' && (
+                    <button
+                      type="button"
+                      className={dateRange === '1m' ? 'active' : ''}
+                      onClick={() => setDateRange((prev) => (prev === '1m' ? null : '1m'))}
+                    >
+                      1M
+                    </button>
+                  )}
+                  {lichessSource === 'player' && (
+                    <button
+                      type="button"
+                      className={dateRange === '3m' ? 'active' : ''}
+                      onClick={() => setDateRange((prev) => (prev === '3m' ? null : '3m'))}
+                    >
+                      3M
+                    </button>
+                  )}
                   <button
                     type="button"
                     className={dateRange === '1y' ? 'active' : ''}
@@ -1693,6 +2006,60 @@ function App() {
                   >
                     3Y
                   </button>
+                  {lichessSource !== 'masters' && (
+                    <button
+                      type="button"
+                      className={dateRange === '5y' ? 'active' : ''}
+                      onClick={() => setDateRange((prev) => (prev === '5y' ? null : '5y'))}
+                    >
+                      5Y
+                    </button>
+                  )}
+                  {lichessSource === 'player' && (
+                    <button
+                      type="button"
+                      className={dateRange === '10y' ? 'active' : ''}
+                      onClick={() => setDateRange((prev) => (prev === '10y' ? null : '10y'))}
+                    >
+                      10Y
+                    </button>
+                  )}
+                  {lichessSource === 'masters' && (
+                    <button
+                      type="button"
+                      className={dateRange === '10y' ? 'active' : ''}
+                      onClick={() => setDateRange((prev) => (prev === '10y' ? null : '10y'))}
+                    >
+                      10Y
+                    </button>
+                  )}
+                  {lichessSource === 'masters' && (
+                    <button
+                      type="button"
+                      className={dateRange === '20y' ? 'active' : ''}
+                      onClick={() => setDateRange((prev) => (prev === '20y' ? null : '20y'))}
+                    >
+                      20Y
+                    </button>
+                  )}
+                  {lichessSource === 'masters' && (
+                    <button
+                      type="button"
+                      className={dateRange === '30y' ? 'active' : ''}
+                      onClick={() => setDateRange((prev) => (prev === '30y' ? null : '30y'))}
+                    >
+                      30Y
+                    </button>
+                  )}
+                  {lichessSource === 'masters' && (
+                    <button
+                      type="button"
+                      className={dateRange === '50y' ? 'active' : ''}
+                      onClick={() => setDateRange((prev) => (prev === '50y' ? null : '50y'))}
+                    >
+                      50Y
+                    </button>
+                  )}
                 </span>
               </label>
               <label>
@@ -1737,7 +2104,8 @@ function App() {
               </label>
             </div>
 
-            {lichessSource === 'lichess' && <div className="checkbox-grid">
+            {(lichessSource === 'lichess' || lichessSource === 'player') && (
+              <div className="checkbox-grid">
               <div>
                 <strong>Speeds</strong>
                 {SPEEDS.map((speed) => (
@@ -1756,24 +2124,47 @@ function App() {
                 ))}
               </div>
 
-              <div>
-                <strong>Ratings</strong>
-                {RATINGS.map((rating) => (
-                  <label key={rating} className="inline-check">
-                    <input
-                      type="checkbox"
-                      checked={selectedRatings.includes(rating)}
-                      onChange={(e) => {
-                        setSelectedRatings((prev) =>
-                          e.target.checked ? [...prev, rating] : prev.filter((item) => item !== rating),
-                        );
-                      }}
-                    />
-                    {rating}+
-                  </label>
-                ))}
-              </div>
-            </div>}
+              {lichessSource === 'lichess' && (
+                <div>
+                  <strong>Ratings</strong>
+                  {RATINGS.map((rating) => (
+                    <label key={rating} className="inline-check">
+                      <input
+                        type="checkbox"
+                        checked={selectedRatings.includes(rating)}
+                        onChange={(e) => {
+                          setSelectedRatings((prev) =>
+                            e.target.checked ? [...prev, rating] : prev.filter((item) => item !== rating),
+                          );
+                        }}
+                      />
+                      {rating}+
+                    </label>
+                  ))}
+                </div>
+              )}
+
+              {lichessSource === 'player' && (
+                <div>
+                  <strong>Modes</strong>
+                  {MODES.map((mode) => (
+                    <label key={mode} className="inline-check">
+                      <input
+                        type="checkbox"
+                        checked={selectedModes.includes(mode)}
+                        onChange={(e) => {
+                          setSelectedModes((prev) =>
+                            e.target.checked ? [...prev, mode] : prev.filter((item) => item !== mode),
+                          );
+                        }}
+                      />
+                      {mode}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            )}
             <label className="inline-check">
               <input
                 type="checkbox"
