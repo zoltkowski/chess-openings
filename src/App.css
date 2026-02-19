@@ -1,0 +1,176 @@
+:root {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  color: #111827;
+  background: #eef2f7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.app {
+  padding: 1rem;
+}
+
+.topbar {
+  margin-bottom: 1rem;
+}
+
+.topbar h1 {
+  margin: 0 0 0.75rem;
+}
+
+.controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.controls-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.status {
+  color: #334155;
+  font-size: 0.9rem;
+}
+
+.layout {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(640px, 1fr) 360px;
+}
+
+.left-panel {
+  display: grid;
+  gap: 1rem;
+}
+
+.card {
+  background: #ffffff;
+  border: 1px solid #d5dce8;
+  border-radius: 10px;
+  padding: 0.8rem;
+}
+
+.card h2 {
+  margin-top: 0;
+  margin-bottom: 0.7rem;
+  font-size: 1.05rem;
+}
+
+.board {
+  width: min(100%, 760px);
+  aspect-ratio: 1 / 1;
+  margin: 0 auto;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.14);
+}
+
+.variant-row,
+.table-row,
+.move-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.table-row {
+  justify-content: space-between;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid #eef1f5;
+}
+
+.table-row span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.danger {
+  color: #b91c1c;
+}
+
+.filters-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 0.5rem;
+}
+
+.filters-grid label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.7rem;
+  margin: 0.6rem 0;
+}
+
+.inline-check {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.25rem;
+}
+
+.right-panel {
+  align-self: start;
+  position: sticky;
+  top: 0.75rem;
+  max-height: calc(100vh - 1.5rem);
+  overflow: auto;
+}
+
+button {
+  border: 1px solid #c8d3e6;
+  border-radius: 6px;
+  background: #f8fbff;
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #e9f1ff;
+}
+
+input,
+select {
+  border: 1px solid #c8d3e6;
+  border-radius: 6px;
+  padding: 0.3rem 0.45rem;
+}
+
+@media (max-width: 1200px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .right-panel {
+    position: static;
+    max-height: none;
+  }
+
+  .board {
+    width: min(100%, 620px);
+  }
+}
