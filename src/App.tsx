@@ -543,6 +543,7 @@ function App() {
   const [engineRunning, setEngineRunning] = useState(false);
   const [lichessData, setLichessData] = useState<LichessResponse | null>(null);
   const [lichessStatus, setLichessStatus] = useState('idle');
+  const [showTreeArrows, setShowTreeArrows] = useState(true);
   const [showLichessArrows, setShowLichessArrows] = useState(true);
   const [showLichessOnTreeMoves, setShowLichessOnTreeMoves] = useState(true);
   const [isLichessFilterOpen, setIsLichessFilterOpen] = useState(false);
@@ -581,10 +582,12 @@ function App() {
   );
 
   const autoArrows = useMemo<DrawShape[]>(() => {
-    const treeArrows = childNodes
-      .map((node) => parseUciMove(node.moveUci))
-      .filter((value): value is [Key, Key] => Boolean(value))
-      .map(([orig, dest]) => ({ orig, dest, brush: 'green' }));
+    const treeArrows = showTreeArrows
+      ? childNodes
+          .map((node) => parseUciMove(node.moveUci))
+          .filter((value): value is [Key, Key] => Boolean(value))
+          .map(([orig, dest]) => ({ orig, dest, brush: 'green' }))
+      : [];
 
     const treeChildUcis = new Set(
       childNodes.map((node) => node.moveUci).filter((uci): uci is string => Boolean(uci)),
@@ -648,6 +651,7 @@ function App() {
     return softenOverlappingArrows([...treeArrows, ...lichessArrows, ...engineArrows]);
   }, [
     childNodes,
+    showTreeArrows,
     lichessData,
     lichessArrowThreshold,
     engineLines,
@@ -1140,17 +1144,6 @@ function App() {
         <section className="left-panel">
           <div className={`board-row ${isTrainingActive ? 'training-mode' : ''}`}>
             {!isTrainingActive && <aside className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}>
-              <div className="card-head">
-                <span />
-                <label className="inline-check">
-                  <input
-                    type="checkbox"
-                    checked={showLichessArrows}
-                    onChange={(e) => setShowLichessArrows(e.target.checked)}
-                    aria-label="Toggle Lichess arrows"
-                  />
-                </label>
-              </div>
               {visibleLichessStatus && <div className="status">{visibleLichessStatus}</div>}
               {lichessData && (
                 <>
@@ -1205,14 +1198,6 @@ function App() {
                           +
                         </button>
                       </span>
-                      <label className="inline-check stockfish-arrow-toggle">
-                        <input
-                          type="checkbox"
-                          checked={showStockfishArrows}
-                          onChange={(e) => setShowStockfishArrows(e.target.checked)}
-                          aria-label="Toggle Stockfish arrows"
-                        />
-                      </label>
                       {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
                     </div>
                     <div className="table">
@@ -1365,14 +1350,6 @@ function App() {
                     +
                   </button>
                 </span>
-                <label className="inline-check stockfish-arrow-toggle">
-                  <input
-                    type="checkbox"
-                    checked={showStockfishArrows}
-                    onChange={(e) => setShowStockfishArrows(e.target.checked)}
-                    aria-label="Toggle Stockfish arrows"
-                  />
-                </label>
                 {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
               </div>
               <div className="table">
@@ -1408,6 +1385,35 @@ function App() {
                 <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0 || isTrainingActive}>
                   Undo
                 </button>
+                <div className="arrow-toggle-group">
+                  <button
+                    type="button"
+                    className={`icon-toggle-btn ${showLichessArrows ? 'active' : ''}`}
+                    onClick={() => setShowLichessArrows((prev) => !prev)}
+                    aria-label="Toggle Lichess arrows"
+                    title="Toggle Lichess arrows"
+                  >
+                    <DbIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className={`icon-toggle-btn ${showStockfishArrows ? 'active' : ''}`}
+                    onClick={() => setShowStockfishArrows((prev) => !prev)}
+                    aria-label="Toggle Stockfish arrows"
+                    title="Toggle Stockfish arrows"
+                  >
+                    <ComputerIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className={`icon-toggle-btn ${showTreeArrows ? 'active' : ''}`}
+                    onClick={() => setShowTreeArrows((prev) => !prev)}
+                    aria-label="Toggle tree arrows"
+                    title="Toggle tree arrows"
+                  >
+                    <MoveIcon />
+                  </button>
+                </div>
               </div>
               {path.length > 1 && (
                 <div className="move-table-wrap">
