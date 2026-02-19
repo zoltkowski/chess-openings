@@ -381,6 +381,8 @@ select {
   min-height: 0;
   max-height: 100%;
   overflow: auto;
+  position: relative;
+  padding-bottom: 3rem;
 }
 
 .stockfish-inline {
@@ -434,6 +436,13 @@ select {
 
 .portrait-filters-btn {
   margin-left: auto;
+}
+
+.left-panel-gear {
+  position: absolute;
+  left: 0.8rem;
+  bottom: 0.8rem;
+  z-index: 2;
 }
 
 .stockfish-inline .table-row span:first-child {

@@ -1327,6 +1327,15 @@ function App() {
                   </div>
                 </>
               )}
+              <button
+                className="gear-btn left-panel-gear desktop-only"
+                type="button"
+                aria-label="Filters"
+                title="Filters"
+                onClick={() => setIsLichessFilterOpen(true)}
+              >
+                ⚙
+              </button>
             </aside>}
 
             <div className="board-center">
@@ -1512,6 +1521,15 @@ function App() {
                 <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0 || isTrainingActive}>
                   Undo
                 </button>
+                {showTrainButton && (
+                  <button
+                    className="desktop-only"
+                    type="button"
+                    onClick={() => (isTrainingActive ? stopTraining() : startTraining())}
+                  >
+                    {isTrainingActive ? 'Stop train' : 'Train'}
+                  </button>
+                )}
                 <div className="arrow-toggle-group">
                   <button
                     type="button"
