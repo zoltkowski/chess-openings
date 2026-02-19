@@ -1075,7 +1075,6 @@ function App() {
               : dateRange
             : dateRange === '1m' ||
                 dateRange === '3m' ||
-                dateRange === '10y' ||
                 dateRange === '20y' ||
                 dateRange === '30y' ||
                 dateRange === '50y'
@@ -2015,7 +2014,7 @@ function App() {
                       5Y
                     </button>
                   )}
-                  {lichessSource === 'player' && (
+                  {lichessSource !== 'masters' && (
                     <button
                       type="button"
                       className={dateRange === '10y' ? 'active' : ''}
