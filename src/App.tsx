@@ -78,10 +78,6 @@ const ARROW_BRUSHES: DrawBrushes = {
   blueSoft: { key: 'bs', color: '#003088', opacity: 0.5, lineWidth: 10 },
   yellowSoft: { key: 'ys', color: '#e68f00', opacity: 0.5, lineWidth: 10 },
 };
-const BOOK_STORAGE_KEY: Record<Side, string> = {
-  white: 'opening-book-white-pgn',
-  black: 'opening-book-black-pgn',
-};
 
 function createEmptyTree(side: Side): MoveTree {
   const rootId = `${side}-0`;
@@ -99,18 +95,6 @@ function createEmptyTree(side: Side): MoveTree {
       },
     },
   };
-}
-
-function readBookFromStorage(side: Side) {
-  try {
-    return window.localStorage.getItem(BOOK_STORAGE_KEY[side]) ?? '';
-  } catch {
-    return '';
-  }
-}
-
-function writeBookToStorage(side: Side, pgn: string) {
-  window.localStorage.setItem(BOOK_STORAGE_KEY[side], pgn);
 }
 
 function uciFromMove(move: Move) {
@@ -498,8 +482,6 @@ function App() {
   const lineCacheRef = useRef<Map<number, EngineLine>>(new Map());
   const previousFenRef = useRef<string>(START_FEN);
   const importInputRef = useRef<HTMLInputElement | null>(null);
-  const autosaveReadyRef = useRef(false);
-  const lastSavedPgnRef = useRef<Record<Side, string>>({ white: '', black: '' });
 
   const activeSide: Side = orientation;
   const tree = trees[activeSide];
@@ -595,20 +577,12 @@ function App() {
     const loadBooks = async () => {
       setStatus('Loading PGN books...');
       try {
-        const whitePgn = readBookFromStorage('white');
-        const blackPgn = readBookFromStorage('black');
-
-        const whiteTree = parsePgnToTree('white', whitePgn);
-        const blackTree = parsePgnToTree('black', blackPgn);
+        const whiteTree = createEmptyTree('white');
+        const blackTree = createEmptyTree('black');
 
         setTrees({ white: whiteTree, black: blackTree });
         setSelectedNodeBySide({ white: whiteTree.rootId, black: blackTree.rootId });
         setUndoStackBySide({ white: [], black: [] });
-        lastSavedPgnRef.current = {
-          white: whitePgn,
-          black: blackPgn,
-        };
-        autosaveReadyRef.current = true;
         setStatus('Ready');
       } catch {
         setStatus('Failed to load books');
@@ -718,7 +692,6 @@ function App() {
         fen,
         variant: 'standard',
         moves: '30',
-        source: lichessSource,
       });
       if (lichessSource === 'lichess') {
         if (selectedSpeeds.length) params.set('speeds', selectedSpeeds.join(','));
@@ -737,7 +710,9 @@ function App() {
       }
 
       try {
-        const res = await fetch(`/api/lichess?${params.toString()}`, { signal: controller.signal });
+        const res = await fetch(`https://explorer.lichess.ovh/${lichessSource}?${params.toString()}`, {
+          signal: controller.signal,
+        });
         if (!res.ok) throw new Error('Lichess request failed');
         const data = (await res.json()) as LichessResponse;
         setLichessData(data);
@@ -755,32 +730,6 @@ function App() {
       window.clearTimeout(timeout);
     };
   }, [selectedNode.fen, selectedSpeeds, selectedRatings, dateRange, lichessSource]);
-
-  useEffect(() => {
-    if (!autosaveReadyRef.current) return;
-
-    const timeout = window.setTimeout(async () => {
-      const nextWhitePgn = exportTreeToPgn(trees.white);
-      const nextBlackPgn = exportTreeToPgn(trees.black);
-
-      const changedSides: Side[] = [];
-      if (nextWhitePgn !== lastSavedPgnRef.current.white) changedSides.push('white');
-      if (nextBlackPgn !== lastSavedPgnRef.current.black) changedSides.push('black');
-      if (changedSides.length === 0) return;
-
-      try {
-        for (const side of changedSides) {
-          const pgn = side === 'white' ? nextWhitePgn : nextBlackPgn;
-          writeBookToStorage(side, pgn);
-          lastSavedPgnRef.current[side] = pgn;
-        }
-      } catch {
-        setStatus('Auto-save failed');
-      }
-    }, 350);
-
-    return () => window.clearTimeout(timeout);
-  }, [trees]);
 
   const makeMove = (orig: Key, dest: Key) => {
     const currentTree = trees[activeSide];
@@ -839,19 +788,6 @@ function App() {
     }));
   };
 
-  const saveBook = async () => {
-    const pgn = exportTreeToPgn(tree);
-    setStatus(`Saving ${activeSide} book...`);
-
-    try {
-      writeBookToStorage(activeSide, pgn);
-      lastSavedPgnRef.current[activeSide] = pgn;
-      setStatus(`${activeSide} book saved`);
-    } catch {
-      setStatus(`Failed to save ${activeSide} book`);
-    }
-  };
-
   const exportPgn = () => {
     const pgn = exportTreeToPgn(tree);
     const blob = new Blob([pgn], { type: 'application/x-chess-pgn;charset=utf-8' });
@@ -876,8 +812,6 @@ function App() {
       setTrees((prev) => ({ ...prev, [activeSide]: nextTree }));
       setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: nextTree.rootId }));
       setUndoStackBySide((prev) => ({ ...prev, [activeSide]: [] }));
-      writeBookToStorage(activeSide, pgn);
-      lastSavedPgnRef.current[activeSide] = pgn;
       setStatus(`Imported ${activeSide} PGN`);
     } catch {
       setStatus('Import failed');
@@ -1169,14 +1103,6 @@ function App() {
                 }}
               >
                 Rotate board ({activeSide} repertoire)
-              </button>
-              <button
-                onClick={() => {
-                  void saveBook();
-                  setIsOptionsOpen(false);
-                }}
-              >
-                Save {activeSide} PGN
               </button>
               <button
                 onClick={() => {
