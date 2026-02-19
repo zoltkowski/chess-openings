@@ -403,6 +403,7 @@ function Board(props: {
     if (!containerRef.current) return;
 
     apiRef.current = Chessground(containerRef.current, {
+      blockTouchScroll: true,
       movable: {
         color: 'both',
         free: true,
@@ -423,6 +424,7 @@ function Board(props: {
       fen: boardFen(fen),
       orientation,
       turnColor: toTurnColor(fen),
+      blockTouchScroll: true,
       movable: {
         color: 'both',
         free: false,

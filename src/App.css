@@ -20,10 +20,15 @@ select {
 
 .app {
   padding: 1rem;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .topbar {
   margin-bottom: 1rem;
+  flex-shrink: 0;
 }
 
 .topbar-row {
@@ -83,11 +88,17 @@ select {
 
 .layout {
   display: block;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .left-panel {
   display: grid;
   gap: 1rem;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .board-row {
@@ -95,6 +106,8 @@ select {
   grid-template-columns: 460px minmax(520px, 1fr) 430px;
   gap: 1rem;
   align-items: start;
+  height: 100%;
+  min-height: 0;
 }
 
 .card {
@@ -117,11 +130,13 @@ select {
   border-radius: 10px;
   overflow: hidden;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.14);
+  touch-action: none;
 }
 
 .board-center {
   display: grid;
   gap: 0.55rem;
+  min-height: 0;
 }
 
 .board-meta {
@@ -290,13 +305,13 @@ select {
 
 .move-list {
   align-self: stretch;
-  max-height: min(80vh, 760px);
+  height: 100%;
   overflow: auto;
 }
 
 .lichess-panel {
   align-self: stretch;
-  max-height: min(80vh, 760px);
+  height: 100%;
   overflow: auto;
 }
 
@@ -412,6 +427,8 @@ select {
 @media (max-width: 1200px) {
   .board-row {
     grid-template-columns: 1fr;
+    height: auto;
+    overflow: hidden;
   }
 
   .board {
@@ -420,10 +437,12 @@ select {
 
   .move-list {
     max-height: none;
+    height: auto;
   }
 
   .lichess-panel {
     max-height: none;
+    height: auto;
   }
 
   .lichess-panel .table-row span:first-child {
