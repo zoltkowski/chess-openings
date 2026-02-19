@@ -12,7 +12,7 @@ import './App.css';
 
 type Side = 'white' | 'black';
 type LichessSource = 'lichess' | 'masters';
-type DateRange = '1y' | '3y' | 'all';
+type DateRange = '1y' | '2y' | 'all';
 
 type MoveNode = {
   id: string;
@@ -43,6 +43,8 @@ type LichessMove = {
   white: number;
   draws: number;
   black: number;
+  averageRating?: number;
+  averageElo?: number;
 };
 
 type LichessResponse = {
@@ -273,6 +275,12 @@ function percentValue(value: number, total: number) {
   return (value / total) * 100;
 }
 
+function formatAverageElo(move: LichessMove) {
+  const raw = move.averageRating ?? move.averageElo;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return '-';
+  return `${Math.round(raw)}`;
+}
+
 function toFigurineSan(san: string) {
   return san
     .trim()
@@ -465,6 +473,7 @@ function App() {
   });
   const [status, setStatus] = useState('Ready');
   const [engineDepth, setEngineDepth] = useState(16);
+  const [engineDepthInput, setEngineDepthInput] = useState('16');
   const [engineMultiPv, setEngineMultiPv] = useState(3);
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
@@ -478,6 +487,7 @@ function App() {
   const [lichessSource, setLichessSource] = useState<LichessSource>('lichess');
   const [dateRange, setDateRange] = useState<DateRange>('all');
   const [lichessArrowThreshold, setLichessArrowThreshold] = useState(5);
+  const [lichessArrowThresholdInput, setLichessArrowThresholdInput] = useState('5');
   const [selectedSpeeds, setSelectedSpeeds] = useState<string[]>(['blitz', 'rapid', 'classical']);
   const [selectedRatings, setSelectedRatings] = useState<number[]>([1600, 1800, 2000, 2200]);
   const [undoStackBySide, setUndoStackBySide] = useState<Record<Side, UndoSnapshot[]>>({
@@ -591,6 +601,14 @@ function App() {
       // Ignore storage write errors.
     }
   }, [orientation]);
+
+  useEffect(() => {
+    setEngineDepthInput(String(engineDepth));
+  }, [engineDepth]);
+
+  useEffect(() => {
+    setLichessArrowThresholdInput(String(lichessArrowThreshold));
+  }, [lichessArrowThreshold]);
 
   useEffect(() => {
     const loadBooks = async () => {
@@ -720,7 +738,7 @@ function App() {
       if (dateRange !== 'all') {
         const now = new Date();
         const until = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-        const yearsBack = dateRange === '1y' ? 1 : 3;
+        const yearsBack = dateRange === '1y' ? 1 : 2;
         const sinceDate = new Date(now);
         sinceDate.setFullYear(now.getFullYear() - yearsBack);
         const since = `${sinceDate.getFullYear()}-${String(sinceDate.getMonth() + 1).padStart(2, '0')}`;
@@ -913,6 +931,22 @@ function App() {
     setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: snapshot.selectedNodeId }));
   };
 
+  const commitMovesThresholdInput = () => {
+    const raw = lichessArrowThresholdInput.trim();
+    const parsed = Number.parseInt(raw, 10);
+    const nextValue = Number.isFinite(parsed) ? Math.min(100, Math.max(1, parsed)) : 5;
+    setLichessArrowThreshold(nextValue);
+    setLichessArrowThresholdInput(String(nextValue));
+  };
+
+  const commitEngineDepthInput = () => {
+    const raw = engineDepthInput.trim();
+    const parsed = Number.parseInt(raw, 10);
+    const nextValue = Number.isFinite(parsed) ? Math.min(28, Math.max(6, parsed)) : 16;
+    setEngineDepth(nextValue);
+    setEngineDepthInput(String(nextValue));
+  };
+
   const renderMoveCell = (node?: MoveNode) => {
     if (!node) return '';
     return (
@@ -963,11 +997,12 @@ function App() {
                       const total = move.white + move.draws + move.black;
                       return (
                         <div className="table-row" key={`${move.uci}-${move.san}`}>
-                          <span>{toFigurineSan(move.san)}</span>
-                          <span>
+                          <span className="lichess-cell-move">{toFigurineSan(move.san)}</span>
+                          <span className="lichess-cell-games">
                             {formatGamesCount(total)} ({formatPercent(total, lichessTotal)})
                           </span>
-                          <span>
+                          <span className="lichess-cell-elo">{formatAverageElo(move)}</span>
+                          <span className="lichess-cell-bar">
                             <LichessStatsBar white={move.white} draws={move.draws} black={move.black} total={total} />
                           </span>
                         </div>
@@ -1008,15 +1043,6 @@ function App() {
                           +
                         </button>
                       </span>
-                      <button
-                        className="gear-btn"
-                        type="button"
-                        aria-label="Filters"
-                        title="Filters"
-                        onClick={() => setIsLichessFilterOpen(true)}
-                      >
-                        ⚙
-                      </button>
                       <label className="inline-check stockfish-arrow-toggle">
                         <input
                           type="checkbox"
@@ -1090,6 +1116,15 @@ function App() {
                 >
                   Moves
                 </button>
+                <button
+                  className="gear-btn portrait-filters-btn"
+                  type="button"
+                  aria-label="Filters"
+                  title="Filters"
+                  onClick={() => setIsLichessFilterOpen(true)}
+                >
+                  ⚙
+                </button>
               </div>
             </div>
 
@@ -1125,15 +1160,6 @@ function App() {
                     aria-label="Increase lines"
                   >
                     +
-                  </button>
-                  <button
-                    className="gear-btn"
-                    type="button"
-                    aria-label="Filters"
-                    title="Filters"
-                    onClick={() => setIsLichessFilterOpen(true)}
-                  >
-                    ⚙
                   </button>
                 </span>
                 <label className="inline-check stockfish-arrow-toggle">
@@ -1271,10 +1297,10 @@ function App() {
                 Date range
                 <span className="toggle-group">
                   <button type="button" className={dateRange === '1y' ? 'active' : ''} onClick={() => setDateRange('1y')}>
-                    Last year
+                    1Y
                   </button>
-                  <button type="button" className={dateRange === '3y' ? 'active' : ''} onClick={() => setDateRange('3y')}>
-                    Last 3 years
+                  <button type="button" className={dateRange === '2y' ? 'active' : ''} onClick={() => setDateRange('2y')}>
+                    2Y
                   </button>
                   <button type="button" className={dateRange === 'all' ? 'active' : ''} onClick={() => setDateRange('all')}>
                     All
@@ -1282,23 +1308,43 @@ function App() {
                 </span>
               </label>
               <label>
-                Arrow threshold (%)
+                Moves threshold (%)
                 <input
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={lichessArrowThreshold}
-                  onChange={(e) => setLichessArrowThreshold(Number(e.target.value) || 5)}
+                  className="compact-number-input"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={lichessArrowThresholdInput}
+                  onChange={(e) => {
+                    if (/^\d*$/.test(e.target.value)) setLichessArrowThresholdInput(e.target.value);
+                  }}
+                  onBlur={commitMovesThresholdInput}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      commitMovesThresholdInput();
+                    }
+                  }}
                 />
               </label>
               <label>
                 Stockfish depth
                 <input
-                  type="number"
-                  min={6}
-                  max={28}
-                  value={engineDepth}
-                  onChange={(e) => setEngineDepth(Number(e.target.value) || 16)}
+                  className="compact-number-input"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={engineDepthInput}
+                  onChange={(e) => {
+                    if (/^\d*$/.test(e.target.value)) setEngineDepthInput(e.target.value);
+                  }}
+                  onBlur={commitEngineDepthInput}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      commitEngineDepthInput();
+                    }
+                  }}
                 />
               </label>
             </div>

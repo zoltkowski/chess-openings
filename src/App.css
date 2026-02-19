@@ -20,7 +20,8 @@ select {
 
 .app {
   padding: 1rem;
-  height: 100vh;
+  height: 100dvh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -50,6 +51,10 @@ select {
   line-height: 1;
   min-width: 2.1rem;
   padding: 0.32rem 0.45rem;
+}
+
+.gear-btn-right {
+  margin-left: auto;
 }
 
 .move-list .controls-row > button:not(.hamburger-btn) {
@@ -89,6 +94,7 @@ select {
 .layout {
   display: block;
   flex: 1;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
 }
@@ -96,6 +102,7 @@ select {
 .left-panel {
   display: grid;
   gap: 1rem;
+  width: 100%;
   height: 100%;
   min-height: 0;
   overflow: hidden;
@@ -106,8 +113,10 @@ select {
   grid-template-columns: 460px minmax(520px, 1fr) 430px;
   gap: 1rem;
   align-items: start;
+  width: 100%;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
 }
 
 .card {
@@ -136,7 +145,9 @@ select {
 .board-center {
   display: grid;
   gap: 0.55rem;
+  align-content: start;
   min-height: 0;
+  overflow: hidden;
 }
 
 .board-meta {
@@ -239,13 +250,23 @@ select {
   white-space: nowrap;
 }
 
-.lichess-panel .table-row span:first-child {
+.lichess-panel .lichess-cell-move {
   flex: 0 0 52px;
 }
 
-.lichess-panel .table-row span:nth-child(2) {
-  flex: 0 0 96px;
-  font-size: 0.82rem;
+.lichess-panel .lichess-cell-games {
+  flex: 0 0 90px;
+  font-size: 0.8rem;
+}
+
+.lichess-panel .lichess-cell-elo {
+  flex: 0 0 42px;
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.lichess-panel .lichess-cell-bar {
+  flex: 1;
 }
 
 .danger {
@@ -293,7 +314,7 @@ select {
 }
 
 .stockfish-arrow-toggle {
-  margin-left: auto;
+  margin-left: 0;
 }
 
 .inline-check {
@@ -306,12 +327,16 @@ select {
 .move-list {
   align-self: stretch;
   height: 100%;
+  min-height: 0;
+  max-height: 100%;
   overflow: auto;
 }
 
 .lichess-panel {
   align-self: stretch;
   height: 100%;
+  min-height: 0;
+  max-height: 100%;
   overflow: auto;
 }
 
@@ -325,6 +350,10 @@ select {
 
 .portrait-only {
   display: none;
+}
+
+.portrait-filters-btn {
+  margin-left: auto;
 }
 
 .stockfish-inline .table-row span:first-child {
@@ -424,6 +453,11 @@ select {
   padding: 0.3rem 0.45rem;
 }
 
+.compact-number-input {
+  width: 4.2rem;
+  text-align: center;
+}
+
 @media (max-width: 1200px) {
   .board-row {
     grid-template-columns: 1fr;
@@ -445,19 +479,44 @@ select {
     height: auto;
   }
 
-  .lichess-panel .table-row span:first-child {
+  .lichess-panel .lichess-cell-move {
     flex: 0 0 44px;
   }
 
-  .lichess-panel .table-row span:nth-child(2) {
-    flex: 0 0 84px;
-    font-size: 0.78rem;
+  .lichess-panel .lichess-cell-games {
+    flex: 0 0 78px;
+    font-size: 0.76rem;
+  }
+
+  .lichess-panel .lichess-cell-elo {
+    flex: 0 0 36px;
+    font-size: 0.68rem;
   }
 }
 
 @media (orientation: portrait) {
+  .app {
+    padding: 0.7rem;
+    gap: 0.45rem;
+  }
+
+  .topbar {
+    margin-bottom: 0;
+  }
+
+  .board-row {
+    grid-template-columns: 1fr;
+    grid-template-rows: min-content minmax(0, 1fr);
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
   .board-center {
-    order: 1;
+    order: initial;
+    grid-row: 1;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .portrait-tabbar {
@@ -481,6 +540,12 @@ select {
 
   .portrait-pane {
     display: none;
+    grid-row: 2;
+    height: 100%;
+    min-height: 0;
+    max-height: 100%;
+    overflow: auto;
+    overscroll-behavior: contain;
   }
 
   .portrait-pane.active {
@@ -488,14 +553,14 @@ select {
   }
 
   .lichess-panel {
-    order: 2;
+    order: initial;
   }
 
   .stockfish-panel {
-    order: 3;
+    order: initial;
   }
 
   .move-list {
-    order: 4;
+    order: initial;
   }
 }
