@@ -552,7 +552,7 @@ function App() {
     persistedFilterSettings.dateRange === '1y' || persistedFilterSettings.dateRange === '3y'
       ? persistedFilterSettings.dateRange
       : null;
-  const initialLichessArrowThreshold = clampInt(persistedFilterSettings.lichessArrowThreshold, 1, 100, 5);
+  const initialLichessArrowThreshold = clampInt(persistedFilterSettings.lichessArrowThreshold, 0, 100, 5);
   const initialEngineDepth = clampInt(persistedFilterSettings.engineDepth, 6, 28, 16);
   const initialSelectedSpeeds = (persistedFilterSettings.selectedSpeeds ?? []).filter((speed): speed is string =>
     SPEEDS.includes(speed as (typeof SPEEDS)[number]),
@@ -613,10 +613,15 @@ function App() {
 
   const stockfishRef = useRef<Worker | null>(null);
   const engineReadyRef = useRef(false);
+  const isSearchingRef = useRef(false);
+  const engineRunningRef = useRef(false);
+  const pendingAnalysisRef = useRef<{ fen: string; depth: number; multipv: number } | null>(null);
+  const tryStartPendingRef = useRef<(() => void) | null>(null);
   const currentAnalysisRef = useRef(0);
   const lineCacheRef = useRef<Map<number, EngineLine>>(new Map());
   const previousFenRef = useRef<string>(START_FEN);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const [engineReadyTick, setEngineReadyTick] = useState(0);
 
   const activeSide: Side = orientation;
   const tree = trees[activeSide];
@@ -655,7 +660,7 @@ function App() {
               const keyPair = parseUciMove(move.uci);
               return { moveGames, share, keyPair };
             })
-            .filter((entry) => entry.share > thresholdShare && Boolean(entry.keyPair))
+            .filter((entry) => entry.share >= thresholdShare && Boolean(entry.keyPair))
             .map((entry) => {
               const [orig, dest] = entry.keyPair as [Key, Key];
               const lineWidth = 10 + entry.share * 26;
@@ -773,8 +778,34 @@ function App() {
   }, []);
 
   useEffect(() => {
+    engineRunningRef.current = engineRunning;
+  }, [engineRunning]);
+
+  useEffect(() => {
     const worker = new Worker('/stockfish/stockfish-18-lite-single.js');
     stockfishRef.current = worker;
+    isSearchingRef.current = false;
+    pendingAnalysisRef.current = null;
+
+    tryStartPendingRef.current = () => {
+      const w = stockfishRef.current;
+      if (!w || !engineReadyRef.current || !engineRunningRef.current) return;
+      if (isSearchingRef.current) {
+        w.postMessage('stop');
+        return;
+      }
+      const pending = pendingAnalysisRef.current;
+      if (!pending) return;
+
+      pendingAnalysisRef.current = null;
+      lineCacheRef.current = new Map();
+      setEngineLines([]);
+      setEngineStatus('analyzing');
+      w.postMessage(`setoption name MultiPV value ${pending.multipv}`);
+      w.postMessage(`position fen ${pending.fen}`);
+      w.postMessage(`go depth ${pending.depth}`);
+      isSearchingRef.current = true;
+    };
 
     worker.onmessage = (event: MessageEvent<string>) => {
       const text = String(event.data || '');
@@ -786,7 +817,9 @@ function App() {
 
       if (text === 'readyok') {
         engineReadyRef.current = true;
+        setEngineReadyTick((prev) => prev + 1);
         setEngineStatus((prev) => (prev === 'stopped' ? prev : 'idle'));
+        tryStartPendingRef.current?.();
         return;
       }
 
@@ -818,40 +851,40 @@ function App() {
       }
 
       if (text.startsWith('bestmove')) {
+        isSearchingRef.current = false;
         setEngineStatus('done');
+        tryStartPendingRef.current?.();
       }
     };
 
     worker.postMessage('uci');
 
     return () => {
+      tryStartPendingRef.current = null;
       worker.terminate();
       stockfishRef.current = null;
       engineReadyRef.current = false;
+      isSearchingRef.current = false;
+      pendingAnalysisRef.current = null;
     };
   }, []);
 
   useEffect(() => {
     if (!stockfishRef.current || !engineReadyRef.current) return;
     if (!engineRunning) {
+      pendingAnalysisRef.current = null;
+      isSearchingRef.current = false;
       stockfishRef.current.postMessage('stop');
       setEngineStatus('stopped');
       return;
     }
 
+    const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
     const analysisId = currentAnalysisRef.current + 1;
     currentAnalysisRef.current = analysisId;
-    lineCacheRef.current = new Map();
-    setEngineLines([]);
-    setEngineStatus('analyzing');
-
-    const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
-
-    stockfishRef.current.postMessage('stop');
-    stockfishRef.current.postMessage(`setoption name MultiPV value ${engineMultiPv}`);
-    stockfishRef.current.postMessage(`position fen ${fen}`);
-    stockfishRef.current.postMessage(`go depth ${engineDepth}`);
-  }, [selectedNode.fen, engineDepth, engineRunning, engineMultiPv]);
+    pendingAnalysisRef.current = { fen, depth: engineDepth, multipv: engineMultiPv };
+    tryStartPendingRef.current?.();
+  }, [selectedNode.fen, engineDepth, engineRunning, engineMultiPv, engineReadyTick]);
 
   useEffect(() => {
     const fenChanged = previousFenRef.current !== selectedNode.fen;
@@ -1120,7 +1153,7 @@ function App() {
     const thresholdShare = lichessArrowThreshold / 100;
     return lichessData.moves.filter((move) => {
       const total = move.white + move.draws + move.black;
-      return total / lichessTotal > thresholdShare;
+      return total / lichessTotal >= thresholdShare;
     });
   }, [lichessData, lichessTotal, lichessArrowThreshold]);
   const pairedMoves = useMemo(() => {
@@ -1190,7 +1223,7 @@ function App() {
   const commitMovesThresholdInput = () => {
     const raw = lichessArrowThresholdInput.trim();
     const parsed = Number.parseInt(raw, 10);
-    const nextValue = Number.isFinite(parsed) ? Math.min(100, Math.max(1, parsed)) : 5;
+    const nextValue = Number.isFinite(parsed) ? Math.min(100, Math.max(0, parsed)) : 5;
     setLichessArrowThreshold(nextValue);
     setLichessArrowThresholdInput(String(nextValue));
   };
