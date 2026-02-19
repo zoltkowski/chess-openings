@@ -1560,7 +1560,6 @@ function App() {
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
             <div className="card-head">
               <h2>Lichess Filters</h2>
-              <button onClick={() => setIsLichessFilterOpen(false)}>Close</button>
             </div>
             <div className="filters-grid">
               <label>
@@ -1679,7 +1678,7 @@ function App() {
                 checked={showLichessOnTreeMoves}
                 onChange={(e) => setShowLichessOnTreeMoves(e.target.checked)}
               />
-              Show Lichess arrows on tree moves (green arrows)
+              Show Lichess arrows on tree moves
             </label>
           </div>
         </div>
