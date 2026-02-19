@@ -483,6 +483,7 @@ function App() {
     black: [],
   });
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
+  const [portraitTab, setPortraitTab] = useState<'lichess' | 'stockfish' | 'moves'>('lichess');
 
   const stockfishRef = useRef<Worker | null>(null);
   const engineReadyRef = useRef(false);
@@ -940,7 +941,7 @@ function App() {
       <main className="layout">
         <section className="left-panel">
           <div className="board-row">
-            <aside className="lichess-panel card">
+            <aside className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}>
               <div className="card-head">
                 <span />
                 <label className="inline-check">
@@ -971,7 +972,7 @@ function App() {
                       );
                     })}
                   </div>
-                  <div className="stockfish-inline">
+                  <div className="stockfish-inline desktop-only">
                     <div className="controls-row">
                       <button
                         aria-label={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
@@ -1039,15 +1040,15 @@ function App() {
             </aside>
 
             <div className="board-center">
-              <Board
-                fen={selectedNode.fen}
-                orientation={orientation}
-                lastMove={lastMove}
-                arrows={autoArrows}
-                onMove={makeMove}
-              />
               <div className="board-meta">
-                {lichessData?.opening && <div>{`${lichessData.opening.eco} ${lichessData.opening.name}`}</div>}
+                <div className="board-head-row">
+                  <div className="opening-title" title={lichessData?.opening ? `${lichessData.opening.eco} ${lichessData.opening.name}` : ''}>
+                    {lichessData?.opening ? `${lichessData.opening.eco} ${lichessData.opening.name}` : ''}
+                  </div>
+                  <button className="hamburger-btn board-options-btn" aria-label="Options menu" onClick={() => setIsOptionsOpen(true)}>
+                    &#9776;
+                  </button>
+                </div>
                 <div className="stats-row">
                   <LichessStatsBar
                     white={lichessData?.white ?? 0}
@@ -1058,9 +1059,103 @@ function App() {
                   <span className="games-total">{formatGamesCount(lichessTotal)} games</span>
                 </div>
               </div>
+              <Board
+                fen={selectedNode.fen}
+                orientation={orientation}
+                lastMove={lastMove}
+                arrows={autoArrows}
+                onMove={makeMove}
+              />
+              <div className="portrait-tabbar">
+                <button
+                  type="button"
+                  className={portraitTab === 'lichess' ? 'active' : ''}
+                  onClick={() => setPortraitTab('lichess')}
+                >
+                  Lichess
+                </button>
+                <button
+                  type="button"
+                  className={portraitTab === 'stockfish' ? 'active' : ''}
+                  onClick={() => setPortraitTab('stockfish')}
+                >
+                  Stockfish
+                </button>
+                <button
+                  type="button"
+                  className={portraitTab === 'moves' ? 'active' : ''}
+                  onClick={() => setPortraitTab('moves')}
+                >
+                  Moves
+                </button>
+              </div>
             </div>
 
-            <aside className="move-list card">
+            <aside className={`stockfish-panel card portrait-only portrait-pane ${portraitTab === 'stockfish' ? 'active' : ''}`}>
+              <div className="controls-row">
+                <button
+                  aria-label={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
+                  title={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
+                  onClick={() => {
+                    setEngineRunning((prev) => {
+                      if (prev) {
+                        stockfishRef.current?.postMessage('stop');
+                        setEngineStatus('stopped');
+                      }
+                      return !prev;
+                    });
+                  }}
+                >
+                  {engineRunning ? '■' : '▶'}
+                </button>
+                <span className="inline-stepper">
+                  <button
+                    type="button"
+                    onClick={() => setEngineMultiPv((prev) => Math.max(1, prev - 1))}
+                    aria-label="Decrease lines"
+                  >
+                    -
+                  </button>
+                  <span className="stepper-value">{engineMultiPv}</span>
+                  <button
+                    type="button"
+                    onClick={() => setEngineMultiPv((prev) => Math.min(10, prev + 1))}
+                    aria-label="Increase lines"
+                  >
+                    +
+                  </button>
+                  <button
+                    className="gear-btn"
+                    type="button"
+                    aria-label="Filters"
+                    title="Filters"
+                    onClick={() => setIsLichessFilterOpen(true)}
+                  >
+                    ⚙
+                  </button>
+                </span>
+                <label className="inline-check stockfish-arrow-toggle">
+                  <input
+                    type="checkbox"
+                    checked={showStockfishArrows}
+                    onChange={(e) => setShowStockfishArrows(e.target.checked)}
+                    aria-label="Toggle Stockfish arrows"
+                  />
+                </label>
+                {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
+              </div>
+              <div className="table">
+                {engineLines.map((line) => (
+                  <div className="table-row" key={line.multipv}>
+                    <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
+                    <span>{line.scoreText}</span>
+                    <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
+                  </div>
+                ))}
+              </div>
+            </aside>
+
+            <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''}`}>
               <div className="controls-row">
                 <button onClick={goBackOneMove} disabled={!canGoBack} aria-label="Back 1 move" title="Back 1 move">
                   ←
@@ -1076,9 +1171,6 @@ function App() {
                 </button>
                 <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
                   Undo
-                </button>
-                <button className="hamburger-btn" aria-label="Options menu" onClick={() => setIsOptionsOpen(true)}>
-                  &#9776;
                 </button>
               </div>
               {path.length > 1 && (

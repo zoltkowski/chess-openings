@@ -6,6 +6,16 @@ import App from './App.tsx'
 
 registerSW({ immediate: true })
 
+window.addEventListener('keydown', (event) => {
+  const key = event.key.toLowerCase()
+  const isRefreshShortcut =
+    key === 'f5' || ((event.ctrlKey || event.metaKey) && key === 'r')
+
+  if (isRefreshShortcut) {
+    event.preventDefault()
+  }
+})
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />

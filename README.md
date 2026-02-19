@@ -25,6 +25,8 @@ PWA is enabled with `vite-plugin-pwa`:
 - installs as an app (`display: standalone`)
 - has offline caching via service worker
 - auto-update registration
+- blocks common browser refresh shortcuts inside the app (`F5`, `Ctrl/Cmd+R`)
+- disables pull-to-refresh style overscroll behavior in app UI
 
 To install:
 1. Open the deployed app in Chrome/Edge.

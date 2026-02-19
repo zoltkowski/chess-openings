@@ -47,14 +47,6 @@ select {
   padding: 0.32rem 0.45rem;
 }
 
-.move-list .controls-row .hamburger-btn {
-  margin-left: auto;
-  padding-left: 0.75rem;
-  border-left: 1px solid #cbd5e1;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-}
-
 .move-list .controls-row > button:not(.hamburger-btn) {
   min-width: 4.6rem;
   text-align: center;
@@ -140,6 +132,29 @@ select {
   gap: 0.25rem;
   color: #334155;
   font-size: 0.94rem;
+}
+
+.board-head-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.opening-title {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.2;
+  min-height: calc(2 * 1.2em);
+  max-height: calc(2 * 1.2em);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.board-options-btn {
+  flex-shrink: 0;
 }
 
 .stats-row {
@@ -289,6 +304,14 @@ select {
   margin-top: 0.8rem;
 }
 
+.portrait-tabbar {
+  display: none;
+}
+
+.portrait-only {
+  display: none;
+}
+
 .stockfish-inline .table-row span:first-child {
   flex: 0 0 54px;
 }
@@ -410,5 +433,50 @@ select {
   .lichess-panel .table-row span:nth-child(2) {
     flex: 0 0 84px;
     font-size: 0.78rem;
+  }
+}
+
+@media (orientation: portrait) {
+  .board-center {
+    order: 1;
+  }
+
+  .portrait-tabbar {
+    display: inline-flex;
+    gap: 0.4rem;
+    margin-top: 0.35rem;
+  }
+
+  .portrait-tabbar .active {
+    background: #dbeafe;
+    border-color: #93c5fd;
+  }
+
+  .desktop-only {
+    display: none;
+  }
+
+  .portrait-only {
+    display: block;
+  }
+
+  .portrait-pane {
+    display: none;
+  }
+
+  .portrait-pane.active {
+    display: block;
+  }
+
+  .lichess-panel {
+    order: 2;
+  }
+
+  .stockfish-panel {
+    order: 3;
+  }
+
+  .move-list {
+    order: 4;
   }
 }
