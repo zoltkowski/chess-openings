@@ -43,20 +43,36 @@ select {
   gap: 0.4rem;
 }
 
+.inline-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.stepper-value {
+  min-width: 1.8rem;
+  text-align: center;
+}
+
 .status {
   color: #334155;
   font-size: 0.9rem;
 }
 
 .layout {
-  display: grid;
-  gap: 1rem;
-  grid-template-columns: minmax(640px, 1fr) 360px;
+  display: block;
 }
 
 .left-panel {
   display: grid;
   gap: 1rem;
+}
+
+.board-row {
+  display: grid;
+  grid-template-columns: 460px minmax(520px, 1fr) 430px;
+  gap: 1rem;
+  align-items: start;
 }
 
 .card {
@@ -81,6 +97,31 @@ select {
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.14);
 }
 
+.board-center {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.board-meta {
+  width: min(100%, 760px);
+  margin: 0 auto;
+  padding: 0.15rem 0;
+  display: grid;
+  gap: 0.25rem;
+  color: #334155;
+  font-size: 0.94rem;
+}
+
+.stats-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.games-total {
+  white-space: nowrap;
+}
+
 .variant-row,
 .table-row,
 .move-row {
@@ -88,6 +129,40 @@ select {
   align-items: center;
   gap: 0.5rem;
   margin-bottom: 0.4rem;
+}
+
+.move-table-wrap {
+  overflow-x: auto;
+  margin: 0.4rem 0 0.8rem;
+}
+
+.move-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.move-table th,
+.move-table td {
+  border-bottom: 1px solid #e5ebf3;
+  padding: 0.4rem 0.45rem;
+  text-align: left;
+}
+
+.move-table th {
+  font-weight: 600;
+  color: #334155;
+  background: #f8fbff;
+}
+
+.table-move-btn {
+  width: 100%;
+  text-align: left;
+  background: #f7faff;
+}
+
+.table-move-btn:hover {
+  background: #e6f0ff;
 }
 
 .table-row {
@@ -102,6 +177,14 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.lichess-panel .table-row span:first-child {
+  flex: 0 0 72px;
+}
+
+.lichess-panel .table-row span:nth-child(2) {
+  flex: 0 0 112px;
 }
 
 .danger {
@@ -119,11 +202,33 @@ select {
   gap: 0.3rem;
 }
 
+.toggle-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.toggle-group .active {
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+
 .checkbox-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 0.7rem;
   margin: 0.6rem 0;
+}
+
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.card-head h2 {
+  margin: 0;
 }
 
 .inline-check {
@@ -133,12 +238,91 @@ select {
   margin-top: 0.25rem;
 }
 
-.right-panel {
-  align-self: start;
-  position: sticky;
-  top: 0.75rem;
-  max-height: calc(100vh - 1.5rem);
+.move-list {
+  align-self: stretch;
+  max-height: min(80vh, 760px);
   overflow: auto;
+}
+
+.lichess-panel {
+  align-self: stretch;
+  max-height: min(80vh, 760px);
+  overflow: auto;
+}
+
+.stockfish-inline {
+  margin-top: 0.8rem;
+}
+
+.stockfish-inline .table-row span:first-child {
+  flex: 0 0 54px;
+}
+
+.stockfish-inline .table-row span:nth-child(2) {
+  flex: 0 0 62px;
+}
+
+.stats-bar {
+  width: 100%;
+  height: 22px;
+  display: flex;
+  border: 1px solid #cfd8e6;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #f4f7fb;
+}
+
+.seg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.seg-white {
+  background: #ffffff;
+  color: #0f172a;
+}
+
+.seg-draw {
+  background: #cbd5e1;
+  color: #0f172a;
+}
+
+.seg-black {
+  background: #111827;
+  color: #f8fafc;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  z-index: 1000;
+}
+
+.modal-card {
+  width: min(860px, 100%);
+  background: #fff;
+  border: 1px solid #d5dce8;
+  border-radius: 10px;
+  padding: 0.9rem;
+  max-height: 90vh;
+  overflow: auto;
+}
+
+.options-modal {
+  width: min(420px, 100%);
+}
+
+.options-grid {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.7rem;
 }
 
 button {
@@ -153,6 +337,11 @@ button:hover {
   background: #e9f1ff;
 }
 
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 input,
 select {
   border: 1px solid #c8d3e6;
@@ -161,16 +350,19 @@ select {
 }
 
 @media (max-width: 1200px) {
-  .layout {
+  .board-row {
     grid-template-columns: 1fr;
-  }
-
-  .right-panel {
-    position: static;
-    max-height: none;
   }
 
   .board {
     width: min(100%, 620px);
+  }
+
+  .move-list {
+    max-height: none;
+  }
+
+  .lichess-panel {
+    max-height: none;
   }
 }

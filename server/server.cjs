@@ -68,7 +68,8 @@ app.put('/api/book/:side', async (req, res, next) => {
 
 app.get('/api/lichess', async (req, res, next) => {
   try {
-    const endpoint = new URL('https://explorer.lichess.ovh/lichess');
+    const source = req.query.source === 'masters' ? 'masters' : 'lichess';
+    const endpoint = new URL(`https://explorer.lichess.ovh/${source}`);
     const allowedParams = [
       'fen',
       'play',

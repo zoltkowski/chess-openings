@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEventHandler } from 'react';
 import { Chess, type Move } from 'chess.js';
 import { Chessground } from '@lichess-org/chessground';
 import type { Api as ChessgroundApi } from '@lichess-org/chessground/api';
 import type { Key } from '@lichess-org/chessground/types';
 import type { DrawShape } from '@lichess-org/chessground/draw';
+import type { DrawBrushes } from '@lichess-org/chessground/draw';
 import '@lichess-org/chessground/assets/chessground.base.css';
 import '@lichess-org/chessground/assets/chessground.brown.css';
 import '@lichess-org/chessground/assets/chessground.cburnett.css';
 import './App.css';
 
 type Side = 'white' | 'black';
+type LichessSource = 'lichess' | 'masters';
+type DateRange = '1y' | '3y' | 'all';
 
 type MoveNode = {
   id: string;
@@ -31,6 +34,7 @@ type EngineLine = {
   scoreText: string;
   pv: string;
   bestMove: string;
+  evalValue: number;
 };
 
 type LichessMove = {
@@ -49,9 +53,35 @@ type LichessResponse = {
   moves: LichessMove[];
 };
 
+type UndoSnapshot = {
+  tree: MoveTree;
+  selectedNodeId: string;
+};
+
 const START_FEN = 'start';
+const START_POS_FEN = new Chess().fen();
 const SPEEDS = ['bullet', 'blitz', 'rapid', 'classical'] as const;
 const RATINGS = [1200, 1400, 1600, 1800, 2000, 2200, 2500];
+const FIGURINES: Record<string, string> = {
+  K: '♔',
+  Q: '♕',
+  R: '♖',
+  B: '♗',
+  N: '♘',
+};
+const ARROW_BRUSHES: DrawBrushes = {
+  green: { key: 'g', color: '#15781b', opacity: 1, lineWidth: 10 },
+  red: { key: 'r', color: '#882020', opacity: 1, lineWidth: 10 },
+  blue: { key: 'b', color: '#003088', opacity: 1, lineWidth: 10 },
+  yellow: { key: 'y', color: '#e68f00', opacity: 1, lineWidth: 10 },
+  greenSoft: { key: 'gs', color: '#15781b', opacity: 0.5, lineWidth: 10 },
+  blueSoft: { key: 'bs', color: '#003088', opacity: 0.5, lineWidth: 10 },
+  yellowSoft: { key: 'ys', color: '#e68f00', opacity: 0.5, lineWidth: 10 },
+};
+const BOOK_STORAGE_KEY: Record<Side, string> = {
+  white: 'opening-book-white-pgn',
+  black: 'opening-book-black-pgn',
+};
 
 function createEmptyTree(side: Side): MoveTree {
   const rootId = `${side}-0`;
@@ -71,12 +101,28 @@ function createEmptyTree(side: Side): MoveTree {
   };
 }
 
+function readBookFromStorage(side: Side) {
+  try {
+    return window.localStorage.getItem(BOOK_STORAGE_KEY[side]) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function writeBookToStorage(side: Side, pgn: string) {
+  window.localStorage.setItem(BOOK_STORAGE_KEY[side], pgn);
+}
+
 function uciFromMove(move: Move) {
   return `${move.from}${move.to}${move.promotion ?? ''}`;
 }
 
 function fenToChess(fen: string) {
   return fen === START_FEN ? new Chess() : new Chess(fen);
+}
+
+function boardFen(fen: string) {
+  return fen === START_FEN ? START_POS_FEN : fen;
 }
 
 function createNodeId(tree: MoveTree) {
@@ -231,13 +277,76 @@ function formatPercent(value: number, total: number) {
   return `${((value / total) * 100).toFixed(1)}%`;
 }
 
-function isNodeInSubtree(tree: MoveTree, targetId: string, rootId: string) {
-  let cursor: string | null = targetId;
-  while (cursor) {
-    if (cursor === rootId) return true;
-    cursor = tree.nodes[cursor]?.parentId ?? null;
+function formatGamesCount(value: number) {
+  if (value >= 1_000_000) return `${Math.floor(value / 1_000_000)}M`;
+  if (value >= 1_000) return `${Math.floor(value / 1_000)}k`;
+  return `${Math.floor(value)}`;
+}
+
+function percentValue(value: number, total: number) {
+  if (total <= 0) return 0;
+  return (value / total) * 100;
+}
+
+function toFigurineSan(san: string) {
+  return san
+    .trim()
+    .replace(/[!?+#]+/g, '')
+    .replace(/^[KQRBN]/, (piece) => FIGURINES[piece] ?? piece)
+    .replace(/=([KQRBN])/g, (_match, piece: string) => `=${FIGURINES[piece] ?? piece}`);
+}
+
+function uciToFigurineSan(fen: string, uci: string) {
+  if (!uci || uci.length < 4) return '';
+  const chess = fenToChess(fen);
+  try {
+    const move = chess.move({
+      from: uci.slice(0, 2),
+      to: uci.slice(2, 4),
+      promotion: uci[4] as 'q' | 'r' | 'b' | 'n' | undefined,
+    });
+    if (!move) return uci;
+    return toFigurineSan(move.san);
+  } catch {
+    return uci;
   }
-  return false;
+}
+
+function pvToFigurineSan(fen: string, pv: string, maxMoves = 8) {
+  const chess = fenToChess(fen);
+  const parts = pv.split(/\s+/).filter(Boolean);
+  const out: string[] = [];
+  for (const uci of parts) {
+    if (!/^[a-h][1-8][a-h][1-8][nbrq]?$/.test(uci)) continue;
+    try {
+      const move = chess.move({
+        from: uci.slice(0, 2),
+        to: uci.slice(2, 4),
+        promotion: uci[4] as 'q' | 'r' | 'b' | 'n' | undefined,
+      });
+      if (!move) break;
+      out.push(toFigurineSan(move.san));
+    } catch {
+      break;
+    }
+    if (out.length >= maxMoves) break;
+  }
+  return out.join(' ');
+}
+
+function softenOverlappingArrows(arrows: DrawShape[]): DrawShape[] {
+  const byOrig = new Map<Key, number>();
+  for (const arrow of arrows) {
+    byOrig.set(arrow.orig, (byOrig.get(arrow.orig) ?? 0) + 1);
+  }
+
+  return arrows.map((arrow) => {
+    if ((byOrig.get(arrow.orig) ?? 0) < 2) return arrow;
+    if (arrow.brush === 'green') return { ...arrow, brush: 'greenSoft' };
+    if (arrow.brush === 'blue') return { ...arrow, brush: 'blueSoft' };
+    if (arrow.brush === 'yellow') return { ...arrow, brush: 'yellowSoft' };
+    return arrow;
+  });
 }
 
 function removeBranch(tree: MoveTree, branchRootId: string): MoveTree {
@@ -264,6 +373,29 @@ function removeBranch(tree: MoveTree, branchRootId: string): MoveTree {
   }
 
   return { ...tree, nodes: nextNodes };
+}
+
+function LichessStatsBar(props: { white: number; draws: number; black: number; total: number }) {
+  const { white, draws, black, total } = props;
+  const whitePct = percentValue(white, total);
+  const drawsPct = percentValue(draws, total);
+  const blackPct = percentValue(black, total);
+
+  const label = (pct: number) => (pct >= 8 ? `${pct.toFixed(1)}%` : '');
+
+  return (
+    <div className="stats-bar" aria-label="Lichess outcome distribution">
+      <span className="seg seg-white" style={{ width: `${whitePct}%` }}>
+        {label(whitePct)}
+      </span>
+      <span className="seg seg-draw" style={{ width: `${drawsPct}%` }}>
+        {label(drawsPct)}
+      </span>
+      <span className="seg seg-black" style={{ width: `${blackPct}%` }}>
+        {label(blackPct)}
+      </span>
+    </div>
+  );
 }
 
 function Board(props: {
@@ -303,7 +435,7 @@ function Board(props: {
 
   useEffect(() => {
     apiRef.current?.set({
-      fen: fen === START_FEN ? undefined : fen,
+      fen: boardFen(fen),
       orientation,
       turnColor: toTurnColor(fen),
       movable: {
@@ -318,6 +450,7 @@ function Board(props: {
         enabled: true,
         visible: true,
         autoShapes: arrows,
+        brushes: ARROW_BRUSHES,
       },
       lastMove,
     });
@@ -331,7 +464,6 @@ function App() {
     white: createEmptyTree('white'),
     black: createEmptyTree('black'),
   });
-  const [activeSide, setActiveSide] = useState<Side>('white');
   const [selectedNodeBySide, setSelectedNodeBySide] = useState<Record<Side, string>>({
     white: 'white-0',
     black: 'black-0',
@@ -339,22 +471,37 @@ function App() {
   const [orientation, setOrientation] = useState<'white' | 'black'>('white');
   const [status, setStatus] = useState('Ready');
   const [engineDepth, setEngineDepth] = useState(16);
+  const [engineMultiPv, setEngineMultiPv] = useState(3);
+  const [showStockfishArrows, setShowStockfishArrows] = useState(true);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
-  const [engineStatus, setEngineStatus] = useState('idle');
+  const [engineStatus, setEngineStatus] = useState('stopped');
+  const [engineRunning, setEngineRunning] = useState(false);
   const [lichessData, setLichessData] = useState<LichessResponse | null>(null);
   const [lichessStatus, setLichessStatus] = useState('idle');
-  const [playFilter, setPlayFilter] = useState('');
-  const [movesFilter, setMovesFilter] = useState(12);
-  const [sinceFilter, setSinceFilter] = useState('');
-  const [untilFilter, setUntilFilter] = useState('');
+  const [showLichessArrows, setShowLichessArrows] = useState(true);
+  const [showLichessOnTreeMoves, setShowLichessOnTreeMoves] = useState(true);
+  const [isLichessFilterOpen, setIsLichessFilterOpen] = useState(false);
+  const [lichessSource, setLichessSource] = useState<LichessSource>('lichess');
+  const [dateRange, setDateRange] = useState<DateRange>('all');
+  const [lichessArrowThreshold, setLichessArrowThreshold] = useState(5);
   const [selectedSpeeds, setSelectedSpeeds] = useState<string[]>(['blitz', 'rapid', 'classical']);
   const [selectedRatings, setSelectedRatings] = useState<number[]>([1600, 1800, 2000, 2200]);
+  const [undoStackBySide, setUndoStackBySide] = useState<Record<Side, UndoSnapshot[]>>({
+    white: [],
+    black: [],
+  });
+  const [isOptionsOpen, setIsOptionsOpen] = useState(false);
 
   const stockfishRef = useRef<Worker | null>(null);
   const engineReadyRef = useRef(false);
   const currentAnalysisRef = useRef(0);
   const lineCacheRef = useRef<Map<number, EngineLine>>(new Map());
+  const previousFenRef = useRef<string>(START_FEN);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+  const autosaveReadyRef = useRef(false);
+  const lastSavedPgnRef = useRef<Record<Side, string>>({ white: '', black: '' });
 
+  const activeSide: Side = orientation;
   const tree = trees[activeSide];
   const selectedNodeId = selectedNodeBySide[activeSide] ?? tree.rootId;
   const selectedNode = tree.nodes[selectedNodeId] ?? tree.nodes[tree.rootId];
@@ -367,11 +514,80 @@ function App() {
   );
 
   const autoArrows = useMemo<DrawShape[]>(() => {
-    return childNodes
+    const treeArrows = childNodes
       .map((node) => parseUciMove(node.moveUci))
       .filter((value): value is [Key, Key] => Boolean(value))
       .map(([orig, dest]) => ({ orig, dest, brush: 'green' }));
-  }, [childNodes]);
+
+    const treeChildUcis = new Set(
+      childNodes.map((node) => node.moveUci).filter((uci): uci is string => Boolean(uci)),
+    );
+
+    const positionGames = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
+    const thresholdShare = lichessArrowThreshold / 100;
+    const lichessArrows =
+      showLichessArrows && positionGames > 0
+        ? (lichessData?.moves ?? [])
+            .filter((move) => showLichessOnTreeMoves || !treeChildUcis.has(move.uci))
+            .map((move) => {
+              const moveGames = move.white + move.draws + move.black;
+              const share = moveGames / positionGames;
+              const keyPair = parseUciMove(move.uci);
+              return { moveGames, share, keyPair };
+            })
+            .filter((entry) => entry.share > thresholdShare && Boolean(entry.keyPair))
+            .map((entry) => {
+              const [orig, dest] = entry.keyPair as [Key, Key];
+              const lineWidth = 10 + entry.share * 26;
+              return {
+                orig,
+                dest,
+                brush: 'yellow',
+                modifiers: { lineWidth },
+              } as DrawShape;
+            })
+        : [];
+
+    const engineArrows =
+      showStockfishArrows && engineLines.length > 0
+        ? (() => {
+            const candidates = engineLines
+              .map((line) => {
+                const keyPair = parseUciMove(line.bestMove);
+                return keyPair ? { keyPair, evalValue: line.evalValue } : null;
+              })
+              .filter((entry): entry is { keyPair: [Key, Key]; evalValue: number } => Boolean(entry));
+
+            if (candidates.length === 0) return [];
+
+            const values = candidates.map((entry) => entry.evalValue);
+            const min = Math.min(...values);
+            const max = Math.max(...values);
+            const spread = Math.max(1, max - min);
+
+            return candidates.map((entry) => {
+              const [orig, dest] = entry.keyPair;
+              const normalized = (entry.evalValue - min) / spread;
+              return {
+                orig,
+                dest,
+                brush: 'blue',
+                modifiers: { lineWidth: 10 + normalized * 24 },
+              } as DrawShape;
+            });
+          })()
+        : [];
+
+    return softenOverlappingArrows([...treeArrows, ...lichessArrows, ...engineArrows]);
+  }, [
+    childNodes,
+    lichessData,
+    lichessArrowThreshold,
+    engineLines,
+    showLichessArrows,
+    showStockfishArrows,
+    showLichessOnTreeMoves,
+  ]);
 
   const lastMove = parseUciMove(selectedNode.moveUci);
 
@@ -379,17 +595,21 @@ function App() {
     const loadBooks = async () => {
       setStatus('Loading PGN books...');
       try {
-        const [whiteRes, blackRes] = await Promise.all([
-          fetch('/api/book/white').then((r) => r.json()),
-          fetch('/api/book/black').then((r) => r.json()),
-        ]);
+        const whitePgn = readBookFromStorage('white');
+        const blackPgn = readBookFromStorage('black');
 
-        const whiteTree = parsePgnToTree('white', whiteRes.pgn || '');
-        const blackTree = parsePgnToTree('black', blackRes.pgn || '');
+        const whiteTree = parsePgnToTree('white', whitePgn);
+        const blackTree = parsePgnToTree('black', blackPgn);
 
         setTrees({ white: whiteTree, black: blackTree });
         setSelectedNodeBySide({ white: whiteTree.rootId, black: blackTree.rootId });
-        setStatus('Books loaded');
+        setUndoStackBySide({ white: [], black: [] });
+        lastSavedPgnRef.current = {
+          white: whitePgn,
+          black: blackPgn,
+        };
+        autosaveReadyRef.current = true;
+        setStatus('Ready');
       } catch {
         setStatus('Failed to load books');
       }
@@ -412,6 +632,7 @@ function App() {
 
       if (text === 'readyok') {
         engineReadyRef.current = true;
+        setEngineStatus((prev) => (prev === 'stopped' ? prev : 'idle'));
         return;
       }
 
@@ -431,8 +652,13 @@ function App() {
           : mateMatch
             ? `M${mateMatch[1]}`
             : '?';
+        const evalValue = cpMatch
+          ? Number(cpMatch[1])
+          : mateMatch
+            ? Number(mateMatch[1]) * 100000
+            : 0;
 
-        lineCacheRef.current.set(multipv, { multipv, scoreText, pv, bestMove });
+        lineCacheRef.current.set(multipv, { multipv, scoreText, pv, bestMove, evalValue });
         setEngineLines(Array.from(lineCacheRef.current.values()).sort((a, b) => a.multipv - b.multipv));
         return;
       }
@@ -453,6 +679,11 @@ function App() {
 
   useEffect(() => {
     if (!stockfishRef.current || !engineReadyRef.current) return;
+    if (!engineRunning) {
+      stockfishRef.current.postMessage('stop');
+      setEngineStatus('stopped');
+      return;
+    }
 
     const analysisId = currentAnalysisRef.current + 1;
     currentAnalysisRef.current = analysisId;
@@ -463,10 +694,19 @@ function App() {
     const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
 
     stockfishRef.current.postMessage('stop');
-    stockfishRef.current.postMessage('setoption name MultiPV value 3');
+    stockfishRef.current.postMessage(`setoption name MultiPV value ${engineMultiPv}`);
     stockfishRef.current.postMessage(`position fen ${fen}`);
     stockfishRef.current.postMessage(`go depth ${engineDepth}`);
-  }, [selectedNode.fen, engineDepth]);
+  }, [selectedNode.fen, engineDepth, engineRunning, engineMultiPv]);
+
+  useEffect(() => {
+    const fenChanged = previousFenRef.current !== selectedNode.fen;
+    if (!engineRunning && fenChanged) {
+      setEngineLines([]);
+      lineCacheRef.current = new Map();
+    }
+    previousFenRef.current = selectedNode.fen;
+  }, [selectedNode.fen, engineRunning]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -477,13 +717,24 @@ function App() {
       const params = new URLSearchParams({
         fen,
         variant: 'standard',
-        moves: String(movesFilter),
+        moves: '30',
+        source: lichessSource,
       });
-      if (playFilter.trim()) params.set('play', playFilter.trim());
-      if (selectedSpeeds.length) params.set('speeds', selectedSpeeds.join(','));
-      if (selectedRatings.length) params.set('ratings', selectedRatings.join(','));
-      if (sinceFilter) params.set('since', sinceFilter);
-      if (untilFilter) params.set('until', untilFilter);
+      if (lichessSource === 'lichess') {
+        if (selectedSpeeds.length) params.set('speeds', selectedSpeeds.join(','));
+        if (selectedRatings.length) params.set('ratings', selectedRatings.join(','));
+      }
+
+      if (dateRange !== 'all') {
+        const now = new Date();
+        const until = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+        const yearsBack = dateRange === '1y' ? 1 : 3;
+        const sinceDate = new Date(now);
+        sinceDate.setFullYear(now.getFullYear() - yearsBack);
+        const since = `${sinceDate.getFullYear()}-${String(sinceDate.getMonth() + 1).padStart(2, '0')}`;
+        params.set('since', since);
+        params.set('until', until);
+      }
 
       try {
         const res = await fetch(`/api/lichess?${params.toString()}`, { signal: controller.signal });
@@ -503,62 +754,89 @@ function App() {
       controller.abort();
       window.clearTimeout(timeout);
     };
-  }, [selectedNode.fen, movesFilter, playFilter, selectedSpeeds, selectedRatings, sinceFilter, untilFilter]);
+  }, [selectedNode.fen, selectedSpeeds, selectedRatings, dateRange, lichessSource]);
+
+  useEffect(() => {
+    if (!autosaveReadyRef.current) return;
+
+    const timeout = window.setTimeout(async () => {
+      const nextWhitePgn = exportTreeToPgn(trees.white);
+      const nextBlackPgn = exportTreeToPgn(trees.black);
+
+      const changedSides: Side[] = [];
+      if (nextWhitePgn !== lastSavedPgnRef.current.white) changedSides.push('white');
+      if (nextBlackPgn !== lastSavedPgnRef.current.black) changedSides.push('black');
+      if (changedSides.length === 0) return;
+
+      try {
+        for (const side of changedSides) {
+          const pgn = side === 'white' ? nextWhitePgn : nextBlackPgn;
+          writeBookToStorage(side, pgn);
+          lastSavedPgnRef.current[side] = pgn;
+        }
+      } catch {
+        setStatus('Auto-save failed');
+      }
+    }, 350);
+
+    return () => window.clearTimeout(timeout);
+  }, [trees]);
 
   const makeMove = (orig: Key, dest: Key) => {
-    setTrees((prev) => {
-      const currentTree = prev[activeSide];
-      const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
-      const currentNode = currentTree.nodes[currentSelectedId] ?? currentTree.nodes[currentTree.rootId];
-      const chess = fenToChess(currentNode.fen);
-      const move = chess.move({ from: orig, to: dest, promotion: 'q' });
+    const currentTree = trees[activeSide];
+    const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
+    const currentNode = currentTree.nodes[currentSelectedId] ?? currentTree.nodes[currentTree.rootId];
+    const chess = fenToChess(currentNode.fen);
+    const move = chess.move({ from: orig, to: dest, promotion: 'q' });
 
-      if (!move) return prev;
+    if (!move) return;
 
-      const uci = uciFromMove(move);
-      const existingChildId = currentNode.children.find((id) => currentTree.nodes[id].moveUci === uci);
+    const uci = uciFromMove(move);
+    const existingChildId = currentNode.children.find((id) => currentTree.nodes[id].moveUci === uci);
 
-      let nextTree = currentTree;
-      let nextNodeId = existingChildId;
+    let nextTree = currentTree;
+    let nextNodeId = existingChildId;
 
-      if (!existingChildId) {
-        const nodeId = createNodeId(currentTree);
-        const newNode: MoveNode = {
-          id: nodeId,
-          parentId: currentNode.id,
-          fen: chess.fen(),
-          moveSan: move.san,
-          moveUci: uci,
-          children: [],
-        };
-
-        nextTree = {
-          ...currentTree,
-          nextId: currentTree.nextId + 1,
-          nodes: {
-            ...currentTree.nodes,
-            [nodeId]: newNode,
-            [currentNode.id]: {
-              ...currentNode,
-              children: [...currentNode.children, nodeId],
-            },
-          },
-        };
-        nextNodeId = nodeId;
-      }
-
-      if (nextNodeId) {
-        setSelectedNodeBySide((currentSelection) => ({
-          ...currentSelection,
-          [activeSide]: nextNodeId as string,
-        }));
-      }
-
-      return {
-        ...prev,
-        [activeSide]: nextTree,
+    if (!existingChildId) {
+      const nodeId = createNodeId(currentTree);
+      const newNode: MoveNode = {
+        id: nodeId,
+        parentId: currentNode.id,
+        fen: chess.fen(),
+        moveSan: move.san,
+        moveUci: uci,
+        children: [],
       };
-    });
+
+      nextTree = {
+        ...currentTree,
+        nextId: currentTree.nextId + 1,
+        nodes: {
+          ...currentTree.nodes,
+          [nodeId]: newNode,
+          [currentNode.id]: {
+            ...currentNode,
+            children: [...currentNode.children, nodeId],
+          },
+        },
+      };
+      nextNodeId = nodeId;
+    }
+
+    if (!nextNodeId || nextNodeId === currentSelectedId) return;
+
+    setUndoStackBySide((prev) => ({
+      ...prev,
+      [activeSide]: [...prev[activeSide], { tree: currentTree, selectedNodeId: currentSelectedId }].slice(-200),
+    }));
+    setTrees((prev) => ({
+      ...prev,
+      [activeSide]: nextTree,
+    }));
+    setSelectedNodeBySide((prev) => ({
+      ...prev,
+      [activeSide]: nextNodeId as string,
+    }));
   };
 
   const saveBook = async () => {
@@ -566,150 +844,415 @@ function App() {
     setStatus(`Saving ${activeSide} book...`);
 
     try {
-      const res = await fetch(`/api/book/${activeSide}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pgn }),
-      });
-      if (!res.ok) throw new Error('save failed');
+      writeBookToStorage(activeSide, pgn);
+      lastSavedPgnRef.current[activeSide] = pgn;
       setStatus(`${activeSide} book saved`);
     } catch {
       setStatus(`Failed to save ${activeSide} book`);
     }
   };
 
-  const reloadBook = async () => {
-    setStatus(`Reloading ${activeSide} book...`);
+  const exportPgn = () => {
+    const pgn = exportTreeToPgn(tree);
+    const blob = new Blob([pgn], { type: 'application/x-chess-pgn;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${activeSide}.pgn`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const openImportDialog = () => {
+    importInputRef.current?.click();
+  };
+
+  const importPgn: ChangeEventHandler<HTMLInputElement> = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
     try {
-      const res = await fetch(`/api/book/${activeSide}`);
-      if (!res.ok) throw new Error('reload failed');
-      const payload = await res.json();
-      const nextTree = parsePgnToTree(activeSide, payload.pgn || '');
+      const pgn = await file.text();
+      const nextTree = parsePgnToTree(activeSide, pgn);
       setTrees((prev) => ({ ...prev, [activeSide]: nextTree }));
       setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: nextTree.rootId }));
-      setStatus(`${activeSide} book reloaded`);
+      setUndoStackBySide((prev) => ({ ...prev, [activeSide]: [] }));
+      writeBookToStorage(activeSide, pgn);
+      lastSavedPgnRef.current[activeSide] = pgn;
+      setStatus(`Imported ${activeSide} PGN`);
     } catch {
-      setStatus(`Failed to reload ${activeSide} book`);
+      setStatus('Import failed');
+    } finally {
+      event.target.value = '';
     }
   };
 
-  const deleteBranch = (branchRootId: string) => {
+  const lichessTotal = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
+  const canGoBack = Boolean(selectedNode.parentId);
+  const visibleTopStatus = status === 'Ready' ? '' : status;
+  const visibleEngineStatus =
+    engineStatus === 'done' || engineStatus === 'stopped' || engineStatus === 'analyzing' ? '' : engineStatus;
+  const visibleLichessStatus = lichessStatus === 'done' || lichessStatus === 'idle' ? '' : lichessStatus;
+  const filteredLichessMoves = useMemo(() => {
+    if (!lichessData?.moves || lichessTotal <= 0) return [];
+    const thresholdShare = lichessArrowThreshold / 100;
+    return lichessData.moves.filter((move) => {
+      const total = move.white + move.draws + move.black;
+      return total / lichessTotal > thresholdShare;
+    });
+  }, [lichessData, lichessTotal, lichessArrowThreshold]);
+  const pairedMoves = useMemo(() => {
+    const plies = path.slice(1);
+    const rows: Array<{ number: number; white?: MoveNode; black?: MoveNode }> = [];
+    for (let i = 0; i < plies.length; i += 2) {
+      rows.push({
+        number: Math.floor(i / 2) + 1,
+        white: plies[i],
+        black: plies[i + 1],
+      });
+    }
+    return rows;
+  }, [path]);
+
+  const goBackOneMove = () => {
+    const parentId = selectedNode.parentId;
+    if (!parentId) return;
+    navigateToNode(activeSide, parentId);
+  };
+
+  const deleteLastMove = () => {
+    const branchRootId = selectedNode.id;
+    const parentId = selectedNode.parentId;
+    if (!parentId) return;
+
+    setUndoStackBySide((prev) => ({
+      ...prev,
+      [activeSide]: [...prev[activeSide], { tree, selectedNodeId: selectedNode.id }].slice(-200),
+    }));
     setTrees((prev) => {
       const currentTree = prev[activeSide];
       const nextTree = removeBranch(currentTree, branchRootId);
       return { ...prev, [activeSide]: nextTree };
     });
 
-    setSelectedNodeBySide((prev) => {
-      const currentSelected = prev[activeSide];
-      if (!isNodeInSubtree(tree, currentSelected, branchRootId)) return prev;
-      const fallback = tree.nodes[branchRootId]?.parentId ?? tree.rootId;
-      return { ...prev, [activeSide]: fallback };
-    });
+    setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: parentId }));
   };
 
-  const lichessTotal = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
+  const navigateToNode = (side: Side, nextId: string) => {
+    const currentId = selectedNodeBySide[side] ?? trees[side].rootId;
+    if (currentId === nextId) return;
+    setUndoStackBySide((prev) => ({
+      ...prev,
+      [side]: [...prev[side], { tree: trees[side], selectedNodeId: currentId }].slice(-200),
+    }));
+    setSelectedNodeBySide((prev) => ({ ...prev, [side]: nextId }));
+  };
+
+  const undoNavigation = () => {
+    const stack = undoStackBySide[activeSide];
+    if (stack.length === 0) return;
+
+    const nextStack = [...stack];
+    const snapshot = nextStack.pop();
+    if (!snapshot) return;
+
+    setUndoStackBySide((prev) => ({ ...prev, [activeSide]: nextStack }));
+    setTrees((prev) => ({ ...prev, [activeSide]: snapshot.tree }));
+    setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: snapshot.selectedNodeId }));
+  };
+
+  const renderMoveCell = (node?: MoveNode) => {
+    if (!node) return '';
+    return (
+      <button
+        className="table-move-btn"
+        onClick={() => navigateToNode(activeSide, node.id)}
+      >
+        {toFigurineSan(node.moveSan ?? '')}
+      </button>
+    );
+  };
 
   return (
     <div className="app">
       <header className="topbar">
-        <h1>Opening Prep Trainer</h1>
         <div className="controls-row">
-          <label>
-            Repertoire
-            <select value={activeSide} onChange={(e) => setActiveSide(e.target.value as Side)}>
-              <option value="white">White</option>
-              <option value="black">Black</option>
-            </select>
-          </label>
-          <button onClick={() => setOrientation((prev) => (prev === 'white' ? 'black' : 'white'))}>Rotate board</button>
-          <button onClick={saveBook}>Save {activeSide} PGN</button>
-          <button onClick={reloadBook}>Reload {activeSide} PGN</button>
-          <span className="status">{status}</span>
+          <button onClick={() => setIsOptionsOpen(true)}>Options</button>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".pgn,.txt,text/plain,application/x-chess-pgn"
+            style={{ display: 'none' }}
+            onChange={importPgn}
+          />
+          {visibleTopStatus && <span className="status">{visibleTopStatus}</span>}
         </div>
       </header>
 
       <main className="layout">
         <section className="left-panel">
-          <Board
-            fen={selectedNode.fen}
-            orientation={orientation}
-            lastMove={lastMove}
-            arrows={autoArrows}
-            onMove={makeMove}
-          />
+          <div className="board-row">
+            <aside className="lichess-panel card">
+              <div className="card-head">
+                <h2>Lichess Opening Database</h2>
+                <label className="inline-check">
+                  <input
+                    type="checkbox"
+                    checked={showLichessArrows}
+                    onChange={(e) => setShowLichessArrows(e.target.checked)}
+                    aria-label="Toggle Lichess arrows"
+                  />
+                </label>
+                <button onClick={() => setIsLichessFilterOpen(true)}>Filters</button>
+              </div>
+              {visibleLichessStatus && <div className="status">{visibleLichessStatus}</div>}
+              {lichessData && (
+                <>
+                  <div className="table">
+                    {filteredLichessMoves.map((move) => {
+                      const total = move.white + move.draws + move.black;
+                      return (
+                        <div className="table-row" key={`${move.uci}-${move.san}`}>
+                          <span>{toFigurineSan(move.san)}</span>
+                          <span>
+                            {formatGamesCount(total)} ({formatPercent(total, lichessTotal)})
+                          </span>
+                          <span>
+                            <LichessStatsBar white={move.white} draws={move.draws} black={move.black} total={total} />
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="stockfish-inline">
+                    <div className="controls-row">
+                      <button
+                        onClick={() => {
+                          setEngineRunning((prev) => {
+                            if (prev) {
+                              stockfishRef.current?.postMessage('stop');
+                              setEngineStatus('stopped');
+                            }
+                            return !prev;
+                          });
+                        }}
+                      >
+                        {engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
+                      </button>
+                      <label>
+                        Depth
+                        <input
+                          type="number"
+                          min={6}
+                          max={28}
+                          value={engineDepth}
+                          onChange={(e) => setEngineDepth(Number(e.target.value) || 16)}
+                        />
+                      </label>
+                      <label>
+                        Lines
+                        <span className="inline-stepper">
+                          <button
+                            type="button"
+                            onClick={() => setEngineMultiPv((prev) => Math.max(1, prev - 1))}
+                            aria-label="Decrease lines"
+                          >
+                            -
+                          </button>
+                          <span className="stepper-value">{engineMultiPv}</span>
+                          <button
+                            type="button"
+                            onClick={() => setEngineMultiPv((prev) => Math.min(10, prev + 1))}
+                            aria-label="Increase lines"
+                          >
+                            +
+                          </button>
+                          <label className="inline-check">
+                            <input
+                              type="checkbox"
+                              checked={showStockfishArrows}
+                              onChange={(e) => setShowStockfishArrows(e.target.checked)}
+                              aria-label="Toggle Stockfish arrows"
+                            />
+                          </label>
+                        </span>
+                      </label>
+                      {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
+                    </div>
+                    <div className="table">
+                      {engineLines.map((line) => (
+                        <div className="table-row" key={line.multipv}>
+                          <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
+                          <span>{line.scoreText}</span>
+                          <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+            </aside>
 
-          <div className="card">
-            <h2>Variants From Current Position</h2>
-            {childNodes.length === 0 && <p>No child moves yet.</p>}
-            {childNodes.map((node) => (
-              <div key={node.id} className="variant-row">
-                <button onClick={() => setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: node.id }))}>
-                  {node.moveSan}
+            <div className="board-center">
+              <Board
+                fen={selectedNode.fen}
+                orientation={orientation}
+                lastMove={lastMove}
+                arrows={autoArrows}
+                onMove={makeMove}
+              />
+              <div className="board-meta">
+                {lichessData?.opening && <div>{`${lichessData.opening.eco} ${lichessData.opening.name}`}</div>}
+                <div className="stats-row">
+                  <LichessStatsBar
+                    white={lichessData?.white ?? 0}
+                    draws={lichessData?.draws ?? 0}
+                    black={lichessData?.black ?? 0}
+                    total={lichessTotal}
+                  />
+                  <span className="games-total">{formatGamesCount(lichessTotal)} games</span>
+                </div>
+              </div>
+            </div>
+
+            <aside className="move-list card">
+              <div className="controls-row">
+                <button onClick={goBackOneMove} disabled={!canGoBack}>
+                  Back 1 move
                 </button>
-                <button className="danger" onClick={() => deleteBranch(node.id)}>
-                  Remove branch
+                <button onClick={deleteLastMove} disabled={!canGoBack}>
+                  Delete last move
+                </button>
+                <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
+                  Undo
                 </button>
               </div>
-            ))}
-          </div>
-
-          <div className="card">
-            <h2>Stockfish (Local)</h2>
-            <div className="controls-row">
-              <label>
-                Depth
-                <input
-                  type="number"
-                  min={6}
-                  max={28}
-                  value={engineDepth}
-                  onChange={(e) => setEngineDepth(Number(e.target.value) || 16)}
-                />
-              </label>
-              <span className="status">{engineStatus}</span>
-            </div>
-            <div className="table">
-              {engineLines.length === 0 && <p>No analysis yet.</p>}
-              {engineLines.map((line) => (
-                <div className="table-row" key={line.multipv}>
-                  <span>#{line.multipv}</span>
-                  <span>{line.bestMove || '-'}</span>
-                  <span>{line.scoreText}</span>
-                  <span>{line.pv}</span>
+              {path.length > 1 && (
+                <div className="move-table-wrap">
+                  <table className="move-table">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>White</th>
+                        <th>Black</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pairedMoves.map((row) => (
+                        <tr key={row.number}>
+                          <td>{row.number}</td>
+                          <td>{renderMoveCell(row.white)}</td>
+                          <td>{renderMoveCell(row.black)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              ))}
-            </div>
+              )}
+            </aside>
           </div>
 
-          <div className="card">
-            <h2>Lichess Opening Database</h2>
+        </section>
+      </main>
+
+      {isOptionsOpen && (
+        <div className="modal-backdrop" onClick={() => setIsOptionsOpen(false)}>
+          <div className="modal-card options-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="card-head">
+              <h2>Options</h2>
+              <button onClick={() => setIsOptionsOpen(false)}>Close</button>
+            </div>
+            <div className="options-grid">
+              <button
+                onClick={() => {
+                  setOrientation((prev) => (prev === 'white' ? 'black' : 'white'));
+                  setIsOptionsOpen(false);
+                }}
+              >
+                Rotate board ({activeSide} repertoire)
+              </button>
+              <button
+                onClick={() => {
+                  void saveBook();
+                  setIsOptionsOpen(false);
+                }}
+              >
+                Save {activeSide} PGN
+              </button>
+              <button
+                onClick={() => {
+                  exportPgn();
+                  setIsOptionsOpen(false);
+                }}
+              >
+                Export {activeSide} PGN
+              </button>
+              <button
+                onClick={() => {
+                  openImportDialog();
+                  setIsOptionsOpen(false);
+                }}
+              >
+                Import {activeSide} PGN
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isLichessFilterOpen && (
+        <div className="modal-backdrop" onClick={() => setIsLichessFilterOpen(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="card-head">
+              <h2>Lichess Filters</h2>
+              <button onClick={() => setIsLichessFilterOpen(false)}>Close</button>
+            </div>
             <div className="filters-grid">
               <label>
-                Play sequence
-                <input value={playFilter} onChange={(e) => setPlayFilter(e.target.value)} placeholder="e2e4,e7e5" />
+                Database
+                <span className="toggle-group">
+                  <button
+                    type="button"
+                    className={lichessSource === 'lichess' ? 'active' : ''}
+                    onClick={() => setLichessSource('lichess')}
+                  >
+                    Lichess
+                  </button>
+                  <button
+                    type="button"
+                    className={lichessSource === 'masters' ? 'active' : ''}
+                    onClick={() => setLichessSource('masters')}
+                  >
+                    Masters
+                  </button>
+                </span>
               </label>
               <label>
-                Moves
+                Date range
+                <span className="toggle-group">
+                  <button type="button" className={dateRange === '1y' ? 'active' : ''} onClick={() => setDateRange('1y')}>
+                    Last year
+                  </button>
+                  <button type="button" className={dateRange === '3y' ? 'active' : ''} onClick={() => setDateRange('3y')}>
+                    Last 3 years
+                  </button>
+                  <button type="button" className={dateRange === 'all' ? 'active' : ''} onClick={() => setDateRange('all')}>
+                    All
+                  </button>
+                </span>
+              </label>
+              <label>
+                Arrow threshold (%)
                 <input
                   type="number"
-                  min={2}
-                  max={30}
-                  value={movesFilter}
-                  onChange={(e) => setMovesFilter(Number(e.target.value) || 12)}
+                  min={1}
+                  max={100}
+                  value={lichessArrowThreshold}
+                  onChange={(e) => setLichessArrowThreshold(Number(e.target.value) || 5)}
                 />
-              </label>
-              <label>
-                Since (YYYY-MM)
-                <input value={sinceFilter} onChange={(e) => setSinceFilter(e.target.value)} placeholder="2020-01" />
-              </label>
-              <label>
-                Until (YYYY-MM)
-                <input value={untilFilter} onChange={(e) => setUntilFilter(e.target.value)} placeholder="2026-02" />
               </label>
             </div>
 
-            <div className="checkbox-grid">
+            {lichessSource === 'lichess' && <div className="checkbox-grid">
               <div>
                 <strong>Speeds</strong>
                 {SPEEDS.map((speed) => (
@@ -745,52 +1288,18 @@ function App() {
                   </label>
                 ))}
               </div>
-            </div>
-
-            <div className="status">{lichessStatus}</div>
-            {lichessData && (
-              <>
-                <p>
-                  {lichessData.opening ? `${lichessData.opening.eco} ${lichessData.opening.name}` : 'Opening not named'}
-                </p>
-                <p>
-                  White {formatPercent(lichessData.white, lichessTotal)} | Draw {formatPercent(lichessData.draws, lichessTotal)} |
-                  Black {formatPercent(lichessData.black, lichessTotal)} ({lichessTotal} games)
-                </p>
-                <div className="table">
-                  {lichessData.moves?.slice(0, 12).map((move) => {
-                    const total = move.white + move.draws + move.black;
-                    return (
-                      <div className="table-row" key={`${move.uci}-${move.san}`}>
-                        <span>{move.san}</span>
-                        <span>{move.uci}</span>
-                        <span>{total}</span>
-                        <span>
-                          W {formatPercent(move.white, total)} / D {formatPercent(move.draws, total)} / B{' '}
-                          {formatPercent(move.black, total)}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            )}
+            </div>}
+            <label className="inline-check">
+              <input
+                type="checkbox"
+                checked={showLichessOnTreeMoves}
+                onChange={(e) => setShowLichessOnTreeMoves(e.target.checked)}
+              />
+              Show Lichess arrows on tree moves (green arrows)
+            </label>
           </div>
-        </section>
-
-        <aside className="right-panel card">
-          <h2>Current Move List</h2>
-          {path.length <= 1 && <p>Root position</p>}
-          {path.slice(1).map((node, index) => (
-            <div key={node.id} className="move-row">
-              <button onClick={() => setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: node.id }))}>
-                {Math.floor(index / 2) + 1}{index % 2 === 0 ? '.' : '...'} {node.moveSan}
-              </button>
-            </div>
-          ))}
-          <button onClick={() => setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: tree.rootId }))}>Back to root</button>
-        </aside>
-      </main>
+        </div>
+      )}
     </div>
   );
 }
