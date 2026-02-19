@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEventHandler } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEventHandler, type ReactNode } from 'react';
 import { Chess, type Move } from 'chess.js';
 import { Chessground } from '@lichess-org/chessground';
 import type { Api as ChessgroundApi } from '@lichess-org/chessground/api';
@@ -12,7 +12,7 @@ import './App.css';
 
 type Side = 'white' | 'black';
 type LichessSource = 'lichess' | 'masters';
-type DateRange = '1y' | '2y' | 'all';
+type DateRange = '1y' | '3y' | null;
 
 type MoveNode = {
   id: string;
@@ -60,6 +60,14 @@ type UndoSnapshot = {
   selectedNodeId: string;
 };
 
+type TrainingSession = {
+  side: Side;
+  rootNodeId: string;
+  hintRequested: boolean;
+  hintVisible: boolean;
+  hintMoveUci: string | null;
+};
+
 const START_FEN = 'start';
 const START_POS_FEN = new Chess().fen();
 const SPEEDS = ['bullet', 'blitz', 'rapid', 'classical'] as const;
@@ -81,6 +89,60 @@ const ARROW_BRUSHES: DrawBrushes = {
   yellowSoft: { key: 'ys', color: '#e68f00', opacity: 0.5, lineWidth: 10 },
 };
 const ORIENTATION_STORAGE_KEY = 'opening-board-orientation';
+
+function TabIconBase(props: { children: ReactNode; viewBox?: string }) {
+  const { children, viewBox = '0 0 24 24' } = props;
+  return (
+    <svg className="tab-icon" viewBox={viewBox} aria-hidden="true" focusable="false">
+      {children}
+    </svg>
+  );
+}
+
+function DbIcon() {
+  return (
+    <TabIconBase>
+      <ellipse cx="12" cy="5" rx="7" ry="3" fill="none" stroke="currentColor" strokeWidth="1.9" />
+      <path d="M5 5v5c0 1.7 3.1 3 7 3s7-1.3 7-3V5" fill="none" stroke="currentColor" strokeWidth="1.9" />
+      <path d="M5 10v5c0 1.7 3.1 3 7 3s7-1.3 7-3v-5" fill="none" stroke="currentColor" strokeWidth="1.9" />
+    </TabIconBase>
+  );
+}
+
+function ComputerIcon() {
+  return (
+    <TabIconBase>
+      <rect x="4" y="5" width="16" height="11" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.9" />
+      <path d="M9 19h6M12 16v3" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+    </TabIconBase>
+  );
+}
+
+function MoveIcon() {
+  return (
+    <TabIconBase>
+      <rect x="4" y="5" width="16" height="14" rx="1.8" fill="none" stroke="currentColor" strokeWidth="1.9" />
+      <path
+        d="M4 10h16M4 14h16M9.33 5v14M14.66 5v14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+    </TabIconBase>
+  );
+}
+
+function TrainIcon() {
+  return (
+    <TabIconBase>
+      <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="1.9" />
+      <circle cx="12" cy="12" r="4.4" fill="none" stroke="currentColor" strokeWidth="1.9" />
+      <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+      <path d="M12 4v2.2M12 17.8V20M4 12h2.2M17.8 12H20" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+    </TabIconBase>
+  );
+}
 
 function createEmptyTree(side: Side): MoveTree {
   const rootId = `${side}-0`;
@@ -485,7 +547,7 @@ function App() {
   const [showLichessOnTreeMoves, setShowLichessOnTreeMoves] = useState(true);
   const [isLichessFilterOpen, setIsLichessFilterOpen] = useState(false);
   const [lichessSource, setLichessSource] = useState<LichessSource>('lichess');
-  const [dateRange, setDateRange] = useState<DateRange>('all');
+  const [dateRange, setDateRange] = useState<DateRange>(null);
   const [lichessArrowThreshold, setLichessArrowThreshold] = useState(5);
   const [lichessArrowThresholdInput, setLichessArrowThresholdInput] = useState('5');
   const [selectedSpeeds, setSelectedSpeeds] = useState<string[]>(['blitz', 'rapid', 'classical']);
@@ -496,6 +558,7 @@ function App() {
   });
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
   const [portraitTab, setPortraitTab] = useState<'lichess' | 'stockfish' | 'moves'>('lichess');
+  const [trainingSession, setTrainingSession] = useState<TrainingSession | null>(null);
 
   const stockfishRef = useRef<Worker | null>(null);
   const engineReadyRef = useRef(false);
@@ -508,6 +571,7 @@ function App() {
   const tree = trees[activeSide];
   const selectedNodeId = selectedNodeBySide[activeSide] ?? tree.rootId;
   const selectedNode = tree.nodes[selectedNodeId] ?? tree.nodes[tree.rootId];
+  const trainingForActive = trainingSession?.side === activeSide;
 
   const path = useMemo(() => buildPath(tree, selectedNode.id), [tree, selectedNode.id]);
 
@@ -735,10 +799,10 @@ function App() {
         if (selectedRatings.length) params.set('ratings', selectedRatings.join(','));
       }
 
-      if (dateRange !== 'all') {
+      if (dateRange) {
         const now = new Date();
         const until = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-        const yearsBack = dateRange === '1y' ? 1 : 2;
+        const yearsBack = dateRange === '1y' ? 1 : 3;
         const sinceDate = new Date(now);
         sinceDate.setFullYear(now.getFullYear() - yearsBack);
         const since = `${sinceDate.getFullYear()}-${String(sinceDate.getMonth() + 1).padStart(2, '0')}`;
@@ -768,6 +832,63 @@ function App() {
     };
   }, [selectedNode.fen, selectedSpeeds, selectedRatings, dateRange, lichessSource]);
 
+  const clearTrainingHint = () => {
+    setTrainingSession((prev) =>
+      prev ? { ...prev, hintRequested: false, hintVisible: false, hintMoveUci: null } : prev,
+    );
+  };
+
+  const advanceTrainingPosition = (side: Side, rootNodeId: string, startNodeId: string) => {
+    const sideTree = trees[side];
+    const rootNode = sideTree.nodes[rootNodeId];
+    if (!rootNode) return;
+
+    let cursorId = startNodeId;
+    const maxSteps = 256;
+    for (let step = 0; step < maxSteps; step += 1) {
+      const cursor = sideTree.nodes[cursorId] ?? rootNode;
+      if (cursor.children.length === 0) {
+        break;
+      }
+
+      if (toTurnColor(cursor.fen) === side) break;
+      const randomChildId = cursor.children[Math.floor(Math.random() * cursor.children.length)];
+      cursorId = randomChildId;
+    }
+
+    setSelectedNodeBySide((prev) => ({ ...prev, [side]: cursorId }));
+    clearTrainingHint();
+  };
+
+  const startTraining = () => {
+    const side = activeSide;
+    const rootNodeId = selectedNode.id;
+    setTrainingSession({ side, rootNodeId, hintRequested: false, hintVisible: false, hintMoveUci: null });
+    advanceTrainingPosition(side, rootNodeId, rootNodeId);
+    setPortraitTab('moves');
+  };
+
+  const stopTraining = () => {
+    setTrainingSession(null);
+  };
+
+  const restartTrainingLine = () => {
+    if (!trainingSession) return;
+    clearTrainingHint();
+    advanceTrainingPosition(trainingSession.side, trainingSession.rootNodeId, trainingSession.rootNodeId);
+  };
+
+  useEffect(() => {
+    if (!trainingSession) return;
+    if (orientation !== trainingSession.side) {
+      setTrainingSession(null);
+      return;
+    }
+    if (!trees[trainingSession.side].nodes[trainingSession.rootNodeId]) {
+      setTrainingSession(null);
+    }
+  }, [orientation, trainingSession, trees]);
+
   const makeMove = (orig: Key, dest: Key) => {
     const currentTree = trees[activeSide];
     const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
@@ -779,6 +900,31 @@ function App() {
 
     const uci = uciFromMove(move);
     const existingChildId = currentNode.children.find((id) => currentTree.nodes[id].moveUci === uci);
+
+    if (trainingSession && trainingSession.side === activeSide) {
+      if (currentNode.children.length === 0) return;
+      if (toTurnColor(currentNode.fen) !== activeSide) return;
+
+      if (!existingChildId) {
+        const hintChildId = currentNode.children[Math.floor(Math.random() * currentNode.children.length)];
+        const hintMoveUci = hintChildId ? currentTree.nodes[hintChildId]?.moveUci ?? null : null;
+        setTrainingSession((prev) =>
+          prev && prev.side === activeSide
+            ? {
+                ...prev,
+                hintRequested: true,
+                hintVisible: false,
+                hintMoveUci,
+              }
+            : prev,
+        );
+        return;
+      }
+
+      clearTrainingHint();
+      advanceTrainingPosition(activeSide, trainingSession.rootNodeId, existingChildId);
+      return;
+    }
 
     let nextTree = currentTree;
     let nextNodeId = existingChildId;
@@ -858,6 +1004,17 @@ function App() {
   };
 
   const lichessTotal = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
+  const isTrainingActive = Boolean(trainingSession && trainingSession.side === activeSide);
+  const showHintButton = Boolean(isTrainingActive && trainingSession?.hintRequested);
+  const showTrainButton = isTrainingActive || childNodes.length > 0;
+  const isTrainingLineEnd = Boolean(isTrainingActive && childNodes.length === 0);
+  const trainingHintArrow = useMemo<DrawShape[]>(() => {
+    if (!isTrainingActive || !trainingSession?.hintVisible || !trainingSession.hintMoveUci) return [];
+    const keyPair = parseUciMove(trainingSession.hintMoveUci);
+    if (!keyPair) return [];
+    const [orig, dest] = keyPair;
+    return [{ orig, dest, brush: 'green' }];
+  }, [isTrainingActive, trainingSession]);
   const canGoBack = Boolean(selectedNode.parentId);
   const visibleTopStatus = status === 'Ready' ? '' : status;
   const visibleEngineStatus =
@@ -885,12 +1042,14 @@ function App() {
   }, [path]);
 
   const goBackOneMove = () => {
+    if (isTrainingActive) return;
     const parentId = selectedNode.parentId;
     if (!parentId) return;
     navigateToNode(activeSide, parentId);
   };
 
   const deleteLastMove = () => {
+    if (isTrainingActive) return;
     const branchRootId = selectedNode.id;
     const parentId = selectedNode.parentId;
     if (!parentId) return;
@@ -909,6 +1068,7 @@ function App() {
   };
 
   const navigateToNode = (side: Side, nextId: string) => {
+    if (trainingSession && trainingSession.side === side) return;
     const currentId = selectedNodeBySide[side] ?? trees[side].rootId;
     if (currentId === nextId) return;
     setUndoStackBySide((prev) => ({
@@ -919,6 +1079,7 @@ function App() {
   };
 
   const undoNavigation = () => {
+    if (isTrainingActive) return;
     const stack = undoStackBySide[activeSide];
     if (stack.length === 0) return;
 
@@ -952,6 +1113,7 @@ function App() {
     return (
       <button
         className="table-move-btn"
+        disabled={isTrainingActive}
         onClick={() => navigateToNode(activeSide, node.id)}
       >
         {toFigurineSan(node.moveSan ?? '')}
@@ -976,8 +1138,8 @@ function App() {
 
       <main className="layout">
         <section className="left-panel">
-          <div className="board-row">
-            <aside className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}>
+          <div className={`board-row ${isTrainingActive ? 'training-mode' : ''}`}>
+            {!isTrainingActive && <aside className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}>
               <div className="card-head">
                 <span />
                 <label className="inline-check">
@@ -1065,7 +1227,7 @@ function App() {
                   </div>
                 </>
               )}
-            </aside>
+            </aside>}
 
             <div className="board-center">
               <div className="board-meta">
@@ -1091,44 +1253,85 @@ function App() {
                 fen={selectedNode.fen}
                 orientation={orientation}
                 lastMove={lastMove}
-                arrows={autoArrows}
+                arrows={trainingForActive ? trainingHintArrow : autoArrows}
                 onMove={makeMove}
               />
               <div className="portrait-tabbar">
-                <button
-                  type="button"
-                  className={portraitTab === 'lichess' ? 'active' : ''}
-                  onClick={() => setPortraitTab('lichess')}
-                >
-                  Lichess
-                </button>
-                <button
-                  type="button"
-                  className={portraitTab === 'stockfish' ? 'active' : ''}
-                  onClick={() => setPortraitTab('stockfish')}
-                >
-                  Stockfish
-                </button>
-                <button
-                  type="button"
-                  className={portraitTab === 'moves' ? 'active' : ''}
-                  onClick={() => setPortraitTab('moves')}
-                >
-                  Moves
-                </button>
-                <button
-                  className="gear-btn portrait-filters-btn"
-                  type="button"
-                  aria-label="Filters"
-                  title="Filters"
-                  onClick={() => setIsLichessFilterOpen(true)}
-                >
-                  ⚙
-                </button>
+                {!isTrainingActive && (
+                  <>
+                    <button
+                      type="button"
+                      className={portraitTab === 'lichess' ? 'active' : ''}
+                      onClick={() => setPortraitTab('lichess')}
+                      aria-label="Lichess"
+                      title="Lichess"
+                    >
+                      <DbIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className={portraitTab === 'stockfish' ? 'active' : ''}
+                      onClick={() => setPortraitTab('stockfish')}
+                      aria-label="Stockfish"
+                      title="Stockfish"
+                    >
+                      <ComputerIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className={portraitTab === 'moves' ? 'active' : ''}
+                      onClick={() => setPortraitTab('moves')}
+                      aria-label="Moves"
+                      title="Moves"
+                    >
+                      <MoveIcon />
+                    </button>
+                  </>
+                )}
+                {showTrainButton && (
+                  <button
+                    type="button"
+                    className={isTrainingActive ? 'active' : ''}
+                    onClick={() => (isTrainingActive ? stopTraining() : startTraining())}
+                    aria-label="Train"
+                    title="Train"
+                  >
+                    <TrainIcon />
+                  </button>
+                )}
+                {!isTrainingActive && (
+                  <button
+                    className="gear-btn portrait-filters-btn"
+                    type="button"
+                    aria-label="Filters"
+                    title="Filters"
+                    onClick={() => setIsLichessFilterOpen(true)}
+                  >
+                    ⚙
+                  </button>
+                )}
               </div>
+              {isTrainingActive && showHintButton && (
+                <div className="controls-row training-hint-row">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setTrainingSession((prev) => (prev ? { ...prev, hintVisible: true } : prev))
+                    }
+                  >
+                    Hint
+                  </button>
+                </div>
+              )}
+              {isTrainingLineEnd && (
+                <div className="controls-row training-hint-row">
+                  <button type="button" onClick={restartTrainingLine}>
+                    Continue
+                  </button>
+                </div>
+              )}
             </div>
-
-            <aside className={`stockfish-panel card portrait-only portrait-pane ${portraitTab === 'stockfish' ? 'active' : ''}`}>
+            {!isTrainingActive && <aside className={`stockfish-panel card portrait-only portrait-pane ${portraitTab === 'stockfish' ? 'active' : ''}`}>
               <div className="controls-row">
                 <button
                   aria-label={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
@@ -1181,23 +1384,28 @@ function App() {
                   </div>
                 ))}
               </div>
-            </aside>
+            </aside>}
 
-            <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''}`}>
+            {!isTrainingActive && <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''}`}>
               <div className="controls-row">
-                <button onClick={goBackOneMove} disabled={!canGoBack} aria-label="Back 1 move" title="Back 1 move">
+                <button
+                  onClick={goBackOneMove}
+                  disabled={!canGoBack || isTrainingActive}
+                  aria-label="Back 1 move"
+                  title="Back 1 move"
+                >
                   ←
                 </button>
                 <button
                   className="danger"
                   onClick={deleteLastMove}
-                  disabled={!canGoBack}
+                  disabled={!canGoBack || isTrainingActive}
                   aria-label="Delete last move"
                   title="Delete last move"
                 >
                   ✕
                 </button>
-                <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
+                <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0 || isTrainingActive}>
                   Undo
                 </button>
               </div>
@@ -1223,7 +1431,7 @@ function App() {
                   </table>
                 </div>
               )}
-            </aside>
+            </aside>}
           </div>
 
         </section>
@@ -1279,15 +1487,8 @@ function App() {
                 <span className="toggle-group">
                   <button
                     type="button"
-                    className={lichessSource === 'lichess' ? 'active' : ''}
-                    onClick={() => setLichessSource('lichess')}
-                  >
-                    Lichess
-                  </button>
-                  <button
-                    type="button"
                     className={lichessSource === 'masters' ? 'active' : ''}
-                    onClick={() => setLichessSource('masters')}
+                    onClick={() => setLichessSource((prev) => (prev === 'masters' ? 'lichess' : 'masters'))}
                   >
                     Masters
                   </button>
@@ -1296,14 +1497,19 @@ function App() {
               <label>
                 Date range
                 <span className="toggle-group">
-                  <button type="button" className={dateRange === '1y' ? 'active' : ''} onClick={() => setDateRange('1y')}>
+                  <button
+                    type="button"
+                    className={dateRange === '1y' ? 'active' : ''}
+                    onClick={() => setDateRange((prev) => (prev === '1y' ? null : '1y'))}
+                  >
                     1Y
                   </button>
-                  <button type="button" className={dateRange === '2y' ? 'active' : ''} onClick={() => setDateRange('2y')}>
-                    2Y
-                  </button>
-                  <button type="button" className={dateRange === 'all' ? 'active' : ''} onClick={() => setDateRange('all')}>
-                    All
+                  <button
+                    type="button"
+                    className={dateRange === '3y' ? 'active' : ''}
+                    onClick={() => setDateRange((prev) => (prev === '3y' ? null : '3y'))}
+                  >
+                    3Y
                   </button>
                 </span>
               </label>
