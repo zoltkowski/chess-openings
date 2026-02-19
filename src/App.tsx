@@ -78,6 +78,7 @@ const ARROW_BRUSHES: DrawBrushes = {
   blueSoft: { key: 'bs', color: '#003088', opacity: 0.5, lineWidth: 10 },
   yellowSoft: { key: 'ys', color: '#e68f00', opacity: 0.5, lineWidth: 10 },
 };
+const ORIENTATION_STORAGE_KEY = 'opening-board-orientation';
 
 function createEmptyTree(side: Side): MoveTree {
   const rootId = `${side}-0`;
@@ -452,7 +453,14 @@ function App() {
     white: 'white-0',
     black: 'black-0',
   });
-  const [orientation, setOrientation] = useState<'white' | 'black'>('white');
+  const [orientation, setOrientation] = useState<'white' | 'black'>(() => {
+    try {
+      const value = window.localStorage.getItem(ORIENTATION_STORAGE_KEY);
+      return value === 'black' ? 'black' : 'white';
+    } catch {
+      return 'white';
+    }
+  });
   const [status, setStatus] = useState('Ready');
   const [engineDepth, setEngineDepth] = useState(16);
   const [engineMultiPv, setEngineMultiPv] = useState(3);
@@ -572,6 +580,14 @@ function App() {
   ]);
 
   const lastMove = parseUciMove(selectedNode.moveUci);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(ORIENTATION_STORAGE_KEY, orientation);
+    } catch {
+      // Ignore storage write errors.
+    }
+  }, [orientation]);
 
   useEffect(() => {
     const loadBooks = async () => {
@@ -909,18 +925,17 @@ function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="controls-row">
-          <button onClick={() => setIsOptionsOpen(true)}>Options</button>
-          <input
-            ref={importInputRef}
-            type="file"
-            accept=".pgn,.txt,text/plain,application/x-chess-pgn"
-            style={{ display: 'none' }}
-            onChange={importPgn}
-          />
-          {visibleTopStatus && <span className="status">{visibleTopStatus}</span>}
+        <div className="topbar-row">
+          <div>{visibleTopStatus && <span className="status">{visibleTopStatus}</span>}</div>
         </div>
       </header>
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".pgn,.txt,text/plain,application/x-chess-pgn"
+        style={{ display: 'none' }}
+        onChange={importPgn}
+      />
 
       <main className="layout">
         <section className="left-panel">
@@ -1050,14 +1065,23 @@ function App() {
 
             <aside className="move-list card">
               <div className="controls-row">
-                <button onClick={goBackOneMove} disabled={!canGoBack}>
-                  Back 1 move
+                <button onClick={goBackOneMove} disabled={!canGoBack} aria-label="Back 1 move" title="Back 1 move">
+                  ←
                 </button>
-                <button onClick={deleteLastMove} disabled={!canGoBack}>
-                  Delete last move
+                <button
+                  className="danger"
+                  onClick={deleteLastMove}
+                  disabled={!canGoBack}
+                  aria-label="Delete last move"
+                  title="Delete last move"
+                >
+                  ✕
                 </button>
                 <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
                   Undo
+                </button>
+                <button className="hamburger-btn" aria-label="Options menu" onClick={() => setIsOptionsOpen(true)}>
+                  &#9776;
                 </button>
               </div>
               {path.length > 1 && (
@@ -1102,7 +1126,7 @@ function App() {
                   setIsOptionsOpen(false);
                 }}
               >
-                Rotate board ({activeSide} repertoire)
+                Rotate board
               </button>
               <button
                 onClick={() => {

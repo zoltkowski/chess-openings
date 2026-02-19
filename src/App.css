@@ -26,8 +26,31 @@ select {
   margin-bottom: 1rem;
 }
 
-.topbar h1 {
-  margin: 0 0 0.75rem;
+.topbar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.hamburger-btn {
+  font-size: 1.2rem;
+  line-height: 1;
+  min-width: 2.2rem;
+  padding: 0.3rem 0.45rem;
+}
+
+.move-list .controls-row .hamburger-btn {
+  margin-left: auto;
+  padding-left: 0.75rem;
+  border-left: 1px solid #cbd5e1;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.move-list .controls-row > button:not(.hamburger-btn) {
+  min-width: 4.6rem;
+  text-align: center;
 }
 
 .controls-row {
