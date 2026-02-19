@@ -249,6 +249,42 @@ select {
   border-bottom: 1px solid #eef1f5;
 }
 
+.lichess-clickable-row {
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.lichess-clickable-row:hover {
+  background: #eef5ff;
+}
+
+.lichess-clickable-row:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+}
+
+.lichess-clickable-row.disabled {
+  cursor: default;
+}
+
+.lichess-clickable-row.disabled:hover {
+  background: transparent;
+}
+
+.stockfish-clickable-row {
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.stockfish-clickable-row:hover {
+  background: #eef5ff;
+}
+
+.stockfish-clickable-row:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+}
+
 .table-row span {
   flex: 1;
   min-width: 0;
@@ -401,11 +437,19 @@ select {
 }
 
 .stockfish-inline .table-row span:first-child {
-  flex: 0 0 54px;
+  flex: 0 0 44px;
 }
 
 .stockfish-inline .table-row span:nth-child(2) {
-  flex: 0 0 62px;
+  flex: 0 0 50px;
+}
+
+.stockfish-panel .table-row span:first-child {
+  flex: 0 0 44px;
+}
+
+.stockfish-panel .table-row span:nth-child(2) {
+  flex: 0 0 50px;
 }
 
 .stats-bar {

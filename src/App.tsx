@@ -608,7 +608,7 @@ function App() {
     black: [],
   });
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
-  const [portraitTab, setPortraitTab] = useState<'lichess' | 'stockfish' | 'moves'>('lichess');
+  const [portraitTab, setPortraitTab] = useState<'lichess' | 'stockfish' | 'moves'>('moves');
   const [trainingSession, setTrainingSession] = useState<TrainingSession | null>(null);
 
   const stockfishRef = useRef<Worker | null>(null);
@@ -968,12 +968,12 @@ function App() {
     }
   }, [orientation, trainingSession, trees]);
 
-  const makeMove = (orig: Key, dest: Key) => {
+  const makeMove = (orig: Key, dest: Key, promotion: 'q' | 'r' | 'b' | 'n' = 'q') => {
     const currentTree = trees[activeSide];
     const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
     const currentNode = currentTree.nodes[currentSelectedId] ?? currentTree.nodes[currentTree.rootId];
     const chess = fenToChess(currentNode.fen);
-    const move = chess.move({ from: orig, to: dest, promotion: 'q' });
+    const move = chess.move({ from: orig, to: dest, promotion });
 
     if (!move) return;
 
@@ -1048,6 +1048,22 @@ function App() {
       ...prev,
       [activeSide]: nextNodeId as string,
     }));
+  };
+
+  const playLichessMove = (uci: string) => {
+    if (isTrainingActive) return;
+    const keyPair = parseUciMove(uci);
+    if (!keyPair) return;
+    const promotionChar = (uci[4] ?? 'q').toLowerCase();
+    const promotion: 'q' | 'r' | 'b' | 'n' = ['q', 'r', 'b', 'n'].includes(promotionChar)
+      ? (promotionChar as 'q' | 'r' | 'b' | 'n')
+      : 'q';
+    makeMove(keyPair[0], keyPair[1], promotion);
+  };
+
+  const playStockfishMove = (uci: string) => {
+    if (isTrainingActive) return;
+    playLichessMove(uci);
   };
 
   const exportPgn = () => {
@@ -1226,7 +1242,19 @@ function App() {
                     {filteredLichessMoves.map((move) => {
                       const total = move.white + move.draws + move.black;
                       return (
-                        <div className="table-row" key={`${move.uci}-${move.san}`}>
+                        <div
+                          className={`table-row lichess-clickable-row ${isTrainingActive ? 'disabled' : ''}`}
+                          key={`${move.uci}-${move.san}`}
+                          role="button"
+                          tabIndex={isTrainingActive ? -1 : 0}
+                          onClick={() => playLichessMove(move.uci)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              playLichessMove(move.uci);
+                            }
+                          }}
+                        >
                           <span className="lichess-cell-move">{toFigurineSan(move.san)}</span>
                           <span className="lichess-cell-games">
                             {formatGamesCount(total)} ({formatPercent(total, lichessTotal)})
@@ -1277,7 +1305,19 @@ function App() {
                     </div>
                     <div className="table">
                       {engineLines.map((line) => (
-                        <div className="table-row" key={line.multipv}>
+                        <div
+                          className="table-row stockfish-clickable-row"
+                          key={line.multipv}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => playStockfishMove(line.bestMove)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              playStockfishMove(line.bestMove);
+                            }
+                          }}
+                        >
                           <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
                           <span>{line.scoreText}</span>
                           <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
@@ -1429,7 +1469,19 @@ function App() {
               </div>
               <div className="table">
                 {engineLines.map((line) => (
-                  <div className="table-row" key={line.multipv}>
+                  <div
+                    className="table-row stockfish-clickable-row"
+                    key={line.multipv}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => playStockfishMove(line.bestMove)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        playStockfishMove(line.bestMove);
+                      }
+                    }}
+                  >
                     <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
                     <span>{line.scoreText}</span>
                     <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
@@ -1523,7 +1575,6 @@ function App() {
           <div className="modal-card options-modal" onClick={(e) => e.stopPropagation()}>
             <div className="card-head">
               <h2>Options</h2>
-              <button onClick={() => setIsOptionsOpen(false)}>Close</button>
             </div>
             <div className="options-grid">
               <button
