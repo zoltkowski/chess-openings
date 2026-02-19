@@ -258,8 +258,8 @@ function parseUciMove(uci: string | null): [Key, Key] | undefined {
 }
 
 function formatPercent(value: number, total: number) {
-  if (total === 0) return '0.0%';
-  return `${((value / total) * 100).toFixed(1)}%`;
+  if (total === 0) return '0%';
+  return `${Math.round((value / total) * 100)}%`;
 }
 
 function formatGamesCount(value: number) {
@@ -370,13 +370,13 @@ function LichessStatsBar(props: { white: number; draws: number; black: number; t
 
   return (
     <div className="stats-bar" aria-label="Lichess outcome distribution">
-      <span className="seg seg-white" style={{ width: `${whitePct}%` }}>
+      <span className="seg seg-white" style={{ flexGrow: whitePct, flexBasis: 0 }}>
         {label(whitePct)}
       </span>
-      <span className="seg seg-draw" style={{ width: `${drawsPct}%` }}>
+      <span className="seg seg-draw" style={{ flexGrow: drawsPct, flexBasis: 0 }}>
         {label(drawsPct)}
       </span>
-      <span className="seg seg-black" style={{ width: `${blackPct}%` }}>
+      <span className="seg seg-black" style={{ flexGrow: blackPct, flexBasis: 0 }}>
         {label(blackPct)}
       </span>
     </div>
@@ -942,7 +942,7 @@ function App() {
           <div className="board-row">
             <aside className="lichess-panel card">
               <div className="card-head">
-                <h2>Lichess Opening Database</h2>
+                <span />
                 <label className="inline-check">
                   <input
                     type="checkbox"
@@ -951,7 +951,6 @@ function App() {
                     aria-label="Toggle Lichess arrows"
                   />
                 </label>
-                <button onClick={() => setIsLichessFilterOpen(true)}>Filters</button>
               </div>
               {visibleLichessStatus && <div className="status">{visibleLichessStatus}</div>}
               {lichessData && (
@@ -975,6 +974,8 @@ function App() {
                   <div className="stockfish-inline">
                     <div className="controls-row">
                       <button
+                        aria-label={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
+                        title={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
                         onClick={() => {
                           setEngineRunning((prev) => {
                             if (prev) {
@@ -985,45 +986,41 @@ function App() {
                           });
                         }}
                       >
-                        {engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
+                        {engineRunning ? '■' : '▶'}
                       </button>
-                      <label>
-                        Depth
+                      <span className="inline-stepper">
+                        <button
+                          type="button"
+                          onClick={() => setEngineMultiPv((prev) => Math.max(1, prev - 1))}
+                          aria-label="Decrease lines"
+                        >
+                          -
+                        </button>
+                        <span className="stepper-value">{engineMultiPv}</span>
+                        <button
+                          type="button"
+                          onClick={() => setEngineMultiPv((prev) => Math.min(10, prev + 1))}
+                          aria-label="Increase lines"
+                        >
+                          +
+                        </button>
+                      </span>
+                      <button
+                        className="gear-btn"
+                        type="button"
+                        aria-label="Filters"
+                        title="Filters"
+                        onClick={() => setIsLichessFilterOpen(true)}
+                      >
+                        ⚙
+                      </button>
+                      <label className="inline-check stockfish-arrow-toggle">
                         <input
-                          type="number"
-                          min={6}
-                          max={28}
-                          value={engineDepth}
-                          onChange={(e) => setEngineDepth(Number(e.target.value) || 16)}
+                          type="checkbox"
+                          checked={showStockfishArrows}
+                          onChange={(e) => setShowStockfishArrows(e.target.checked)}
+                          aria-label="Toggle Stockfish arrows"
                         />
-                      </label>
-                      <label>
-                        Lines
-                        <span className="inline-stepper">
-                          <button
-                            type="button"
-                            onClick={() => setEngineMultiPv((prev) => Math.max(1, prev - 1))}
-                            aria-label="Decrease lines"
-                          >
-                            -
-                          </button>
-                          <span className="stepper-value">{engineMultiPv}</span>
-                          <button
-                            type="button"
-                            onClick={() => setEngineMultiPv((prev) => Math.min(10, prev + 1))}
-                            aria-label="Increase lines"
-                          >
-                            +
-                          </button>
-                          <label className="inline-check">
-                            <input
-                              type="checkbox"
-                              checked={showStockfishArrows}
-                              onChange={(e) => setShowStockfishArrows(e.target.checked)}
-                              aria-label="Toggle Stockfish arrows"
-                            />
-                          </label>
-                        </span>
                       </label>
                       {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
                     </div>
@@ -1198,6 +1195,16 @@ function App() {
                   max={100}
                   value={lichessArrowThreshold}
                   onChange={(e) => setLichessArrowThreshold(Number(e.target.value) || 5)}
+                />
+              </label>
+              <label>
+                Stockfish depth
+                <input
+                  type="number"
+                  min={6}
+                  max={28}
+                  value={engineDepth}
+                  onChange={(e) => setEngineDepth(Number(e.target.value) || 16)}
                 />
               </label>
             </div>

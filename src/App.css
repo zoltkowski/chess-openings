@@ -40,6 +40,13 @@ select {
   padding: 0.3rem 0.45rem;
 }
 
+.gear-btn {
+  font-size: 1.05rem;
+  line-height: 1;
+  min-width: 2.1rem;
+  padding: 0.32rem 0.45rem;
+}
+
 .move-list .controls-row .hamburger-btn {
   margin-left: auto;
   padding-left: 0.75rem;
@@ -203,11 +210,12 @@ select {
 }
 
 .lichess-panel .table-row span:first-child {
-  flex: 0 0 72px;
+  flex: 0 0 52px;
 }
 
 .lichess-panel .table-row span:nth-child(2) {
-  flex: 0 0 112px;
+  flex: 0 0 96px;
+  font-size: 0.82rem;
 }
 
 .danger {
@@ -252,6 +260,10 @@ select {
 
 .card-head h2 {
   margin: 0;
+}
+
+.stockfish-arrow-toggle {
+  margin-left: auto;
 }
 
 .inline-check {
@@ -301,6 +313,8 @@ select {
   justify-content: center;
   font-size: 0.75rem;
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .seg-white {
@@ -387,5 +401,14 @@ select {
 
   .lichess-panel {
     max-height: none;
+  }
+
+  .lichess-panel .table-row span:first-child {
+    flex: 0 0 44px;
+  }
+
+  .lichess-panel .table-row span:nth-child(2) {
+    flex: 0 0 84px;
+    font-size: 0.78rem;
   }
 }
