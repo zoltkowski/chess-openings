@@ -840,25 +840,34 @@ function App() {
     const thresholdShare = lichessArrowThreshold / 100;
     const lichessArrows =
       showLichessArrows && positionGames > 0
-        ? (lichessData?.moves ?? [])
-            .filter((move) => showLichessOnTreeMoves || !treeChildUcis.has(move.uci))
-            .map((move) => {
-              const moveGames = move.white + move.draws + move.black;
-              const share = moveGames / positionGames;
-              const keyPair = parseUciMove(move.uci);
-              return { moveGames, share, keyPair };
-            })
-            .filter((entry) => entry.share >= thresholdShare && Boolean(entry.keyPair))
-            .map((entry) => {
+        ? (() => {
+            const candidates = (lichessData?.moves ?? [])
+              .filter((move) => showLichessOnTreeMoves || !treeChildUcis.has(move.uci))
+              .map((move) => {
+                const moveGames = move.white + move.draws + move.black;
+                const share = moveGames / positionGames;
+                const keyPair = parseUciMove(move.uci);
+                return { share, keyPair };
+              })
+              .filter((entry) => entry.share >= thresholdShare && Boolean(entry.keyPair));
+
+            if (candidates.length === 0) return [];
+
+            const maxShare = Math.max(...candidates.map((item) => item.share), 0);
+            const maxLineWidth = 18;
+
+            return candidates.map((entry) => {
               const [orig, dest] = entry.keyPair as [Key, Key];
-              const lineWidth = 10 + entry.share * 26;
+              const ratio = maxShare > 0 ? entry.share / maxShare : 1;
+              const lineWidth = maxLineWidth * ratio;
               return {
                 orig,
                 dest,
                 brush: 'yellow',
                 modifiers: { lineWidth },
               } as DrawShape;
-            })
+            });
+          })()
         : [];
 
     const engineArrows =
@@ -873,19 +882,21 @@ function App() {
 
             if (candidates.length === 0) return [];
 
-            const values = candidates.map((entry) => entry.evalValue);
-            const min = Math.min(...values);
-            const max = Math.max(...values);
-            const spread = Math.max(1, max - min);
+            const minLineWidth = 6;
+            const maxLineWidth = 18;
+            const topEval = engineLines[0]?.evalValue ?? candidates[0].evalValue;
 
             return candidates.map((entry) => {
               const [orig, dest] = entry.keyPair;
-              const normalized = (entry.evalValue - min) / spread;
+              const diff = Math.max(0, topEval - entry.evalValue);
+              const severity = Math.min(diff / 100, 1);
+              const normalized = candidates.length === 1 ? 1 : 1 - severity;
+              const isClearlyWorse = diff > 100;
               return {
                 orig,
                 dest,
-                brush: 'blue',
-                modifiers: { lineWidth: 10 + normalized * 24 },
+                brush: isClearlyWorse ? 'red' : 'blue',
+                modifiers: { lineWidth: minLineWidth + normalized * (maxLineWidth - minLineWidth) },
               } as DrawShape;
             });
           })()
