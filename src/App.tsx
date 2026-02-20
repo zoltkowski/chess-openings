@@ -1436,6 +1436,23 @@ function App() {
   const visibleEngineStatus =
     engineStatus === 'done' || engineStatus === 'stopped' || engineStatus === 'analyzing' ? '' : engineStatus;
   const visibleLichessStatus = lichessStatus === 'done' || lichessStatus === 'idle' ? '' : lichessStatus;
+  const openingFullTitle = lichessData?.opening ? `${lichessData.opening.eco} ${lichessData.opening.name}` : '';
+  const openingTitleContent = useMemo(() => {
+    if (!lichessData?.opening) return '';
+    const { eco, name } = lichessData.opening;
+    const colonIndex = name.indexOf(':');
+    if (colonIndex < 0) return `${eco} ${name}`;
+    const firstLine = `${eco} ${name.slice(0, colonIndex + 1).trim()}`;
+    const secondLine = name.slice(colonIndex + 1).trim();
+    if (!secondLine) return firstLine;
+    return (
+      <>
+        {firstLine}
+        <br />
+        {secondLine}
+      </>
+    );
+  }, [lichessData]);
   const filteredLichessMoves = useMemo(() => {
     if (!lichessData?.moves || lichessTotal <= 0) return [];
     const thresholdShare = lichessArrowThreshold / 100;
@@ -1651,8 +1668,8 @@ function App() {
             <div className="board-center">
               <div className="board-meta">
                 <div className="board-head-row">
-                  <div className="opening-title" title={lichessData?.opening ? `${lichessData.opening.eco} ${lichessData.opening.name}` : ''}>
-                    {lichessData?.opening ? `${lichessData.opening.eco} ${lichessData.opening.name}` : ''}
+                  <div className="opening-title" title={openingFullTitle}>
+                    {openingTitleContent}
                   </div>
                   <button className="hamburger-btn board-options-btn" aria-label="Options menu" onClick={() => setIsOptionsOpen(true)}>
                     &#9776;
