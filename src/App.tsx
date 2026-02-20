@@ -1900,7 +1900,7 @@ function App() {
                 <div className="arrow-toggle-group">
                   <button
                     type="button"
-                    className={`icon-toggle-btn ${showLichessArrows ? 'active' : ''}`}
+                    className={`icon-toggle-btn with-diagonal-arrow arrow-lichess ${showLichessArrows ? 'active' : ''}`}
                     onClick={() => setShowLichessArrows((prev) => !prev)}
                     aria-label="Toggle Lichess arrows"
                     title="Toggle Lichess arrows"
@@ -1909,7 +1909,7 @@ function App() {
                   </button>
                   <button
                     type="button"
-                    className={`icon-toggle-btn ${showStockfishArrows ? 'active' : ''}`}
+                    className={`icon-toggle-btn with-diagonal-arrow arrow-stockfish ${showStockfishArrows ? 'active' : ''}`}
                     onClick={() => setShowStockfishArrows((prev) => !prev)}
                     aria-label="Toggle Stockfish arrows"
                     title="Toggle Stockfish arrows"
@@ -1918,7 +1918,7 @@ function App() {
                   </button>
                   <button
                     type="button"
-                    className={`icon-toggle-btn ${showTreeArrows ? 'active' : ''}`}
+                    className={`icon-toggle-btn with-diagonal-arrow arrow-tree ${showTreeArrows ? 'active' : ''}`}
                     onClick={() => setShowTreeArrows((prev) => !prev)}
                     aria-label="Toggle tree arrows"
                     title="Toggle tree arrows"
