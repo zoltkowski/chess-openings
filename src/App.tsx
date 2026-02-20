@@ -347,54 +347,8 @@ function createNodeId(tree: MoveTree) {
   return `n-${tree.nextId}`;
 }
 
-function insertLine(tree: MoveTree, sanMoves: string[]): MoveTree {
-  const nextTree: MoveTree = {
-    rootId: tree.rootId,
-    nextId: tree.nextId,
-    nodes: { ...tree.nodes },
-  };
-
-  let currentId = nextTree.rootId;
-  const chess = new Chess();
-
-  for (const san of sanMoves) {
-    const move = chess.move(san);
-    if (!move) break;
-
-    const uci = uciFromMove(move);
-    const currentNode = nextTree.nodes[currentId];
-    const existingChildId = currentNode.children.find((childId) => nextTree.nodes[childId].moveUci === uci);
-
-    if (existingChildId) {
-      currentId = existingChildId;
-      continue;
-    }
-
-    const nodeId = createNodeId(nextTree);
-    nextTree.nextId += 1;
-
-    nextTree.nodes[nodeId] = {
-      id: nodeId,
-      parentId: currentId,
-      fen: chess.fen(),
-      moveSan: move.san,
-      moveUci: uci,
-      children: [],
-    };
-
-    nextTree.nodes[currentId] = {
-      ...currentNode,
-      children: [...currentNode.children, nodeId],
-    };
-
-    currentId = nodeId;
-  }
-
-  return nextTree;
-}
-
-function parsePgnToTree(side: Side, pgn: string): MoveTree {
-  const base = createEmptyTree(side);
+function parsePgnToTree(side: Side, pgn: string, initialTree?: MoveTree): MoveTree {
+  const base = initialTree ?? createEmptyTree(side);
   const normalized = pgn.replace(/\r\n/g, '\n').trim();
   if (!normalized) return base;
 
@@ -411,19 +365,170 @@ function parsePgnToTree(side: Side, pgn: string): MoveTree {
   let tree = base;
 
   for (const chunk of candidates) {
-    const chess = new Chess();
-    try {
-      chess.loadPgn(chunk, { strict: false });
-      const sanMoves = chess.history();
-      if (sanMoves.length > 0) {
-        tree = insertLine(tree, sanMoves);
-      }
-    } catch {
-      continue;
-    }
+    tree = parsePgnChunkIntoTree(tree, chunk);
   }
 
   return tree;
+}
+
+function parsePgnChunkIntoTree(tree: MoveTree, chunk: string): MoveTree {
+  const movetext = chunk
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('['))
+    .join(' ')
+    .trim();
+  if (!movetext) return tree;
+
+  const tokens = tokenizeMovetext(movetext);
+  if (tokens.length === 0) return tree;
+
+  const nextTree: MoveTree = {
+    rootId: tree.rootId,
+    nextId: tree.nextId,
+    nodes: { ...tree.nodes },
+  };
+
+  const parseSequence = (startChess: Chess, startNodeId: string, startIndex: number, stopOnRightParen: boolean): number => {
+    const chess = new Chess(startChess.fen());
+    let nodeId = startNodeId;
+    let index = startIndex;
+    let lastBranchFen: string | null = null;
+    let lastBranchNodeId: string | null = null;
+
+    while (index < tokens.length) {
+      const token = tokens[index];
+      index += 1;
+
+      if (token === ')') {
+        if (stopOnRightParen) return index;
+        continue;
+      }
+
+      if (token === '(') {
+        if (lastBranchFen && lastBranchNodeId) {
+          index = parseSequence(new Chess(lastBranchFen), lastBranchNodeId, index, true);
+        } else {
+          index = parseSequence(new Chess(chess.fen()), nodeId, index, true);
+        }
+        continue;
+      }
+
+      if (isIgnorablePgnToken(token)) continue;
+
+      const san = sanitizeSanToken(token);
+      if (!san) continue;
+
+      const branchFen = chess.fen();
+      const branchNodeId = nodeId;
+      const move = chess.move(san);
+      if (!move) continue;
+
+      lastBranchFen = branchFen;
+      lastBranchNodeId = branchNodeId;
+      nodeId = ensureChildNode(nextTree, nodeId, move, chess);
+    }
+
+    return index;
+  };
+
+  parseSequence(new Chess(), nextTree.rootId, 0, false);
+  return nextTree;
+}
+
+function tokenizeMovetext(text: string): string[] {
+  const tokens: string[] = [];
+  let i = 0;
+
+  while (i < text.length) {
+    const ch = text[i];
+
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+
+    if (ch === '{') {
+      i += 1;
+      while (i < text.length && text[i] !== '}') i += 1;
+      if (i < text.length) i += 1;
+      continue;
+    }
+
+    if (ch === ';') {
+      i += 1;
+      while (i < text.length && text[i] !== '\n') i += 1;
+      continue;
+    }
+
+    if (ch === '(' || ch === ')') {
+      tokens.push(ch);
+      i += 1;
+      continue;
+    }
+
+    let j = i;
+    while (j < text.length) {
+      const c = text[j];
+      if (/\s/.test(c) || c === '(' || c === ')' || c === '{' || c === ';') break;
+      j += 1;
+    }
+    const token = text.slice(i, j).trim();
+    if (token) tokens.push(token);
+    i = j;
+  }
+
+  return tokens;
+}
+
+function isIgnorablePgnToken(token: string) {
+  if (!token) return true;
+  if (token === '*' || token === '1-0' || token === '0-1' || token === '1/2-1/2') return true;
+  if (/^\$\d+$/.test(token)) return true;
+  if (/^\d+\.(\.\.)?$/.test(token)) return true;
+  if (/^\d+\.\.\.$/.test(token)) return true;
+  return false;
+}
+
+function sanitizeSanToken(token: string) {
+  let value = token.trim();
+  if (!value) return null;
+
+  while (/^\d+\.(\.\.)?/.test(value)) {
+    value = value.replace(/^\d+\.(\.\.)?/, '');
+  }
+  value = value.replace(/^\.\.\./, '');
+  value = value.replace(/(?:\$\d+)+$/, '');
+  value = value.replace(/[!?]+$/, '');
+  value = value.replace(/\*$/, '');
+  value = value.trim();
+
+  if (!value || value === '*' || value === '1-0' || value === '0-1' || value === '1/2-1/2') return null;
+  return value;
+}
+
+function ensureChildNode(tree: MoveTree, parentId: string, move: Move, chessAfterMove: Chess) {
+  const parent = tree.nodes[parentId];
+  if (!parent) return parentId;
+
+  const uci = uciFromMove(move);
+  const existingChildId = parent.children.find((childId) => tree.nodes[childId]?.moveUci === uci);
+  if (existingChildId) return existingChildId;
+
+  const nodeId = createNodeId(tree);
+  tree.nextId += 1;
+  tree.nodes[nodeId] = {
+    id: nodeId,
+    parentId,
+    fen: chessAfterMove.fen(),
+    moveSan: move.san,
+    moveUci: uci,
+    children: [],
+  };
+  tree.nodes[parentId] = {
+    ...parent,
+    children: [...parent.children, nodeId],
+  };
+  return nodeId;
 }
 
 function buildPath(tree: MoveTree, nodeId: string): MoveNode[] {
@@ -1699,10 +1804,18 @@ function App() {
     if (!file) return;
     try {
       const pgn = await file.text();
-      const nextTree = parsePgnToTree(activeSide, pgn);
+      const currentTree = trees[activeSide];
+      const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
+      const nextTree = parsePgnToTree(activeSide, pgn, currentTree);
+      setUndoStackBySide((prev) => ({
+        ...prev,
+        [activeSide]: [...prev[activeSide], { tree: currentTree, selectedNodeId: currentSelectedId }].slice(-200),
+      }));
       setTrees((prev) => ({ ...prev, [activeSide]: nextTree }));
-      setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: nextTree.rootId }));
-      setUndoStackBySide((prev) => ({ ...prev, [activeSide]: [] }));
+      setSelectedNodeBySide((prev) => ({
+        ...prev,
+        [activeSide]: nextTree.nodes[currentSelectedId] ? currentSelectedId : nextTree.rootId,
+      }));
       setStatus(`Imported ${activeSide} PGN`);
     } catch {
       setStatus('Import failed');
