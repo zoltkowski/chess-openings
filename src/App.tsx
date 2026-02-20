@@ -1459,7 +1459,18 @@ function App() {
 
   const openInLichessAnalysis = () => {
     const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
-    const url = `https://lichess.org/analysis?fen=${encodeURIComponent(fen)}`;
+    const fenPath = fen.replace(/ /g, '_');
+    const encodedFenPath = encodeURIComponent(fenPath).replace(/%2F/g, '/');
+    const url = `https://lichess.org/analysis/${encodedFenPath}?color=${orientation}`;
+    const isAndroid = /Android/i.test(navigator.userAgent);
+
+    if (isAndroid) {
+      const fallbackUrl = encodeURIComponent(url);
+      const intentUrl = `intent://lichess.org/analysis/${encodedFenPath}?color=${orientation}#Intent;scheme=https;package=org.lichess.mobileapp;S.browser_fallback_url=${fallbackUrl};end`;
+      window.location.href = intentUrl;
+      return;
+    }
+
     window.open(url, '_blank', 'noopener,noreferrer');
   };
 
