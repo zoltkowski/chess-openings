@@ -12,7 +12,7 @@ import './App.css';
 
 type Side = 'white' | 'black';
 type LichessSource = 'lichess' | 'masters' | 'player';
-type DateRange = '1m' | '3m' | '1y' | '3y' | '5y' | '10y' | '20y' | '30y' | '50y' | null;
+type DateRange = '1m' | '2m' | '3m' | '6m' | '1y' | '3y' | '5y' | '10y' | '20y' | '30y' | '50y' | null;
 
 type MoveNode = {
   id: string;
@@ -72,6 +72,7 @@ const START_FEN = 'start';
 const START_POS_FEN = new Chess().fen();
 const FIXED_VARIANT = 'standard';
 const FIXED_SOURCE = 'analysis';
+const MOVE_THRESHOLD_OPTIONS = [0, 1, 5, 10, 20] as const;
 const SPEEDS = ['bullet', 'blitz', 'rapid', 'classical', 'correspondence'] as const;
 const MODES = ['casual', 'rated'] as const;
 const RATINGS = [1200, 1400, 1600, 1800, 2000, 2200, 2500];
@@ -372,8 +373,15 @@ function percentValue(value: number, total: number) {
 
 function formatAverageElo(move: LichessMove) {
   const raw = move.averageRating ?? move.averageElo;
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return '-';
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return '';
   return `${Math.round(raw)}`;
+}
+
+function normalizeMoveThreshold(value: unknown) {
+  const numeric = typeof value === 'number' && Number.isFinite(value) ? value : 5;
+  return [...MOVE_THRESHOLD_OPTIONS].reduce((best, option) =>
+    Math.abs(option - numeric) < Math.abs(best - numeric) ? option : best,
+  );
 }
 
 function parseLastJsonObject<T>(raw: string): T | null {
@@ -583,7 +591,7 @@ function LichessStatsBar(props: { white: number; draws: number; black: number; t
   const drawsPct = percentValue(draws, total);
   const blackPct = percentValue(black, total);
 
-  const label = (pct: number) => (pct >= 8 ? `${pct.toFixed(1)}%` : '');
+  const label = (pct: number) => (pct >= 8 ? `${Math.round(pct)}%` : '');
 
   return (
     <div className="stats-bar" aria-label="Lichess outcome distribution">
@@ -673,7 +681,9 @@ function App() {
     typeof persistedFilterSettings.playerHandle === 'string' ? persistedFilterSettings.playerHandle : '';
   const initialDateRange: DateRange =
     persistedFilterSettings.dateRange === '1m' ||
+    persistedFilterSettings.dateRange === '2m' ||
     persistedFilterSettings.dateRange === '3m' ||
+    persistedFilterSettings.dateRange === '6m' ||
     persistedFilterSettings.dateRange === '1y' ||
     persistedFilterSettings.dateRange === '5y' ||
     persistedFilterSettings.dateRange === '10y' ||
@@ -683,8 +693,10 @@ function App() {
     persistedFilterSettings.dateRange === '3y'
       ? persistedFilterSettings.dateRange
       : null;
-  const initialLichessArrowThreshold = clampInt(persistedFilterSettings.lichessArrowThreshold, 0, 100, 5);
-  const initialEngineDepth = clampInt(persistedFilterSettings.engineDepth, 6, 28, 16);
+  const initialLichessArrowThreshold = normalizeMoveThreshold(
+    clampInt(persistedFilterSettings.lichessArrowThreshold, 0, 100, 5),
+  );
+  const initialEngineDepth = clampInt(persistedFilterSettings.engineDepth, 16, 32, 24);
   const initialSelectedSpeeds = (persistedFilterSettings.selectedSpeeds ?? []).filter((speed): speed is string =>
     SPEEDS.includes(speed as (typeof SPEEDS)[number]),
   );
@@ -713,7 +725,6 @@ function App() {
   });
   const [status, setStatus] = useState('Ready');
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
-  const [engineDepthInput, setEngineDepthInput] = useState(String(initialEngineDepth));
   const [engineMultiPv, setEngineMultiPv] = useState(3);
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
@@ -731,7 +742,6 @@ function App() {
   const [playerHandle, setPlayerHandle] = useState(initialPlayerHandle);
   const [dateRange, setDateRange] = useState<DateRange>(initialDateRange);
   const [lichessArrowThreshold, setLichessArrowThreshold] = useState(initialLichessArrowThreshold);
-  const [lichessArrowThresholdInput, setLichessArrowThresholdInput] = useState(String(initialLichessArrowThreshold));
   const [selectedSpeeds, setSelectedSpeeds] = useState<string[]>(
     initialSelectedSpeeds.length > 0 ? initialSelectedSpeeds : [...SPEEDS],
   );
@@ -891,14 +901,6 @@ function App() {
     selectedModes,
     showLichessOnTreeMoves,
   ]);
-
-  useEffect(() => {
-    setEngineDepthInput(String(engineDepth));
-  }, [engineDepth]);
-
-  useEffect(() => {
-    setLichessArrowThresholdInput(String(lichessArrowThreshold));
-  }, [lichessArrowThreshold]);
 
   useEffect(() => {
     const loadBooks = async () => {
@@ -1068,13 +1070,21 @@ function App() {
 
       const normalizedDateRange: DateRange =
         lichessSource === 'player'
-          ? dateRange
+          ? dateRange === '5y' ||
+            dateRange === '10y' ||
+            dateRange === '20y' ||
+            dateRange === '30y' ||
+            dateRange === '50y'
+            ? null
+            : dateRange
           : lichessSource === 'masters'
-            ? dateRange === '1m' || dateRange === '3m'
+            ? dateRange === '1m' || dateRange === '2m' || dateRange === '3m' || dateRange === '6m'
               ? null
               : dateRange
             : dateRange === '1m' ||
+                dateRange === '2m' ||
                 dateRange === '3m' ||
+                dateRange === '6m' ||
                 dateRange === '20y' ||
                 dateRange === '30y' ||
                 dateRange === '50y'
@@ -1085,9 +1095,13 @@ function App() {
         const now = new Date();
         const sinceDate = new Date(now);
         if (effectiveDateRange === '1m') {
+          sinceDate.setMonth(now.getMonth());
+        } else if (effectiveDateRange === '2m') {
           sinceDate.setMonth(now.getMonth() - 1);
         } else if (effectiveDateRange === '3m') {
-          sinceDate.setMonth(now.getMonth() - 3);
+          sinceDate.setMonth(now.getMonth() - 2);
+        } else if (effectiveDateRange === '6m') {
+          sinceDate.setMonth(now.getMonth() - 5);
         } else if (effectiveDateRange === '1y') {
           sinceDate.setFullYear(now.getFullYear() - 1);
         } else if (effectiveDateRange === '5y') {
@@ -1492,22 +1506,6 @@ function App() {
     setUndoStackBySide((prev) => ({ ...prev, [activeSide]: nextStack }));
     setTrees((prev) => ({ ...prev, [activeSide]: snapshot.tree }));
     setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: snapshot.selectedNodeId }));
-  };
-
-  const commitMovesThresholdInput = () => {
-    const raw = lichessArrowThresholdInput.trim();
-    const parsed = Number.parseInt(raw, 10);
-    const nextValue = Number.isFinite(parsed) ? Math.min(100, Math.max(0, parsed)) : 5;
-    setLichessArrowThreshold(nextValue);
-    setLichessArrowThresholdInput(String(nextValue));
-  };
-
-  const commitEngineDepthInput = () => {
-    const raw = engineDepthInput.trim();
-    const parsed = Number.parseInt(raw, 10);
-    const nextValue = Number.isFinite(parsed) ? Math.min(28, Math.max(6, parsed)) : 16;
-    setEngineDepth(nextValue);
-    setEngineDepthInput(String(nextValue));
   };
 
   const renderMoveCell = (node?: MoveNode) => {
@@ -1938,240 +1936,259 @@ function App() {
 
       {isLichessFilterOpen && (
         <div className="modal-backdrop" onClick={() => setIsLichessFilterOpen(false)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <div className="filters-grid">
-              <label>
-                Database
-                <span className="toggle-group database-toggle">
-                  <button
-                    type="button"
-                    className={lichessSource === 'masters' ? 'active' : ''}
-                    onClick={() => setLichessSource((prev) => (prev === 'masters' ? 'lichess' : 'masters'))}
-                  >
-                    Masters
-                  </button>
-                  <button
-                    type="button"
-                    className={lichessSource === 'player' ? 'active' : ''}
-                    onClick={() => setLichessSource((prev) => (prev === 'player' ? 'lichess' : 'player'))}
-                  >
-                    Player
-                  </button>
-                </span>
-                {lichessSource === 'player' && (
-                  <span className="player-handle-row">
-                    <input
-                      className="player-handle-input"
-                      type="text"
-                      value={playerHandle}
-                      onChange={(e) => setPlayerHandle(e.target.value)}
-                      placeholder="Lichess handle"
-                    />
+          <div className="modal-card filters-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="filters-modal-main">
+              <div className="filters-grid">
+                <label>
+                  Database
+                  <span className="toggle-group database-toggle">
+                    <button
+                      type="button"
+                      className={lichessSource === 'masters' ? 'active' : ''}
+                      onClick={() => setLichessSource((prev) => (prev === 'masters' ? 'lichess' : 'masters'))}
+                    >
+                      Masters
+                    </button>
+                    <button
+                      type="button"
+                      className={lichessSource === 'player' ? 'active' : ''}
+                      onClick={() => setLichessSource((prev) => (prev === 'player' ? 'lichess' : 'player'))}
+                    >
+                      Player
+                    </button>
                   </span>
-                )}
-              </label>
-              <label>
-                Date range
-                <span className="toggle-group date-range-toggle">
                   {lichessSource === 'player' && (
+                    <span className="player-handle-row">
+                      <input
+                        className="player-handle-input"
+                        type="text"
+                        value={playerHandle}
+                        onChange={(e) => setPlayerHandle(e.target.value)}
+                        placeholder="Lichess handle"
+                      />
+                    </span>
+                  )}
+                </label>
+                <label>
+                  Date range
+                  <span className="toggle-group date-range-toggle">
+                    {lichessSource === 'player' && (
+                      <button
+                        type="button"
+                        className={dateRange === '1m' ? 'active' : ''}
+                        onClick={() => setDateRange((prev) => (prev === '1m' ? null : '1m'))}
+                      >
+                        1M
+                      </button>
+                    )}
+                    {lichessSource === 'player' && (
+                      <button
+                        type="button"
+                        className={dateRange === '2m' ? 'active' : ''}
+                        onClick={() => setDateRange((prev) => (prev === '2m' ? null : '2m'))}
+                      >
+                        2M
+                      </button>
+                    )}
+                    {lichessSource === 'player' && (
+                      <button
+                        type="button"
+                        className={dateRange === '3m' ? 'active' : ''}
+                        onClick={() => setDateRange((prev) => (prev === '3m' ? null : '3m'))}
+                      >
+                        3M
+                      </button>
+                    )}
+                    {lichessSource === 'player' && (
+                      <button
+                        type="button"
+                        className={dateRange === '6m' ? 'active' : ''}
+                        onClick={() => setDateRange((prev) => (prev === '6m' ? null : '6m'))}
+                      >
+                        6M
+                      </button>
+                    )}
                     <button
                       type="button"
-                      className={dateRange === '1m' ? 'active' : ''}
-                      onClick={() => setDateRange((prev) => (prev === '1m' ? null : '1m'))}
+                      className={dateRange === '1y' ? 'active' : ''}
+                      onClick={() => setDateRange((prev) => (prev === '1y' ? null : '1y'))}
                     >
-                      1M
+                      1Y
                     </button>
-                  )}
-                  {lichessSource === 'player' && (
                     <button
                       type="button"
-                      className={dateRange === '3m' ? 'active' : ''}
-                      onClick={() => setDateRange((prev) => (prev === '3m' ? null : '3m'))}
+                      className={dateRange === '3y' ? 'active' : ''}
+                      onClick={() => setDateRange((prev) => (prev === '3y' ? null : '3y'))}
                     >
-                      3M
+                      3Y
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    className={dateRange === '1y' ? 'active' : ''}
-                    onClick={() => setDateRange((prev) => (prev === '1y' ? null : '1y'))}
-                  >
-                    1Y
-                  </button>
-                  <button
-                    type="button"
-                    className={dateRange === '3y' ? 'active' : ''}
-                    onClick={() => setDateRange((prev) => (prev === '3y' ? null : '3y'))}
-                  >
-                    3Y
-                  </button>
-                  {lichessSource !== 'masters' && (
-                    <button
-                      type="button"
-                      className={dateRange === '5y' ? 'active' : ''}
-                      onClick={() => setDateRange((prev) => (prev === '5y' ? null : '5y'))}
-                    >
-                      5Y
-                    </button>
-                  )}
-                  {lichessSource !== 'masters' && (
-                    <button
-                      type="button"
-                      className={dateRange === '10y' ? 'active' : ''}
-                      onClick={() => setDateRange((prev) => (prev === '10y' ? null : '10y'))}
-                    >
-                      10Y
-                    </button>
-                  )}
-                  {lichessSource === 'masters' && (
-                    <button
-                      type="button"
-                      className={dateRange === '10y' ? 'active' : ''}
-                      onClick={() => setDateRange((prev) => (prev === '10y' ? null : '10y'))}
-                    >
-                      10Y
-                    </button>
-                  )}
-                  {lichessSource === 'masters' && (
-                    <button
-                      type="button"
-                      className={dateRange === '20y' ? 'active' : ''}
-                      onClick={() => setDateRange((prev) => (prev === '20y' ? null : '20y'))}
-                    >
-                      20Y
-                    </button>
-                  )}
-                  {lichessSource === 'masters' && (
-                    <button
-                      type="button"
-                      className={dateRange === '30y' ? 'active' : ''}
-                      onClick={() => setDateRange((prev) => (prev === '30y' ? null : '30y'))}
-                    >
-                      30Y
-                    </button>
-                  )}
-                  {lichessSource === 'masters' && (
-                    <button
-                      type="button"
-                      className={dateRange === '50y' ? 'active' : ''}
-                      onClick={() => setDateRange((prev) => (prev === '50y' ? null : '50y'))}
-                    >
-                      50Y
-                    </button>
-                  )}
-                </span>
-              </label>
-              <label>
-                Moves threshold (%)
-                <input
-                  className="compact-number-input"
-                  type="text"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  value={lichessArrowThresholdInput}
-                  onChange={(e) => {
-                    if (/^\d*$/.test(e.target.value)) setLichessArrowThresholdInput(e.target.value);
-                  }}
-                  onBlur={commitMovesThresholdInput}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      commitMovesThresholdInput();
-                    }
-                  }}
-                />
-              </label>
-              <label>
-                Stockfish depth
-                <input
-                  className="compact-number-input"
-                  type="text"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  value={engineDepthInput}
-                  onChange={(e) => {
-                    if (/^\d*$/.test(e.target.value)) setEngineDepthInput(e.target.value);
-                  }}
-                  onBlur={commitEngineDepthInput}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      commitEngineDepthInput();
-                    }
-                  }}
-                />
-              </label>
-            </div>
-
-            {(lichessSource === 'lichess' || lichessSource === 'player') && (
-              <div className="checkbox-grid">
-              <div>
-                <strong>Speeds</strong>
-                {SPEEDS.map((speed) => (
-                  <label key={speed} className="inline-check">
-                    <input
-                      type="checkbox"
-                      checked={selectedSpeeds.includes(speed)}
-                      onChange={(e) => {
-                        setSelectedSpeeds((prev) =>
-                          e.target.checked ? [...prev, speed] : prev.filter((item) => item !== speed),
-                        );
-                      }}
-                    />
-                    {speed}
-                  </label>
-                ))}
+                    {lichessSource === 'lichess' && (
+                      <button
+                        type="button"
+                        className={dateRange === '5y' ? 'active' : ''}
+                        onClick={() => setDateRange((prev) => (prev === '5y' ? null : '5y'))}
+                      >
+                        5Y
+                      </button>
+                    )}
+                    {lichessSource === 'lichess' && (
+                      <button
+                        type="button"
+                        className={dateRange === '10y' ? 'active' : ''}
+                        onClick={() => setDateRange((prev) => (prev === '10y' ? null : '10y'))}
+                      >
+                        10Y
+                      </button>
+                    )}
+                    {lichessSource === 'masters' && (
+                      <button
+                        type="button"
+                        className={dateRange === '10y' ? 'active' : ''}
+                        onClick={() => setDateRange((prev) => (prev === '10y' ? null : '10y'))}
+                      >
+                        10Y
+                      </button>
+                    )}
+                    {lichessSource === 'masters' && (
+                      <button
+                        type="button"
+                        className={dateRange === '20y' ? 'active' : ''}
+                        onClick={() => setDateRange((prev) => (prev === '20y' ? null : '20y'))}
+                      >
+                        20Y
+                      </button>
+                    )}
+                    {lichessSource === 'masters' && (
+                      <button
+                        type="button"
+                        className={dateRange === '30y' ? 'active' : ''}
+                        onClick={() => setDateRange((prev) => (prev === '30y' ? null : '30y'))}
+                      >
+                        30Y
+                      </button>
+                    )}
+                    {lichessSource === 'masters' && (
+                      <button
+                        type="button"
+                        className={dateRange === '50y' ? 'active' : ''}
+                        onClick={() => setDateRange((prev) => (prev === '50y' ? null : '50y'))}
+                      >
+                        50Y
+                      </button>
+                    )}
+                  </span>
+                </label>
               </div>
 
-              {lichessSource === 'lichess' && (
+              {(lichessSource === 'lichess' || lichessSource === 'player') && (
+                <div className="checkbox-grid">
                 <div>
-                  <strong>Ratings</strong>
-                  {RATINGS.map((rating) => (
-                    <label key={rating} className="inline-check">
+                  <strong>Speeds</strong>
+                  {SPEEDS.map((speed) => (
+                    <label key={speed} className="inline-check">
                       <input
                         type="checkbox"
-                        checked={selectedRatings.includes(rating)}
+                        checked={selectedSpeeds.includes(speed)}
                         onChange={(e) => {
-                          setSelectedRatings((prev) =>
-                            e.target.checked ? [...prev, rating] : prev.filter((item) => item !== rating),
+                          setSelectedSpeeds((prev) =>
+                            e.target.checked ? [...prev, speed] : prev.filter((item) => item !== speed),
                           );
                         }}
                       />
-                      {rating}+
+                      {speed}
                     </label>
                   ))}
                 </div>
-              )}
 
-              {lichessSource === 'player' && (
-                <div>
-                  <strong>Modes</strong>
-                  {MODES.map((mode) => (
-                    <label key={mode} className="inline-check">
-                      <input
-                        type="checkbox"
-                        checked={selectedModes.includes(mode)}
-                        onChange={(e) => {
-                          setSelectedModes((prev) =>
-                            e.target.checked ? [...prev, mode] : prev.filter((item) => item !== mode),
-                          );
-                        }}
-                      />
-                      {mode}
-                    </label>
-                  ))}
-                </div>
+                {lichessSource === 'lichess' && (
+                  <div>
+                    <strong>Ratings</strong>
+                    {RATINGS.map((rating) => (
+                      <label key={rating} className="inline-check">
+                        <input
+                          type="checkbox"
+                          checked={selectedRatings.includes(rating)}
+                          onChange={(e) => {
+                            setSelectedRatings((prev) =>
+                              e.target.checked ? [...prev, rating] : prev.filter((item) => item !== rating),
+                            );
+                          }}
+                        />
+                        {rating}+
+                      </label>
+                    ))}
+                  </div>
+                )}
+
+                {lichessSource === 'player' && (
+                  <div>
+                    <strong>Modes</strong>
+                    {MODES.map((mode) => (
+                      <label key={mode} className="inline-check">
+                        <input
+                          type="checkbox"
+                          checked={selectedModes.includes(mode)}
+                          onChange={(e) => {
+                            setSelectedModes((prev) =>
+                              e.target.checked ? [...prev, mode] : prev.filter((item) => item !== mode),
+                            );
+                          }}
+                        />
+                        {mode}
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
               )}
             </div>
-            )}
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={showLichessOnTreeMoves}
-                onChange={(e) => setShowLichessOnTreeMoves(e.target.checked)}
-              />
-              Show Lichess arrows on tree moves
-            </label>
+            <div className="filters-modal-fixed">
+              <div className="slider-stack">
+                <label>
+                  {`Moves threshold: ${lichessArrowThreshold}%`}
+                  <span className="slider-field">
+                    <input
+                      className="threshold-slider"
+                      type="range"
+                      min={0}
+                      max={MOVE_THRESHOLD_OPTIONS.length - 1}
+                      step={1}
+                      value={MOVE_THRESHOLD_OPTIONS.indexOf(lichessArrowThreshold)}
+                      onChange={(e) => {
+                        const idx = Number.parseInt(e.target.value, 10);
+                        const next = MOVE_THRESHOLD_OPTIONS[idx] ?? 5;
+                        setLichessArrowThreshold(next);
+                      }}
+                    />
+                  </span>
+                </label>
+                <label>
+                  {`Stockfish depth: ${engineDepth}`}
+                  <span className="slider-field">
+                    <input
+                      className="threshold-slider"
+                      type="range"
+                      min={16}
+                      max={32}
+                      step={1}
+                      value={engineDepth}
+                      onChange={(e) => {
+                        const next = Number.parseInt(e.target.value, 10);
+                        if (Number.isFinite(next)) setEngineDepth(next);
+                      }}
+                    />
+                  </span>
+                </label>
+              </div>
+              <label className="inline-check">
+                <input
+                  type="checkbox"
+                  checked={showLichessOnTreeMoves}
+                  onChange={(e) => setShowLichessOnTreeMoves(e.target.checked)}
+                />
+                Show Lichess arrows for tree moves
+              </label>
+            </div>
           </div>
         </div>
       )}

@@ -576,6 +576,30 @@ select {
   overflow: auto;
 }
 
+.filters-modal {
+  width: min(620px, 100%);
+  height: min(560px, 90vh);
+  max-height: min(560px, 90vh);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.filters-modal-main {
+  flex: 0 0 60%;
+  min-height: 0;
+  max-height: 60%;
+  overflow: auto;
+  padding-right: 0.1rem;
+}
+
+.filters-modal-fixed {
+  flex-shrink: 0;
+  border-top: 1px solid #e5ebf3;
+  margin-top: 0.5rem;
+  padding-top: 0.6rem;
+}
+
 .options-modal {
   width: min(420px, 100%);
 }
@@ -613,6 +637,34 @@ select {
 .compact-number-input {
   width: 4.2rem;
   text-align: center;
+}
+
+.slider-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.slider-stack {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+  margin: 0.6rem 0;
+  align-items: start;
+}
+
+.slider-stack label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.threshold-slider {
+  width: 8rem;
+}
+
+.slider-value {
+  min-width: 2.6rem;
+  text-align: right;
 }
 
 @media (max-width: 1200px) {
