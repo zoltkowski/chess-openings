@@ -1092,14 +1092,19 @@ function App() {
 
   useEffect(() => {
     const controller = new AbortController();
+    const isPlayerWithoutHandle = lichessSource === 'player' && playerHandle.trim().length === 0;
+
+    if (isPlayerWithoutHandle) {
+      setLichessData(null);
+      setLichessStatus('idle');
+      return () => {
+        controller.abort();
+      };
+    }
+
+    setLichessStatus('loading');
 
     const run = async () => {
-      if (lichessSource === 'player' && playerHandle.trim().length === 0) {
-        setLichessData(null);
-        setLichessStatus('idle');
-        return;
-      }
-
       const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
       const params = new URLSearchParams({
         fen,
@@ -1183,7 +1188,6 @@ function App() {
       const endpoint = lichessSource === 'player' ? 'player' : lichessSource;
       const url = `https://explorer.lichess.ovh/${endpoint}?${params.toString()}`;
 
-      setLichessStatus('loading');
       const requestTimeoutMs = 120000;
       const idleTimeoutMs = 20000;
       let abortedByIdle = false;
@@ -1473,7 +1477,7 @@ function App() {
   const lichessTotal = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
   const isTrainingActive = Boolean(trainingSession && trainingSession.side === activeSide);
   const showHintButton = Boolean(isTrainingActive && trainingSession?.hintRequested);
-  const showTrainButton = isTrainingActive || childNodes.length > 0;
+  const canStartTraining = childNodes.length > 0;
   const isTrainingLineEnd = Boolean(isTrainingActive && childNodes.length === 0);
   const trainingHintArrow = useMemo<DrawShape[]>(() => {
     if (!isTrainingActive || !trainingSession?.hintVisible || !trainingSession.hintMoveUci) return [];
@@ -1512,18 +1516,84 @@ function App() {
       return total / lichessTotal >= thresholdShare;
     });
   }, [lichessData, lichessTotal, lichessArrowThreshold]);
-  const pairedMoves = useMemo(() => {
-    const plies = path.slice(1);
-    const rows: Array<{ number: number; white?: MoveNode; black?: MoveNode }> = [];
-    for (let i = 0; i < plies.length; i += 2) {
-      rows.push({
-        number: Math.floor(i / 2) + 1,
-        white: plies[i],
-        black: plies[i + 1],
+  const inlineMoves = useMemo(
+    () =>
+      path.slice(1).map((node, index) => ({
+        id: node.id,
+        san: toFigurineSan(node.moveSan ?? ''),
+        prefix: index % 2 === 0 ? `${Math.floor(index / 2) + 1}.` : '',
+        hasAlternatives: (node.children?.length ?? 0) > 1,
+      })),
+    [path],
+  );
+
+  const optionRows = useMemo(() => {
+    const leafMemo = new Map<string, number>();
+    const countLeaves = (nodeId: string): number => {
+      const cached = leafMemo.get(nodeId);
+      if (cached !== undefined) return cached;
+      const node = tree.nodes[nodeId];
+      if (!node) return 0;
+      if (node.children.length === 0) {
+        leafMemo.set(nodeId, 1);
+        return 1;
+      }
+      const total = node.children.reduce((acc, childId) => acc + countLeaves(childId), 0);
+      leafMemo.set(nodeId, total);
+      return total;
+    };
+
+    return childNodes
+      .map((node) => ({
+        node,
+        leaves: countLeaves(node.id),
+      }))
+      .map(({ node, leaves }) => ({ node, leaves }));
+  }, [childNodes, tree.nodes]);
+
+  useEffect(() => {
+    if (lichessStatus !== 'done' || !lichessData?.moves || lichessData.moves.length === 0) return;
+
+    setTrees((prev) => {
+      const currentTree = prev[activeSide];
+      const currentNodeId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
+      const currentNode = currentTree.nodes[currentNodeId];
+      if (!currentNode || currentNode.children.length < 2) return prev;
+
+      const popularityByUci = new Map<string, number>();
+      for (const move of lichessData.moves) {
+        popularityByUci.set(move.uci, move.white + move.draws + move.black);
+      }
+
+      const reorderedChildren = [...currentNode.children].sort((aId, bId) => {
+        const aUci = currentTree.nodes[aId]?.moveUci ?? '';
+        const bUci = currentTree.nodes[bId]?.moveUci ?? '';
+        const aPop = popularityByUci.get(aUci) ?? 0;
+        const bPop = popularityByUci.get(bUci) ?? 0;
+        if (bPop !== aPop) return bPop - aPop;
+        return 0;
       });
-    }
-    return rows;
-  }, [path]);
+
+      const unchanged = reorderedChildren.every((childId, idx) => childId === currentNode.children[idx]);
+      if (unchanged) return prev;
+
+      const nextTree: MoveTree = {
+        ...currentTree,
+        nodes: {
+          ...currentTree.nodes,
+          [currentNode.id]: {
+            ...currentNode,
+            children: reorderedChildren,
+          },
+        },
+      };
+
+      return {
+        ...prev,
+        [activeSide]: nextTree,
+      };
+    });
+  }, [activeSide, lichessData, lichessStatus, selectedNodeBySide]);
 
   const goBackOneMove = () => {
     if (isTrainingActive) return;
@@ -1574,19 +1644,6 @@ function App() {
     setUndoStackBySide((prev) => ({ ...prev, [activeSide]: nextStack }));
     setTrees((prev) => ({ ...prev, [activeSide]: snapshot.tree }));
     setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: snapshot.selectedNodeId }));
-  };
-
-  const renderMoveCell = (node?: MoveNode) => {
-    if (!node) return '';
-    return (
-      <button
-        className="table-move-btn"
-        disabled={isTrainingActive}
-        onClick={() => navigateToNode(activeSide, node.id)}
-      >
-        {toFigurineSan(node.moveSan ?? '')}
-      </button>
-    );
   };
 
   return (
@@ -1775,17 +1832,16 @@ function App() {
                     </button>
                   </>
                 )}
-                {showTrainButton && (
-                  <button
-                    type="button"
-                    className={isTrainingActive ? 'active' : ''}
-                    onClick={() => (isTrainingActive ? stopTraining() : startTraining())}
-                    aria-label="Train"
-                    title="Train"
-                  >
-                    <TrainIcon />
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className={isTrainingActive ? 'active' : ''}
+                  onClick={() => (isTrainingActive ? stopTraining() : startTraining())}
+                  aria-label="Train"
+                  title="Train"
+                  disabled={!isTrainingActive && !canStartTraining}
+                >
+                  <TrainIcon />
+                </button>
                 {!isTrainingActive && (
                   <button
                     className="gear-btn portrait-filters-btn"
@@ -1899,15 +1955,14 @@ function App() {
                 <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0 || isTrainingActive}>
                   Undo
                 </button>
-                {showTrainButton && (
-                  <button
-                    className="desktop-only"
-                    type="button"
-                    onClick={() => (isTrainingActive ? stopTraining() : startTraining())}
-                  >
-                    {isTrainingActive ? 'Stop train' : 'Train'}
-                  </button>
-                )}
+                <button
+                  className="desktop-only"
+                  type="button"
+                  onClick={() => (isTrainingActive ? stopTraining() : startTraining())}
+                  disabled={!isTrainingActive && !canStartTraining}
+                >
+                  {isTrainingActive ? 'Stop train' : 'Train'}
+                </button>
                 <div className="arrow-toggle-group">
                   <button
                     type="button"
@@ -1932,26 +1987,37 @@ function App() {
                   />
                 </div>
               </div>
-              {path.length > 1 && (
-                <div className="move-table-wrap">
-                  <table className="move-table">
-                    <thead>
-                      <tr>
-                        <th>#</th>
-                        <th>White</th>
-                        <th>Black</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pairedMoves.map((row) => (
-                        <tr key={row.number}>
-                          <td>{row.number}</td>
-                          <td>{renderMoveCell(row.white)}</td>
-                          <td>{renderMoveCell(row.black)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+              {inlineMoves.length > 0 && (
+                <div className="move-inline-wrap">
+                  {inlineMoves.map((move) => (
+                    <button
+                      key={move.id}
+                      type="button"
+                      className={`move-inline-item ${move.hasAlternatives ? 'has-alternatives' : ''}`}
+                      disabled={isTrainingActive}
+                      onClick={() => navigateToNode(activeSide, move.id)}
+                    >
+                      {move.prefix ? <span className="move-inline-prefix">{move.prefix}</span> : null}
+                      <span>{move.san}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {optionRows.length > 0 && (
+                <div className="tree-options-wrap">
+                  {optionRows.map(({ node, leaves }) => (
+                    <div key={node.id} className="tree-option">
+                      <button
+                        type="button"
+                        className="tree-option-btn"
+                        disabled={isTrainingActive}
+                        onClick={() => navigateToNode(activeSide, node.id)}
+                      >
+                        {toFigurineSan(node.moveSan ?? '')}
+                      </button>
+                      <span className="tree-option-leaves">{leaves}</span>
+                    </div>
+                  ))}
                 </div>
               )}
             </aside>}

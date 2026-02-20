@@ -249,6 +249,60 @@ select {
   border-bottom: 1px solid #eef1f5;
 }
 
+.move-inline-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.35rem;
+  margin: 0.45rem 0 0.7rem;
+}
+
+.move-inline-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.18rem;
+  padding: 0.2rem 0.35rem;
+  border: 1px solid transparent;
+  background: transparent;
+}
+
+.move-inline-item:hover {
+  background: #eef5ff;
+  border-color: #dbeafe;
+}
+
+.move-inline-item.has-alternatives {
+  font-weight: 700;
+}
+
+.move-inline-prefix {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.tree-options-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.5rem;
+  align-items: flex-start;
+}
+
+.tree-option {
+  display: grid;
+  justify-items: center;
+  gap: 0.14rem;
+}
+
+.tree-option-btn {
+  min-width: 3rem;
+  padding: 0.28rem 0.45rem;
+}
+
+.tree-option-leaves {
+  font-size: 0.72rem;
+  color: #64748b;
+  line-height: 1;
+}
+
 .lichess-clickable-row {
   cursor: pointer;
   border-radius: 6px;
