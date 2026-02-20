@@ -81,7 +81,7 @@ type PersistedSettingsState = {
   lichessSource: LichessSource;
   playerHandle: string;
   dateRange: DateRange;
-  lichessArrowThreshold: number;
+  lichessArrowThreshold: MoveThreshold;
   engineDepth: number;
   engineMultiPv: number;
   selectedSpeeds: string[];
@@ -98,6 +98,7 @@ const START_POS_FEN = new Chess().fen();
 const FIXED_VARIANT = 'standard';
 const FIXED_SOURCE = 'analysis';
 const MOVE_THRESHOLD_OPTIONS = [0, 1, 5, 10, 20] as const;
+type MoveThreshold = (typeof MOVE_THRESHOLD_OPTIONS)[number];
 const SPEEDS = ['bullet', 'blitz', 'rapid', 'classical', 'correspondence'] as const;
 const MODES = ['casual', 'rated'] as const;
 const RATINGS = [1200, 1400, 1600, 1800, 2000, 2200, 2500];
@@ -513,8 +514,9 @@ function formatAverageElo(move: LichessMove) {
 
 function normalizeMoveThreshold(value: unknown) {
   const numeric = typeof value === 'number' && Number.isFinite(value) ? value : 5;
-  return [...MOVE_THRESHOLD_OPTIONS].reduce((best, option) =>
-    Math.abs(option - numeric) < Math.abs(best - numeric) ? option : best,
+  return [...MOVE_THRESHOLD_OPTIONS].reduce<MoveThreshold>(
+    (best, option) => (Math.abs(option - numeric) < Math.abs(best - numeric) ? option : best),
+    5,
   );
 }
 
@@ -842,7 +844,7 @@ function App() {
   const [lichessSource, setLichessSource] = useState<LichessSource>(initialLichessSource);
   const [playerHandle, setPlayerHandle] = useState(initialPlayerHandle);
   const [dateRange, setDateRange] = useState<DateRange>(initialDateRange);
-  const [lichessArrowThreshold, setLichessArrowThreshold] = useState(initialLichessArrowThreshold);
+  const [lichessArrowThreshold, setLichessArrowThreshold] = useState<MoveThreshold>(initialLichessArrowThreshold);
   const [selectedSpeeds, setSelectedSpeeds] = useState<string[]>(
     initialSelectedSpeeds.length > 0 ? initialSelectedSpeeds : [...SPEEDS],
   );
@@ -1662,15 +1664,16 @@ function App() {
   const isMobileClient = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   useEffect(() => {
     if (!lichessData?.opening) return;
+    const opening = lichessData.opening;
     const fenKey = selectedNode.fen;
     setOpeningByFen((prev) => {
       const existing = prev[fenKey];
-      if (existing && existing.eco === lichessData.opening.eco && existing.name === lichessData.opening.name) {
+      if (existing && existing.eco === opening.eco && existing.name === opening.name) {
         return prev;
       }
       return {
         ...prev,
-        [fenKey]: { eco: lichessData.opening.eco, name: lichessData.opening.name },
+        [fenKey]: { eco: opening.eco, name: opening.name },
       };
     });
   }, [lichessData?.opening, selectedNode.fen]);
