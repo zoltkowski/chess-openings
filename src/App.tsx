@@ -755,7 +755,7 @@ function App() {
     white: 'white-0',
     black: 'black-0',
   });
-  const [orientation, setOrientation] = useState<'white' | 'black'>(() => {
+  const [repertoireSide, setRepertoireSide] = useState<'white' | 'black'>(() => {
     try {
       const value = window.localStorage.getItem(ORIENTATION_STORAGE_KEY);
       return value === 'black' ? 'black' : 'white';
@@ -763,6 +763,7 @@ function App() {
       return 'white';
     }
   });
+  const [isTempBoardFlipped, setIsTempBoardFlipped] = useState(false);
   const [status, setStatus] = useState('Ready');
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
   const [engineMultiPv, setEngineMultiPv] = useState(3);
@@ -811,7 +812,9 @@ function App() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [engineReadyTick, setEngineReadyTick] = useState(0);
 
-  const activeSide: Side = orientation;
+  const activeSide: Side = repertoireSide;
+  const boardOrientation: 'white' | 'black' =
+    isTempBoardFlipped ? (repertoireSide === 'white' ? 'black' : 'white') : repertoireSide;
   const tree = trees[activeSide];
   const selectedNodeId = selectedNodeBySide[activeSide] ?? tree.rootId;
   const selectedNode = tree.nodes[selectedNodeId] ?? tree.nodes[tree.rootId];
@@ -918,11 +921,11 @@ function App() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(ORIENTATION_STORAGE_KEY, orientation);
+      window.localStorage.setItem(ORIENTATION_STORAGE_KEY, repertoireSide);
     } catch {
       // Ignore storage write errors.
     }
-  }, [orientation]);
+  }, [repertoireSide]);
 
   useEffect(() => {
     try {
@@ -1335,14 +1338,14 @@ function App() {
 
   useEffect(() => {
     if (!trainingSession) return;
-    if (orientation !== trainingSession.side) {
+    if (repertoireSide !== trainingSession.side) {
       setTrainingSession(null);
       return;
     }
     if (!trees[trainingSession.side].nodes[trainingSession.rootNodeId]) {
       setTrainingSession(null);
     }
-  }, [orientation, trainingSession, trees]);
+  }, [repertoireSide, trainingSession, trees]);
 
   const makeMove = (orig: Key, dest: Key, promotion: 'q' | 'r' | 'b' | 'n' = 'q') => {
     const currentTree = trees[activeSide];
@@ -1461,17 +1464,41 @@ function App() {
     const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
     const fenPath = fen.replace(/ /g, '_');
     const encodedFenPath = encodeURIComponent(fenPath).replace(/%2F/g, '/');
-    const url = `https://lichess.org/analysis/${encodedFenPath}?color=${orientation}`;
+    const url = `https://lichess.org/analysis/${encodedFenPath}?color=${boardOrientation}`;
     const isAndroid = /Android/i.test(navigator.userAgent);
 
     if (isAndroid) {
       const fallbackUrl = encodeURIComponent(url);
-      const intentUrl = `intent://lichess.org/analysis/${encodedFenPath}?color=${orientation}#Intent;scheme=https;package=org.lichess.mobileapp;S.browser_fallback_url=${fallbackUrl};end`;
+      const intentUrl = `intent://lichess.org/analysis/${encodedFenPath}?color=${boardOrientation}#Intent;scheme=https;package=org.lichess.mobileapp;S.browser_fallback_url=${fallbackUrl};end`;
       window.location.href = intentUrl;
       return;
     }
 
     window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  const shareFen = async () => {
+    const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
+    const payload = {
+      title: 'Chess position (FEN)',
+      text: fen,
+    };
+
+    try {
+      if (navigator.share) {
+        await navigator.share(payload);
+        return;
+      }
+    } catch {
+      // Ignore share cancel/errors and continue to clipboard fallback.
+    }
+
+    try {
+      await navigator.clipboard.writeText(fen);
+      setStatus('FEN copied');
+    } catch {
+      setStatus('Unable to share FEN');
+    }
   };
 
   const importPgn: ChangeEventHandler<HTMLInputElement> = async (event) => {
@@ -1496,6 +1523,7 @@ function App() {
   const showHintButton = Boolean(isTrainingActive && trainingSession?.hintRequested);
   const canStartTraining = childNodes.length > 0;
   const isTrainingLineEnd = Boolean(isTrainingActive && childNodes.length === 0);
+  const isMobileClient = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   const trainingHintArrow = useMemo<DrawShape[]>(() => {
     if (!isTrainingActive || !trainingSession?.hintVisible || !trainingSession.hintMoveUci) return [];
     const keyPair = parseUciMove(trainingSession.hintMoveUci);
@@ -1812,7 +1840,7 @@ function App() {
               </div>
               <Board
                 fen={selectedNode.fen}
-                orientation={orientation}
+                orientation={boardOrientation}
                 lastMove={lastMove}
                 arrows={trainingForActive ? trainingHintArrow : autoArrows}
                 onMove={makeMove}
@@ -2052,11 +2080,12 @@ function App() {
             <div className="options-grid">
               <button
                 onClick={() => {
-                  setOrientation((prev) => (prev === 'white' ? 'black' : 'white'));
+                  setRepertoireSide((prev) => (prev === 'white' ? 'black' : 'white'));
+                  setIsTempBoardFlipped(false);
                   setIsOptionsOpen(false);
                 }}
               >
-                Rotate board
+                Switch repertoire side
               </button>
               <button
                 onClick={() => {
@@ -2074,14 +2103,25 @@ function App() {
               >
                 Import {activeSide} PGN
               </button>
-              <button
-                onClick={() => {
-                  openInLichessAnalysis();
-                  setIsOptionsOpen(false);
-                }}
-              >
-                Analyse with Lichess
-              </button>
+              {isMobileClient ? (
+                <button
+                  onClick={() => {
+                    void shareFen();
+                    setIsOptionsOpen(false);
+                  }}
+                >
+                  Share FEN
+                </button>
+              ) : (
+                <button
+                  onClick={() => {
+                    openInLichessAnalysis();
+                    setIsOptionsOpen(false);
+                  }}
+                >
+                  Analyse with Lichess
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -2298,7 +2338,7 @@ function App() {
             <div className="filters-modal-fixed">
               <div className="slider-stack">
                 <label>
-                  {`Moves threshold: ${lichessArrowThreshold}%`}
+                  {`Min frequency: ${lichessArrowThreshold}%`}
                   <span className="slider-field">
                     <input
                       className="threshold-slider"
@@ -2333,6 +2373,14 @@ function App() {
                   </span>
                 </label>
               </div>
+              <label className="inline-check">
+                <input
+                  type="checkbox"
+                  checked={isTempBoardFlipped}
+                  onChange={(e) => setIsTempBoardFlipped(e.target.checked)}
+                />
+                Flip board
+              </label>
               <label className="inline-check">
                 <input
                   type="checkbox"
