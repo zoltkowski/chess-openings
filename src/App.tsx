@@ -1435,8 +1435,14 @@ function App() {
             ? null
             : dateRange
           : lichessSource === 'masters'
-            ? dateRange === '1m' || dateRange === '2m' || dateRange === '3m' || dateRange === '6m'
-              ? null
+            ? dateRange === '1m' ||
+              dateRange === '2m' ||
+              dateRange === '3m' ||
+              dateRange === '6m' ||
+              dateRange === '20y' ||
+              dateRange === '30y' ||
+              dateRange === '50y'
+            ? null
               : dateRange
             : dateRange === '1m' ||
                 dateRange === '2m' ||
@@ -1465,12 +1471,6 @@ function App() {
           sinceDate.setFullYear(now.getFullYear() - 5);
         } else if (effectiveDateRange === '10y') {
           sinceDate.setFullYear(now.getFullYear() - 10);
-        } else if (effectiveDateRange === '20y') {
-          sinceDate.setFullYear(now.getFullYear() - 20);
-        } else if (effectiveDateRange === '30y') {
-          sinceDate.setFullYear(now.getFullYear() - 30);
-        } else if (effectiveDateRange === '50y') {
-          sinceDate.setFullYear(now.getFullYear() - 50);
         } else {
           sinceDate.setFullYear(now.getFullYear() - 3);
         }
@@ -2546,7 +2546,7 @@ function App() {
                     >
                       3Y
                     </button>
-                    {lichessSource === 'lichess' && (
+                    {lichessSource !== 'player' && (
                       <button
                         type="button"
                         className={dateRange === '5y' ? 'active' : ''}
@@ -2555,49 +2555,13 @@ function App() {
                         5Y
                       </button>
                     )}
-                    {lichessSource === 'lichess' && (
+                    {lichessSource !== 'player' && (
                       <button
                         type="button"
                         className={dateRange === '10y' ? 'active' : ''}
                         onClick={() => setDateRange((prev) => (prev === '10y' ? null : '10y'))}
                       >
                         10Y
-                      </button>
-                    )}
-                    {lichessSource === 'masters' && (
-                      <button
-                        type="button"
-                        className={dateRange === '10y' ? 'active' : ''}
-                        onClick={() => setDateRange((prev) => (prev === '10y' ? null : '10y'))}
-                      >
-                        10Y
-                      </button>
-                    )}
-                    {lichessSource === 'masters' && (
-                      <button
-                        type="button"
-                        className={dateRange === '20y' ? 'active' : ''}
-                        onClick={() => setDateRange((prev) => (prev === '20y' ? null : '20y'))}
-                      >
-                        20Y
-                      </button>
-                    )}
-                    {lichessSource === 'masters' && (
-                      <button
-                        type="button"
-                        className={dateRange === '30y' ? 'active' : ''}
-                        onClick={() => setDateRange((prev) => (prev === '30y' ? null : '30y'))}
-                      >
-                        30Y
-                      </button>
-                    )}
-                    {lichessSource === 'masters' && (
-                      <button
-                        type="button"
-                        className={dateRange === '50y' ? 'active' : ''}
-                        onClick={() => setDateRange((prev) => (prev === '50y' ? null : '50y'))}
-                      >
-                        50Y
                       </button>
                     )}
                   </span>
