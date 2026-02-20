@@ -395,14 +395,22 @@ function insertLine(tree: MoveTree, sanMoves: string[]): MoveTree {
 
 function parsePgnToTree(side: Side, pgn: string): MoveTree {
   const base = createEmptyTree(side);
-  const chunks = pgn
-    .split(/\r?\n\s*\r?\n/g)
+  const normalized = pgn.replace(/\r\n/g, '\n').trim();
+  if (!normalized) return base;
+
+  const chunks = normalized
+    .split(/\n{2,}(?=\[Event )/g)
     .map((part) => part.trim())
     .filter(Boolean);
+  const fallbackChunks = normalized
+    .split(/\n{2,}/g)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const candidates = chunks.length > 0 ? chunks : fallbackChunks;
 
   let tree = base;
 
-  for (const chunk of chunks) {
+  for (const chunk of candidates) {
     const chess = new Chess();
     try {
       chess.loadPgn(chunk, { strict: false });
@@ -433,33 +441,79 @@ function buildPath(tree: MoveTree, nodeId: string): MoveNode[] {
   return path;
 }
 
-function sanLineToPgn(sanMoves: string[]): string {
-  const tokens: string[] = [];
-
-  for (let i = 0; i < sanMoves.length; i += 1) {
-    if (i % 2 === 0) {
-      tokens.push(`${Math.floor(i / 2) + 1}.`);
-    }
-    tokens.push(sanMoves[i]);
-  }
-
-  return `${tokens.join(' ')} *`;
+function uciToMoveInput(uci: string) {
+  if (uci.length < 4) return null;
+  const promotionChar = uci[4]?.toLowerCase();
+  return {
+    from: uci.slice(0, 2),
+    to: uci.slice(2, 4),
+    promotion:
+      promotionChar && ['q', 'r', 'b', 'n'].includes(promotionChar)
+        ? (promotionChar as 'q' | 'r' | 'b' | 'n')
+        : undefined,
+  };
 }
 
-function exportTreeToPgn(tree: MoveTree): string {
-  const leafIds = Object.values(tree.nodes)
-    .filter((node) => node.id !== tree.rootId && node.children.length === 0)
-    .map((node) => node.id);
+function formatMovePrefix(chess: Chess) {
+  return chess.turn() === 'w' ? `${chess.moveNumber()}.` : `${chess.moveNumber()}...`;
+}
 
-  const lines = leafIds.map((leafId) => {
-    const path = buildPath(tree, leafId);
-    const sanMoves = path
-      .map((node) => node.moveSan)
-      .filter((value): value is string => Boolean(value));
-    return sanLineToPgn(sanMoves);
+function buildVariationTokens(tree: MoveTree, nodeId: string, chess: Chess): string[] {
+  const node = tree.nodes[nodeId];
+  if (!node || node.children.length === 0) return [];
+
+  const children = node.children.filter((childId) => {
+    const child = tree.nodes[childId];
+    return Boolean(child?.moveUci);
   });
+  if (children.length === 0) return [];
 
-  return lines.join('\n\n');
+  const [mainChildId, ...alternativeChildIds] = children;
+  const tokens: string[] = [];
+
+  for (const alternativeChildId of alternativeChildIds) {
+    const altNode = tree.nodes[alternativeChildId];
+    if (!altNode?.moveUci) continue;
+    const altInput = uciToMoveInput(altNode.moveUci);
+    if (!altInput) continue;
+    const altChess = new Chess(chess.fen());
+    const altPrefix = formatMovePrefix(altChess);
+    const altMove = altChess.move(altInput);
+    if (!altMove) continue;
+    const altTokens = [altPrefix, altMove.san, ...buildVariationTokens(tree, alternativeChildId, altChess)];
+    tokens.push(`(${altTokens.join(' ')})`);
+  }
+
+  const mainNode = tree.nodes[mainChildId];
+  if (!mainNode?.moveUci) return tokens;
+  const mainInput = uciToMoveInput(mainNode.moveUci);
+  if (!mainInput) return tokens;
+  const mainPrefix = formatMovePrefix(chess);
+  const mainMove = chess.move(mainInput);
+  if (!mainMove) return tokens;
+
+  tokens.push(mainPrefix, mainMove.san, ...buildVariationTokens(tree, mainChildId, chess));
+  return tokens;
+}
+
+function exportTreeToPgn(tree: MoveTree, side: Side): string {
+  const exportDate = new Date().toISOString().slice(0, 10).replace(/-/g, '.');
+  const headers: Array<[string, string]> = [
+    ['Event', 'Opening Prep Trainer'],
+    ['Site', 'Local'],
+    ['Date', exportDate],
+    ['Round', '-'],
+    ['White', side === 'white' ? 'Repertoire' : 'Opponent'],
+    ['Black', side === 'black' ? 'Repertoire' : 'Opponent'],
+    ['Result', '*'],
+  ];
+  const headerBlock = headers.map(([key, value]) => `[${key} "${value.replace(/"/g, '\\"')}"]`).join('\n');
+
+  const chess = new Chess();
+  const moveTokens = buildVariationTokens(tree, tree.rootId, chess);
+  const moveText = moveTokens.length > 0 ? `${moveTokens.join(' ')} *` : '*';
+
+  return `${headerBlock}\n\n${moveText}`;
 }
 
 function buildDests(fen: string): Map<Key, Key[]> {
@@ -1584,7 +1638,7 @@ function App() {
   };
 
   const exportPgn = () => {
-    const pgn = exportTreeToPgn(tree);
+    const pgn = exportTreeToPgn(tree, activeSide);
     const blob = new Blob([pgn], { type: 'application/x-chess-pgn;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
