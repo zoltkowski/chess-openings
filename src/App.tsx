@@ -1900,31 +1900,25 @@ function App() {
                 <div className="arrow-toggle-group">
                   <button
                     type="button"
-                    className={`icon-toggle-btn with-diagonal-arrow arrow-lichess ${showLichessArrows ? 'active' : ''}`}
+                    className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-lichess ${showLichessArrows ? 'active' : ''}`}
                     onClick={() => setShowLichessArrows((prev) => !prev)}
                     aria-label="Toggle Lichess arrows"
                     title="Toggle Lichess arrows"
-                  >
-                    <DbIcon />
-                  </button>
+                  />
                   <button
                     type="button"
-                    className={`icon-toggle-btn with-diagonal-arrow arrow-stockfish ${showStockfishArrows ? 'active' : ''}`}
+                    className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-stockfish ${showStockfishArrows ? 'active' : ''}`}
                     onClick={() => setShowStockfishArrows((prev) => !prev)}
                     aria-label="Toggle Stockfish arrows"
                     title="Toggle Stockfish arrows"
-                  >
-                    <ComputerIcon />
-                  </button>
+                  />
                   <button
                     type="button"
-                    className={`icon-toggle-btn with-diagonal-arrow arrow-tree ${showTreeArrows ? 'active' : ''}`}
+                    className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-tree ${showTreeArrows ? 'active' : ''}`}
                     onClick={() => setShowTreeArrows((prev) => !prev)}
                     aria-label="Toggle tree arrows"
                     title="Toggle tree arrows"
-                  >
-                    <MoveIcon />
-                  </button>
+                  />
                 </div>
               </div>
               {path.length > 1 && (

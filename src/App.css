@@ -479,6 +479,8 @@ select {
 .icon-toggle-btn {
   width: 2.6rem;
   min-width: 2.6rem;
+  height: 2rem;
+  min-height: 2rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -495,7 +497,8 @@ select {
   content: "➚";
   position: absolute;
   left: 50%;
-  bottom: 0.08rem;
+  top: 50%;
+  bottom: auto;
   transform: scaleX(1.2);
   transform-origin: left center;
   font-size: 1.18rem;
@@ -505,6 +508,11 @@ select {
   text-shadow: 0 0 2px #111827, 0 0 2px #111827;
   opacity: 0.95;
   pointer-events: none;
+}
+
+.icon-toggle-btn.only-arrow::after {
+  transform: translate(-50%, -50%) scaleX(1.2);
+  transform-origin: center center;
 }
 
 .icon-toggle-btn.with-diagonal-arrow.arrow-stockfish::after {
