@@ -68,6 +68,31 @@ type TrainingSession = {
   hintMoveUci: string | null;
 };
 
+type PersistedAppState = {
+  version: 1;
+  trees: Record<Side, MoveTree>;
+  selectedNodeBySide: Record<Side, string>;
+};
+
+type PersistedSettingsState = {
+  version: 1;
+  repertoireSide: Side;
+  isTempBoardFlipped: boolean;
+  lichessSource: LichessSource;
+  playerHandle: string;
+  dateRange: DateRange;
+  lichessArrowThreshold: number;
+  engineDepth: number;
+  engineMultiPv: number;
+  selectedSpeeds: string[];
+  selectedRatings: number[];
+  selectedModes: string[];
+  showLichessOnTreeMoves: boolean;
+  showTreeArrows: boolean;
+  showLichessArrows: boolean;
+  showStockfishArrows: boolean;
+};
+
 const START_FEN = 'start';
 const START_POS_FEN = new Chess().fen();
 const FIXED_VARIANT = 'standard';
@@ -92,20 +117,11 @@ const ARROW_BRUSHES: DrawBrushes = {
   blueSoft: { key: 'bs', color: '#003088', opacity: 0.5, lineWidth: 10 },
   yellowSoft: { key: 'ys', color: '#e68f00', opacity: 0.5, lineWidth: 10 },
 };
-const ORIENTATION_STORAGE_KEY = 'opening-board-orientation';
-const FILTER_SETTINGS_STORAGE_KEY = 'opening-filter-settings';
-
-type PersistedFilterSettings = {
-  lichessSource?: LichessSource;
-  playerHandle?: string;
-  dateRange?: DateRange;
-  lichessArrowThreshold?: number;
-  engineDepth?: number;
-  selectedSpeeds?: string[];
-  selectedRatings?: number[];
-  selectedModes?: string[];
-  showLichessOnTreeMoves?: boolean;
-};
+const APP_DB_NAME = 'opening-prep-db';
+const APP_DB_VERSION = 1;
+const APP_DB_STORE = 'kv';
+const APP_STATE_KEY = 'app-state-v1';
+const APP_SETTINGS_KEY = 'settings-v1';
 
 function clampInt(value: unknown, min: number, max: number, fallback: number) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
@@ -113,15 +129,93 @@ function clampInt(value: unknown, min: number, max: number, fallback: number) {
   return Math.min(max, Math.max(min, rounded));
 }
 
-function loadPersistedFilterSettings(): PersistedFilterSettings {
-  try {
-    const raw = window.localStorage.getItem(FILTER_SETTINGS_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as PersistedFilterSettings;
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
+function openAppDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(APP_DB_NAME, APP_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(APP_DB_STORE)) {
+        db.createObjectStore(APP_DB_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function idbGet<T>(key: string): Promise<T | null> {
+  const db = await openAppDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(APP_DB_STORE, 'readonly');
+    const store = tx.objectStore(APP_DB_STORE);
+    const req = store.get(key);
+    req.onsuccess = () => resolve((req.result as T | undefined) ?? null);
+    req.onerror = () => reject(req.error);
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
+    tx.onabort = () => db.close();
+  });
+}
+
+async function idbSet<T>(key: string, value: T): Promise<void> {
+  const db = await openAppDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(APP_DB_STORE, 'readwrite');
+    const store = tx.objectStore(APP_DB_STORE);
+    const req = store.put(value, key);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
+    tx.onabort = () => db.close();
+  });
+}
+
+function isValidMoveTree(value: unknown): value is MoveTree {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as MoveTree;
+  if (typeof candidate.rootId !== 'string') return false;
+  if (typeof candidate.nextId !== 'number' || !Number.isFinite(candidate.nextId)) return false;
+  if (!candidate.nodes || typeof candidate.nodes !== 'object') return false;
+  return true;
+}
+
+function normalizePersistedState(value: unknown): PersistedAppState | null {
+  if (!value || typeof value !== 'object') return null;
+  const parsed = value as PersistedAppState;
+  if (parsed.version !== 1) return null;
+  if (!parsed.trees || !parsed.selectedNodeBySide) return null;
+  if (!isValidMoveTree(parsed.trees.white) || !isValidMoveTree(parsed.trees.black)) return null;
+  if (typeof parsed.selectedNodeBySide.white !== 'string' || typeof parsed.selectedNodeBySide.black !== 'string') {
+    return null;
   }
+  return parsed;
+}
+
+function normalizePersistedSettings(value: unknown): PersistedSettingsState | null {
+  if (!value || typeof value !== 'object') return null;
+  const parsed = value as PersistedSettingsState;
+  if (parsed.version !== 1) return null;
+  if (parsed.repertoireSide !== 'white' && parsed.repertoireSide !== 'black') return null;
+  if (parsed.lichessSource !== 'lichess' && parsed.lichessSource !== 'masters' && parsed.lichessSource !== 'player') {
+    return null;
+  }
+  const dateRangeValues: DateRange[] = ['1m', '2m', '3m', '6m', '1y', '3y', '5y', '10y', '20y', '30y', '50y', null];
+  if (!dateRangeValues.includes(parsed.dateRange)) return null;
+  return {
+    ...parsed,
+    lichessArrowThreshold: normalizeMoveThreshold(parsed.lichessArrowThreshold),
+    engineDepth: clampInt(parsed.engineDepth, 16, 32, 24),
+    engineMultiPv: clampInt(parsed.engineMultiPv, 1, 10, 3),
+    selectedSpeeds: (parsed.selectedSpeeds ?? []).filter((speed): speed is string =>
+      SPEEDS.includes(speed as (typeof SPEEDS)[number]),
+    ),
+    selectedRatings: (parsed.selectedRatings ?? []).filter((rating): rating is number => RATINGS.includes(rating)),
+    selectedModes: (parsed.selectedModes ?? []).filter((mode): mode is string =>
+      MODES.includes(mode as (typeof MODES)[number]),
+    ),
+    playerHandle: typeof parsed.playerHandle === 'string' ? parsed.playerHandle : '',
+  };
 }
 
 function TabIconBase(props: { children: ReactNode; viewBox?: string }) {
@@ -712,40 +806,14 @@ function Board(props: {
 }
 
 function App() {
-  const [persistedFilterSettings] = useState<PersistedFilterSettings>(() => loadPersistedFilterSettings());
-  const initialLichessSource: LichessSource =
-    persistedFilterSettings.lichessSource === 'masters' || persistedFilterSettings.lichessSource === 'player'
-      ? persistedFilterSettings.lichessSource
-      : 'lichess';
-  const initialPlayerHandle =
-    typeof persistedFilterSettings.playerHandle === 'string' ? persistedFilterSettings.playerHandle : '';
-  const initialDateRange: DateRange =
-    persistedFilterSettings.dateRange === '1m' ||
-    persistedFilterSettings.dateRange === '2m' ||
-    persistedFilterSettings.dateRange === '3m' ||
-    persistedFilterSettings.dateRange === '6m' ||
-    persistedFilterSettings.dateRange === '1y' ||
-    persistedFilterSettings.dateRange === '5y' ||
-    persistedFilterSettings.dateRange === '10y' ||
-    persistedFilterSettings.dateRange === '20y' ||
-    persistedFilterSettings.dateRange === '30y' ||
-    persistedFilterSettings.dateRange === '50y' ||
-    persistedFilterSettings.dateRange === '3y'
-      ? persistedFilterSettings.dateRange
-      : null;
-  const initialLichessArrowThreshold = normalizeMoveThreshold(
-    clampInt(persistedFilterSettings.lichessArrowThreshold, 0, 100, 5),
-  );
-  const initialEngineDepth = clampInt(persistedFilterSettings.engineDepth, 16, 32, 24);
-  const initialSelectedSpeeds = (persistedFilterSettings.selectedSpeeds ?? []).filter((speed): speed is string =>
-    SPEEDS.includes(speed as (typeof SPEEDS)[number]),
-  );
-  const initialSelectedRatings = (persistedFilterSettings.selectedRatings ?? []).filter((rating): rating is number =>
-    RATINGS.includes(rating),
-  );
-  const initialSelectedModes = (persistedFilterSettings.selectedModes ?? []).filter((mode): mode is string =>
-    MODES.includes(mode as (typeof MODES)[number]),
-  );
+  const initialLichessSource: LichessSource = 'lichess';
+  const initialPlayerHandle = '';
+  const initialDateRange: DateRange = null;
+  const initialLichessArrowThreshold = 5;
+  const initialEngineDepth = 24;
+  const initialSelectedSpeeds: string[] = [...SPEEDS];
+  const initialSelectedRatings: number[] = [1600, 1800, 2000, 2200];
+  const initialSelectedModes: string[] = [...MODES];
 
   const [trees, setTrees] = useState<Record<Side, MoveTree>>({
     white: createEmptyTree('white'),
@@ -755,14 +823,7 @@ function App() {
     white: 'white-0',
     black: 'black-0',
   });
-  const [repertoireSide, setRepertoireSide] = useState<'white' | 'black'>(() => {
-    try {
-      const value = window.localStorage.getItem(ORIENTATION_STORAGE_KEY);
-      return value === 'black' ? 'black' : 'white';
-    } catch {
-      return 'white';
-    }
-  });
+  const [repertoireSide, setRepertoireSide] = useState<'white' | 'black'>('white');
   const [isTempBoardFlipped, setIsTempBoardFlipped] = useState(false);
   const [status, setStatus] = useState('Ready');
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
@@ -772,12 +833,11 @@ function App() {
   const [engineStatus, setEngineStatus] = useState('stopped');
   const [engineRunning, setEngineRunning] = useState(false);
   const [lichessData, setLichessData] = useState<LichessResponse | null>(null);
+  const [openingByFen, setOpeningByFen] = useState<Record<string, { eco: string; name: string }>>({});
   const [lichessStatus, setLichessStatus] = useState('idle');
   const [showTreeArrows, setShowTreeArrows] = useState(true);
   const [showLichessArrows, setShowLichessArrows] = useState(true);
-  const [showLichessOnTreeMoves, setShowLichessOnTreeMoves] = useState(
-    persistedFilterSettings.showLichessOnTreeMoves ?? true,
-  );
+  const [showLichessOnTreeMoves, setShowLichessOnTreeMoves] = useState(true);
   const [isLichessFilterOpen, setIsLichessFilterOpen] = useState(false);
   const [lichessSource, setLichessSource] = useState<LichessSource>(initialLichessSource);
   const [playerHandle, setPlayerHandle] = useState(initialPlayerHandle);
@@ -796,6 +856,7 @@ function App() {
     white: [],
     black: [],
   });
+  const [hasHydratedAppState, setHasHydratedAppState] = useState(false);
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
   const [portraitTab, setPortraitTab] = useState<'lichess' | 'stockfish' | 'moves'>('moves');
   const [trainingSession, setTrainingSession] = useState<TrainingSession | null>(null);
@@ -844,25 +905,31 @@ function App() {
     const lichessArrows =
       showLichessArrows && positionGames > 0
         ? (() => {
-            const candidates = (lichessData?.moves ?? [])
-              .filter((move) => showLichessOnTreeMoves || !treeChildUcis.has(move.uci))
+            const allEntries = (lichessData?.moves ?? [])
               .map((move) => {
                 const moveGames = move.white + move.draws + move.black;
                 const share = moveGames / positionGames;
                 const keyPair = parseUciMove(move.uci);
-                return { share, keyPair };
+                const isHiddenByTreeFilter = !showLichessOnTreeMoves && treeChildUcis.has(move.uci);
+                return { share, keyPair, isHiddenByTreeFilter };
               })
-              .filter((entry) => entry.share >= thresholdShare && Boolean(entry.keyPair));
+              .filter((entry) => Boolean(entry.keyPair));
+
+            const maxShare = Math.max(...allEntries.map((item) => item.share), 0);
+
+            const candidates = allEntries.filter(
+              (entry) => !entry.isHiddenByTreeFilter && entry.share >= thresholdShare,
+            );
 
             if (candidates.length === 0) return [];
 
-            const maxShare = Math.max(...candidates.map((item) => item.share), 0);
+            const minLineWidth = 6;
             const maxLineWidth = 18;
 
             return candidates.map((entry) => {
               const [orig, dest] = entry.keyPair as [Key, Key];
               const ratio = maxShare > 0 ? entry.share / maxShare : 1;
-              const lineWidth = maxLineWidth * ratio;
+              const lineWidth = minLineWidth + ratio * (maxLineWidth - minLineWidth);
               return {
                 orig,
                 dest,
@@ -920,60 +987,129 @@ function App() {
   const lastMove = parseUciMove(selectedNode.moveUci);
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(ORIENTATION_STORAGE_KEY, repertoireSide);
-    } catch {
-      // Ignore storage write errors.
-    }
-  }, [repertoireSide]);
+    const hydrateAppState = async () => {
+      setStatus('Loading local repertoire...');
+      try {
+        if (navigator.storage?.persist) {
+          await navigator.storage.persist();
+        }
+      } catch {
+        // Ignore storage persistence permission failures.
+      }
+
+      try {
+        const persisted = normalizePersistedState(await idbGet<PersistedAppState>(APP_STATE_KEY));
+        const persistedSettings = normalizePersistedSettings(await idbGet<PersistedSettingsState>(APP_SETTINGS_KEY));
+
+        if (persistedSettings) {
+          setRepertoireSide(persistedSettings.repertoireSide);
+          setIsTempBoardFlipped(persistedSettings.isTempBoardFlipped);
+          setLichessSource(persistedSettings.lichessSource);
+          setPlayerHandle(persistedSettings.playerHandle);
+          setDateRange(persistedSettings.dateRange);
+          setLichessArrowThreshold(persistedSettings.lichessArrowThreshold);
+          setEngineDepth(persistedSettings.engineDepth);
+          setEngineMultiPv(persistedSettings.engineMultiPv);
+          setSelectedSpeeds(
+            persistedSettings.selectedSpeeds.length > 0 ? persistedSettings.selectedSpeeds : [...SPEEDS],
+          );
+          setSelectedRatings(
+            persistedSettings.selectedRatings.length > 0 ? persistedSettings.selectedRatings : [1600, 1800, 2000, 2200],
+          );
+          setSelectedModes(
+            persistedSettings.selectedModes.length > 0 ? persistedSettings.selectedModes : [...MODES],
+          );
+          setShowLichessOnTreeMoves(persistedSettings.showLichessOnTreeMoves);
+          setShowTreeArrows(persistedSettings.showTreeArrows);
+          setShowLichessArrows(persistedSettings.showLichessArrows);
+          setShowStockfishArrows(persistedSettings.showStockfishArrows);
+        }
+
+        if (persisted) {
+          setTrees(persisted.trees);
+          setSelectedNodeBySide(persisted.selectedNodeBySide);
+          setUndoStackBySide({ white: [], black: [] });
+        } else {
+          const whiteTree = createEmptyTree('white');
+          const blackTree = createEmptyTree('black');
+          setTrees({ white: whiteTree, black: blackTree });
+          setSelectedNodeBySide({ white: whiteTree.rootId, black: blackTree.rootId });
+          setUndoStackBySide({ white: [], black: [] });
+        }
+        setStatus('Ready');
+      } catch {
+        setStatus('Local storage load failed');
+      } finally {
+        setHasHydratedAppState(true);
+      }
+    };
+
+    void hydrateAppState();
+  }, []);
 
   useEffect(() => {
-    try {
-      const payload: PersistedFilterSettings = {
-        lichessSource,
-        playerHandle,
-        dateRange,
-        lichessArrowThreshold,
-        engineDepth,
-        selectedSpeeds,
-        selectedRatings,
-        selectedModes,
-        showLichessOnTreeMoves,
-      };
-      window.localStorage.setItem(FILTER_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
-    } catch {
-      // Ignore storage write errors.
-    }
+    if (!hasHydratedAppState) return;
+    const payload: PersistedAppState = {
+      version: 1,
+      trees,
+      selectedNodeBySide,
+    };
+
+    const timeout = window.setTimeout(() => {
+      void idbSet(APP_STATE_KEY, payload).catch(() => {
+        setStatus('Local save failed');
+      });
+    }, 120);
+
+    return () => window.clearTimeout(timeout);
+  }, [hasHydratedAppState, trees, selectedNodeBySide]);
+
+  useEffect(() => {
+    if (!hasHydratedAppState) return;
+    const settingsPayload: PersistedSettingsState = {
+      version: 1,
+      repertoireSide,
+      isTempBoardFlipped,
+      lichessSource,
+      playerHandle,
+      dateRange,
+      lichessArrowThreshold,
+      engineDepth,
+      engineMultiPv,
+      selectedSpeeds,
+      selectedRatings,
+      selectedModes,
+      showLichessOnTreeMoves,
+      showTreeArrows,
+      showLichessArrows,
+      showStockfishArrows,
+    };
+
+    const timeout = window.setTimeout(() => {
+      void idbSet(APP_SETTINGS_KEY, settingsPayload).catch(() => {
+        setStatus('Local settings save failed');
+      });
+    }, 120);
+
+    return () => window.clearTimeout(timeout);
   }, [
+    hasHydratedAppState,
+    repertoireSide,
+    isTempBoardFlipped,
     lichessSource,
     playerHandle,
     dateRange,
     lichessArrowThreshold,
     engineDepth,
+    engineMultiPv,
     selectedSpeeds,
     selectedRatings,
     selectedModes,
     showLichessOnTreeMoves,
+    showTreeArrows,
+    showLichessArrows,
+    showStockfishArrows,
   ]);
-
-  useEffect(() => {
-    const loadBooks = async () => {
-      setStatus('Loading PGN books...');
-      try {
-        const whiteTree = createEmptyTree('white');
-        const blackTree = createEmptyTree('black');
-
-        setTrees({ white: whiteTree, black: blackTree });
-        setSelectedNodeBySide({ white: whiteTree.rootId, black: blackTree.rootId });
-        setUndoStackBySide({ white: [], black: [] });
-        setStatus('Ready');
-      } catch {
-        setStatus('Failed to load books');
-      }
-    };
-
-    loadBooks();
-  }, []);
 
   useEffect(() => {
     engineRunningRef.current = engineRunning;
@@ -1524,6 +1660,30 @@ function App() {
   const canStartTraining = childNodes.length > 0;
   const isTrainingLineEnd = Boolean(isTrainingActive && childNodes.length === 0);
   const isMobileClient = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  useEffect(() => {
+    if (!lichessData?.opening) return;
+    const fenKey = selectedNode.fen;
+    setOpeningByFen((prev) => {
+      const existing = prev[fenKey];
+      if (existing && existing.eco === lichessData.opening.eco && existing.name === lichessData.opening.name) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [fenKey]: { eco: lichessData.opening.eco, name: lichessData.opening.name },
+      };
+    });
+  }, [lichessData?.opening, selectedNode.fen]);
+
+  const resolvedOpening = useMemo(() => {
+    if (lichessData?.opening) return lichessData.opening;
+    for (let i = path.length - 1; i >= 0; i -= 1) {
+      const candidate = openingByFen[path[i].fen];
+      if (candidate) return candidate;
+    }
+    return null;
+  }, [lichessData?.opening, openingByFen, path]);
+
   const trainingHintArrow = useMemo<DrawShape[]>(() => {
     if (!isTrainingActive || !trainingSession?.hintVisible || !trainingSession.hintMoveUci) return [];
     const keyPair = parseUciMove(trainingSession.hintMoveUci);
@@ -1536,10 +1696,10 @@ function App() {
   const visibleEngineStatus =
     engineStatus === 'done' || engineStatus === 'stopped' || engineStatus === 'analyzing' ? '' : engineStatus;
   const visibleLichessStatus = lichessStatus === 'done' || lichessStatus === 'idle' ? '' : lichessStatus;
-  const openingFullTitle = lichessData?.opening ? `${lichessData.opening.eco} ${lichessData.opening.name}` : '';
+  const openingFullTitle = resolvedOpening ? `${resolvedOpening.eco} ${resolvedOpening.name}` : '';
   const openingTitleContent = useMemo(() => {
-    if (!lichessData?.opening) return '';
-    const { eco, name } = lichessData.opening;
+    if (!resolvedOpening) return '';
+    const { eco, name } = resolvedOpening;
     const colonIndex = name.indexOf(':');
     if (colonIndex < 0) return `${eco} ${name}`;
     const firstLine = `${eco} ${name.slice(0, colonIndex + 1).trim()}`;
@@ -1552,7 +1712,7 @@ function App() {
         {secondLine}
       </>
     );
-  }, [lichessData]);
+  }, [resolvedOpening]);
   const filteredLichessMoves = useMemo(() => {
     if (!lichessData?.moves || lichessTotal <= 0) return [];
     const thresholdShare = lichessArrowThreshold / 100;
