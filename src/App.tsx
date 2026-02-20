@@ -1457,6 +1457,12 @@ function App() {
     importInputRef.current?.click();
   };
 
+  const openInLichessAnalysis = () => {
+    const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
+    const url = `https://lichess.org/analysis?fen=${encodeURIComponent(fen)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
   const importPgn: ChangeEventHandler<HTMLInputElement> = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -2056,6 +2062,14 @@ function App() {
                 }}
               >
                 Import {activeSide} PGN
+              </button>
+              <button
+                onClick={() => {
+                  openInLichessAnalysis();
+                  setIsOptionsOpen(false);
+                }}
+              >
+                Analyse with Lichess
               </button>
             </div>
           </div>
