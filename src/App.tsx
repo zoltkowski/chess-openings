@@ -1795,7 +1795,7 @@ function App() {
       await navigator.clipboard.writeText(fen);
       setStatus('FEN copied');
     } catch {
-      setStatus('Unable to share FEN');
+      // Ignore clipboard failures to keep UI silent on mobile share fallback.
     }
   };
 
@@ -2434,7 +2434,7 @@ function App() {
               >
                 Import {activeSide} PGN
               </button>
-              {isMobileClient ? (
+              {isMobileClient && (
                 <button
                   onClick={() => {
                     void shareFen();
@@ -2443,16 +2443,15 @@ function App() {
                 >
                   Share FEN
                 </button>
-              ) : (
-                <button
-                  onClick={() => {
-                    openInLichessAnalysis();
-                    setIsOptionsOpen(false);
-                  }}
-                >
-                  Analyse with Lichess
-                </button>
               )}
+              <button
+                onClick={() => {
+                  openInLichessAnalysis();
+                  setIsOptionsOpen(false);
+                }}
+              >
+                Analyse with Lichess
+              </button>
             </div>
           </div>
         </div>
