@@ -149,6 +149,12 @@ select {
   touch-action: none;
 }
 
+/* Chessground coordinate overlay expects content-box sizing. */
+.board .cg-wrap,
+.board .cg-wrap * {
+  box-sizing: content-box;
+}
+
 .board-center {
   display: grid;
   gap: 0.55rem;
