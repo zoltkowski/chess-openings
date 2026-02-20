@@ -259,7 +259,12 @@ select {
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem 0.35rem;
-  margin: 0.45rem 0 0.7rem;
+  margin: 0;
+}
+
+.move-notation-line {
+  min-height: 2.1rem;
+  margin: 0.2rem 0 0.7rem;
 }
 
 .move-inline-item {
@@ -493,6 +498,12 @@ select {
   min-height: 0;
   max-height: 100%;
   overflow: auto;
+}
+
+.move-list .controls-row {
+  border-bottom: 1px solid #e5ebf3;
+  padding-bottom: 0.45rem;
+  margin-bottom: 0.45rem;
 }
 
 .lichess-panel {

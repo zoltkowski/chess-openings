@@ -2195,7 +2195,7 @@ function App() {
                   />
                 </div>
               </div>
-              {inlineMoves.length > 0 && (
+              <div className="move-notation-line">
                 <div className="move-inline-wrap">
                   {inlineMoves.map((move) => (
                     <button
@@ -2210,7 +2210,7 @@ function App() {
                     </button>
                   ))}
                 </div>
-              )}
+              </div>
               {optionRows.length > 0 && (
                 <div className="tree-options-wrap">
                   {optionRows.map(({ node, leaves }) => (
