@@ -470,20 +470,6 @@ function buildVariationTokens(tree: MoveTree, nodeId: string, chess: Chess): str
 
   const [mainChildId, ...alternativeChildIds] = children;
   const tokens: string[] = [];
-
-  for (const alternativeChildId of alternativeChildIds) {
-    const altNode = tree.nodes[alternativeChildId];
-    if (!altNode?.moveUci) continue;
-    const altInput = uciToMoveInput(altNode.moveUci);
-    if (!altInput) continue;
-    const altChess = new Chess(chess.fen());
-    const altPrefix = formatMovePrefix(altChess);
-    const altMove = altChess.move(altInput);
-    if (!altMove) continue;
-    const altTokens = [altPrefix, altMove.san, ...buildVariationTokens(tree, alternativeChildId, altChess)];
-    tokens.push(`(${altTokens.join(' ')})`);
-  }
-
   const mainNode = tree.nodes[mainChildId];
   if (!mainNode?.moveUci) return tokens;
   const mainInput = uciToMoveInput(mainNode.moveUci);
@@ -492,7 +478,22 @@ function buildVariationTokens(tree: MoveTree, nodeId: string, chess: Chess): str
   const mainMove = chess.move(mainInput);
   if (!mainMove) return tokens;
 
-  tokens.push(mainPrefix, mainMove.san, ...buildVariationTokens(tree, mainChildId, chess));
+  tokens.push(mainPrefix, mainMove.san);
+
+  for (const alternativeChildId of alternativeChildIds) {
+    const altNode = tree.nodes[alternativeChildId];
+    if (!altNode?.moveUci) continue;
+    const altInput = uciToMoveInput(altNode.moveUci);
+    if (!altInput) continue;
+    const altChess = new Chess(node.fen === START_FEN ? START_POS_FEN : node.fen);
+    const altPrefix = formatMovePrefix(altChess);
+    const altMove = altChess.move(altInput);
+    if (!altMove) continue;
+    const altTokens = [altPrefix, altMove.san, ...buildVariationTokens(tree, alternativeChildId, altChess)];
+    tokens.push(`(${altTokens.join(' ')})`);
+  }
+
+  tokens.push(...buildVariationTokens(tree, mainChildId, chess));
   return tokens;
 }
 
