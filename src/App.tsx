@@ -1123,8 +1123,8 @@ function App() {
   const initialDateRange: DateRange = null;
   const initialLichessArrowThreshold = 5;
   const initialEngineDepth = 24;
-  const initialSelectedSpeeds: string[] = [...SPEEDS];
-  const initialSelectedRatings: number[] = [1600, 1800, 2000, 2200];
+  const initialSelectedSpeeds: string[] = SPEEDS.filter((speed) => speed !== 'bullet');
+  const initialSelectedRatings: number[] = [2000, 2200, 2500];
   const initialSelectedModes: string[] = [...MODES];
   const initialWhiteTree = createEmptyTree('white');
   const initialBlackTree = createEmptyTree('black');
@@ -1417,10 +1417,10 @@ function App() {
           setEngineDepth(persistedSettings.engineDepth);
           setEngineMultiPv(persistedSettings.engineMultiPv);
           setSelectedSpeeds(
-            persistedSettings.selectedSpeeds.length > 0 ? persistedSettings.selectedSpeeds : [...SPEEDS],
+            persistedSettings.selectedSpeeds.length > 0 ? persistedSettings.selectedSpeeds : initialSelectedSpeeds,
           );
           setSelectedRatings(
-            persistedSettings.selectedRatings.length > 0 ? persistedSettings.selectedRatings : [1600, 1800, 2000, 2200],
+            persistedSettings.selectedRatings.length > 0 ? persistedSettings.selectedRatings : initialSelectedRatings,
           );
           setSelectedModes(
             persistedSettings.selectedModes.length > 0 ? persistedSettings.selectedModes : [...MODES],
