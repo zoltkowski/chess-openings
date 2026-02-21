@@ -161,6 +161,12 @@ function normalizeRepertoireName(value: string) {
   return trimmed || 'Untitled repertoire';
 }
 
+function repertoireHasMoves(tree: MoveTree) {
+  const root = tree.nodes[tree.rootId];
+  if (root?.children.length) return true;
+  return Object.values(tree.nodes).some((node) => Boolean(node.moveUci));
+}
+
 function createEmptyRepertoire(side: Side, name: string): RepertoireEntry {
   const tree = createEmptyTree(side);
   return {
@@ -251,7 +257,7 @@ function normalizePersistedState(value: unknown): PersistedAppState | null {
           selectedNodeId: entry.tree.nodes[entry.selectedNodeId] ? entry.selectedNodeId : entry.tree.rootId,
         }));
       }
-      return [createEmptyRepertoire(side, 'Default')];
+      return [];
     };
 
     const whiteList = normalizeSide('white');
@@ -286,13 +292,13 @@ function normalizePersistedState(value: unknown): PersistedAppState | null {
   const blackTree = parsedV1.trees.black;
   const whiteRepertoire: RepertoireEntry = {
     id: createRepertoireId('white'),
-    name: 'Default',
+    name: 'Imported white repertoire',
     tree: whiteTree,
     selectedNodeId: whiteTree.nodes[parsedV1.selectedNodeBySide.white] ? parsedV1.selectedNodeBySide.white : whiteTree.rootId,
   };
   const blackRepertoire: RepertoireEntry = {
     id: createRepertoireId('black'),
-    name: 'Default',
+    name: 'Imported black repertoire',
     tree: blackTree,
     selectedNodeId: blackTree.nodes[parsedV1.selectedNodeBySide.black] ? parsedV1.selectedNodeBySide.black : blackTree.rootId,
   };
@@ -1120,20 +1126,20 @@ function App() {
   const initialSelectedSpeeds: string[] = [...SPEEDS];
   const initialSelectedRatings: number[] = [1600, 1800, 2000, 2200];
   const initialSelectedModes: string[] = [...MODES];
-  const initialWhiteRepertoire = createEmptyRepertoire('white', 'Default');
-  const initialBlackRepertoire = createEmptyRepertoire('black', 'Default');
+  const initialWhiteTree = createEmptyTree('white');
+  const initialBlackTree = createEmptyTree('black');
 
   const [trees, setTrees] = useState<Record<Side, MoveTree>>({
-    white: initialWhiteRepertoire.tree,
-    black: initialBlackRepertoire.tree,
+    white: initialWhiteTree,
+    black: initialBlackTree,
   });
   const [selectedNodeBySide, setSelectedNodeBySide] = useState<Record<Side, string>>({
-    white: initialWhiteRepertoire.selectedNodeId,
-    black: initialBlackRepertoire.selectedNodeId,
+    white: initialWhiteTree.rootId,
+    black: initialBlackTree.rootId,
   });
   const [repertoiresBySide, setRepertoiresBySide] = useState<Record<Side, RepertoireEntry[]>>({
-    white: [initialWhiteRepertoire],
-    black: [initialBlackRepertoire],
+    white: [],
+    black: [],
   });
   const [activeRepertoireIdBySide, setActiveRepertoireIdBySide] = useState<Record<Side, string | null>>({
     white: null,
@@ -1214,9 +1220,7 @@ function App() {
     isTempBoardFlipped ? (repertoireSide === 'white' ? 'black' : 'white') : repertoireSide;
   const newRepertoireSide: Side = boardOrientation;
   const loadRepertoireSide: Side = boardOrientation;
-  const loadableRepertoiresForBoardSide = repertoiresBySide[loadRepertoireSide].filter(
-    (entry) => normalizeRepertoireName(entry.name).toLowerCase() !== 'default',
-  );
+  const loadableRepertoiresForBoardSide = repertoiresBySide[loadRepertoireSide];
   const tree = trees[activeSide];
   const selectedNodeId = selectedNodeBySide[activeSide] ?? tree.rootId;
   const selectedNode = tree.nodes[selectedNodeId] ?? tree.nodes[tree.rootId];
@@ -1274,8 +1278,8 @@ function App() {
   }, [isBrowseMode, childNodes, browseMoveOptions, selectedNode.id, selectedNode.fen]);
 
   const repertoiresAtPosition = useMemo(() => {
-    if (selectedNode.fen === START_FEN) return [];
     return repertoiresBySide[activeSide]
+      .filter((repertoire) => repertoireHasMoves(repertoire.tree))
       .filter((repertoire) => Object.values(repertoire.tree.nodes).some((node) => node.fen === selectedNode.fen))
       .map((repertoire) => ({
         id: repertoire.id,
@@ -1432,22 +1436,24 @@ function App() {
           setActiveRepertoireIdBySide({ white: null, black: null });
           const whiteActive = persisted.repertoiresBySide.white[0];
           const blackActive = persisted.repertoiresBySide.black[0];
+          const whiteTree = whiteActive?.tree ?? createEmptyTree('white');
+          const blackTree = blackActive?.tree ?? createEmptyTree('black');
           setTrees({
-            white: whiteActive.tree,
-            black: blackActive.tree,
+            white: whiteTree,
+            black: blackTree,
           });
           setSelectedNodeBySide({
-            white: whiteActive.selectedNodeId,
-            black: blackActive.selectedNodeId,
+            white: whiteActive?.selectedNodeId ?? whiteTree.rootId,
+            black: blackActive?.selectedNodeId ?? blackTree.rootId,
           });
           setUndoStackBySide({ white: [], black: [] });
         } else {
-          const whiteDefault = createEmptyRepertoire('white', 'Default');
-          const blackDefault = createEmptyRepertoire('black', 'Default');
-          setRepertoiresBySide({ white: [whiteDefault], black: [blackDefault] });
+          const whiteTree = createEmptyTree('white');
+          const blackTree = createEmptyTree('black');
+          setRepertoiresBySide({ white: [], black: [] });
           setActiveRepertoireIdBySide({ white: null, black: null });
-          setTrees({ white: whiteDefault.tree, black: blackDefault.tree });
-          setSelectedNodeBySide({ white: whiteDefault.selectedNodeId, black: blackDefault.selectedNodeId });
+          setTrees({ white: whiteTree, black: blackTree });
+          setSelectedNodeBySide({ white: whiteTree.rootId, black: blackTree.rootId });
           setUndoStackBySide({ white: [], black: [] });
         }
         setStatus('Ready');
@@ -2059,7 +2065,9 @@ function App() {
 
   const exportWholeDatabasePgn = () => {
     const games = (['white', 'black'] as Side[]).flatMap((side) =>
-      repertoiresBySide[side].map((entry) => exportTreeToPgn(entry.tree, side, entry.name)),
+      repertoiresBySide[side]
+        .filter((entry) => repertoireHasMoves(entry.tree))
+        .map((entry) => exportTreeToPgn(entry.tree, side, entry.name)),
     );
     if (games.length === 0) {
       return;
@@ -2071,13 +2079,13 @@ function App() {
     const confirmed = window.confirm('Delete all repertoires from local DB? This cannot be undone.');
     if (!confirmed) return;
 
-    const whiteDefault = createEmptyRepertoire('white', 'Default');
-    const blackDefault = createEmptyRepertoire('black', 'Default');
+    const whiteTree = createEmptyTree('white');
+    const blackTree = createEmptyTree('black');
 
-    setRepertoiresBySide({ white: [whiteDefault], black: [blackDefault] });
+    setRepertoiresBySide({ white: [], black: [] });
     setActiveRepertoireIdBySide({ white: null, black: null });
-    setTrees({ white: whiteDefault.tree, black: blackDefault.tree });
-    setSelectedNodeBySide({ white: whiteDefault.selectedNodeId, black: blackDefault.selectedNodeId });
+    setTrees({ white: whiteTree, black: blackTree });
+    setSelectedNodeBySide({ white: whiteTree.rootId, black: blackTree.rootId });
     setUndoStackBySide({ white: [], black: [] });
     setTrainingSession(null);
     setIsOptionsOpen(false);
@@ -2177,18 +2185,39 @@ function App() {
   const deleteRepertoire = (repertoireId: string, side: Side = activeSide) => {
     const entry = repertoiresBySide[side].find((item) => item.id === repertoireId);
     if (!entry) return;
-    if (normalizeRepertoireName(entry.name).toLowerCase() === 'default') return;
 
     const confirmed = window.confirm(`Delete repertoire "${entry.name}"? This cannot be undone.`);
     if (!confirmed) return;
 
     const remaining = repertoiresBySide[side].filter((item) => item.id !== repertoireId);
-    if (remaining.length === 0) return;
 
     setRepertoiresBySide((prev) => ({
       ...prev,
       [side]: prev[side].filter((item) => item.id !== repertoireId),
     }));
+
+    if (remaining.length === 0) {
+      const emptyTree = createEmptyTree(side);
+      setActiveRepertoireIdBySide((prev) => ({
+        ...prev,
+        [side]: null,
+      }));
+      setTrees((prev) => ({
+        ...prev,
+        [side]: emptyTree,
+      }));
+      setSelectedNodeBySide((prev) => ({
+        ...prev,
+        [side]: emptyTree.rootId,
+      }));
+      setUndoStackBySide((prev) => ({ ...prev, [side]: [] }));
+      setTrainingSession((prev) => (prev?.side === side ? null : prev));
+      if (renamingRepertoireId === repertoireId) {
+        cancelRenamingRepertoire();
+      }
+      setStatus(`Deleted repertoire "${entry.name}"`);
+      return;
+    }
 
     if (activeRepertoireIdBySide[side] === repertoireId) {
       const fallback = remaining[0];
@@ -2351,6 +2380,13 @@ function App() {
 
   const lichessTotal = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
   const isTrainingActive = Boolean(trainingSession && trainingSession.side === activeSide);
+  const hasExportableDbGames = useMemo(
+    () =>
+      (['white', 'black'] as Side[]).some((side) =>
+        repertoiresBySide[side].some((entry) => repertoireHasMoves(entry.tree)),
+      ),
+    [repertoiresBySide],
+  );
   const showHintButton = Boolean(isTrainingActive && trainingSession?.hintRequested);
   const canStartTraining = displayedChildNodes.length > 0;
   const isTrainingLineEnd = Boolean(isTrainingActive && displayedChildNodes.length === 0);
@@ -3197,7 +3233,7 @@ function App() {
                   : 'Add Stockfish evals to repertoire'}
               </button>
               <button
-                disabled={isTreeEvalRunning}
+                disabled={isTreeEvalRunning || !hasExportableDbGames}
                 onClick={() => {
                   exportWholeDatabasePgn();
                   setIsOptionsOpen(false);
