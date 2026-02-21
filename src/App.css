@@ -59,7 +59,7 @@ select {
   margin-left: auto;
 }
 
-.move-list .controls-row > button:not(.hamburger-btn):not(.icon-toggle-btn) {
+.move-list .controls-row > button:not(.hamburger-btn):not(.icon-toggle-btn):not(.continue-training-btn) {
   width: 2.6rem;
   min-width: 2.6rem;
   padding: 0.3rem 0.2rem;
@@ -606,6 +606,11 @@ select {
   border-bottom: 0;
   padding-bottom: 0;
   margin-bottom: 0.35rem;
+}
+
+.move-list .controls-row > button.continue-training-btn {
+  min-width: 8rem;
+  width: 8rem;
 }
 
 .lichess-panel {
@@ -1196,6 +1201,7 @@ select {
     display: inline-flex;
     gap: 0.4rem;
     margin-top: 0.35rem;
+    position: relative;
   }
 
   .portrait-tabbar .active {
@@ -1207,7 +1213,19 @@ select {
     width: auto;
     min-width: 3.4rem;
     padding: 0.35rem 0.55rem;
+  }
+
+  .portrait-tabbar > button.hint-portrait-btn {
     margin-left: auto;
+  }
+
+  .portrait-tabbar > button.continue-portrait-btn {
+    width: auto;
+    min-width: 4.7rem;
+    padding: 0.35rem 0.6rem;
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
   }
 
   .desktop-only {

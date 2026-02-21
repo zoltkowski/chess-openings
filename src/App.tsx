@@ -1236,13 +1236,11 @@ function App() {
     [selectedNode.children, tree.nodes],
   );
 
-  const browseMoveOptions = useMemo<BrowseMoveOption[]>(() => {
-    if (!isBrowseMode) return [];
+  const collectBrowseMoveOptionsAtFen = (side: Side, fen: string): BrowseMoveOption[] => {
     const byUci = new Map<string, { moveSan: string; repertoireNames: Set<string> }>();
-    const currentFen = selectedNode.fen;
 
-    for (const repertoire of repertoiresBySide[activeSide]) {
-      const nodes = Object.values(repertoire.tree.nodes).filter((node) => node.fen === currentFen);
+    for (const repertoire of repertoiresBySide[side]) {
+      const nodes = Object.values(repertoire.tree.nodes).filter((node) => node.fen === fen);
       if (nodes.length === 0) continue;
       for (const node of nodes) {
         for (const childId of node.children) {
@@ -1265,6 +1263,11 @@ function App() {
         repertoireNames: [...value.repertoireNames],
       }))
       .sort((a, b) => b.repertoireNames.length - a.repertoireNames.length || a.moveSan.localeCompare(b.moveSan));
+  };
+
+  const browseMoveOptions = useMemo<BrowseMoveOption[]>(() => {
+    if (!isBrowseMode) return [];
+    return collectBrowseMoveOptionsAtFen(activeSide, selectedNode.fen);
   }, [isBrowseMode, selectedNode.fen, repertoiresBySide, activeSide]);
 
   const displayedChildNodes = useMemo<MoveNode[]>(() => {
@@ -1896,8 +1899,14 @@ function App() {
     );
   };
 
-  const advanceTrainingPosition = (side: Side, rootNodeId: string, startNodeId: string) => {
-    const sideTree = trees[side];
+  const advanceTrainingPosition = (
+    side: Side,
+    rootNodeId: string,
+    startNodeId: string,
+    sourceTreeOverride?: MoveTree,
+  ) => {
+    const baseTree = sourceTreeOverride ?? trees[side];
+    let sideTree = baseTree;
     const rootNode = sideTree.nodes[rootNodeId];
     if (!rootNode) return;
 
@@ -1905,15 +1914,59 @@ function App() {
     const maxSteps = 256;
     for (let step = 0; step < maxSteps; step += 1) {
       const cursor = sideTree.nodes[cursorId] ?? rootNode;
-      if (cursor.children.length === 0) {
-        break;
+      const turnColor = toTurnColor(cursor.fen);
+      if (turnColor === side) break;
+
+      if (isBrowseMode) {
+        const options = collectBrowseMoveOptionsAtFen(side, cursor.fen);
+        if (options.length === 0) break;
+        const randomOption = options[Math.floor(Math.random() * options.length)];
+        const moveUci = randomOption.moveUci;
+        const existingChildId = cursor.children.find((id) => sideTree.nodes[id]?.moveUci === moveUci);
+        if (existingChildId) {
+          cursorId = existingChildId;
+          continue;
+        }
+        const chess = fenToChess(cursor.fen);
+        const promotionChar = (moveUci[4] ?? 'q').toLowerCase();
+        const promotion: 'q' | 'r' | 'b' | 'n' = ['q', 'r', 'b', 'n'].includes(promotionChar)
+          ? (promotionChar as 'q' | 'r' | 'b' | 'n')
+          : 'q';
+        const move = chess.move({ from: moveUci.slice(0, 2), to: moveUci.slice(2, 4), promotion });
+        if (!move) break;
+        const nodeId = createNodeId(sideTree);
+        const newNode: MoveNode = {
+          id: nodeId,
+          parentId: cursor.id,
+          fen: chess.fen(),
+          moveSan: move.san,
+          moveUci,
+          children: [],
+        };
+        sideTree = {
+          ...sideTree,
+          nextId: sideTree.nextId + 1,
+          nodes: {
+            ...sideTree.nodes,
+            [nodeId]: newNode,
+            [cursor.id]: {
+              ...cursor,
+              children: [...cursor.children, nodeId],
+            },
+          },
+        };
+        cursorId = nodeId;
+        continue;
       }
 
-      if (toTurnColor(cursor.fen) === side) break;
+      if (cursor.children.length === 0) break;
       const randomChildId = cursor.children[Math.floor(Math.random() * cursor.children.length)];
       cursorId = randomChildId;
     }
 
+    if (sideTree !== baseTree) {
+      setTrees((prev) => ({ ...prev, [side]: sideTree }));
+    }
     setSelectedNodeBySide((prev) => ({ ...prev, [side]: cursorId }));
     clearTrainingHint();
   };
@@ -1968,12 +2021,17 @@ function App() {
     const existingChildId = currentNode.children.find((id) => currentTree.nodes[id].moveUci === uci);
 
     if (trainingSession && trainingSession.side === activeSide) {
-      if (currentNode.children.length === 0) return;
       if (toTurnColor(currentNode.fen) !== activeSide) return;
+      const trainingOptions = isBrowseMode
+        ? collectBrowseMoveOptionsAtFen(activeSide, currentNode.fen).map((option) => option.moveUci)
+        : currentNode.children
+            .map((childId) => currentTree.nodes[childId]?.moveUci)
+            .filter((value): value is string => Boolean(value));
+      if (trainingOptions.length === 0) return;
 
-      if (!existingChildId) {
-        const hintChildId = currentNode.children[Math.floor(Math.random() * currentNode.children.length)];
-        const hintMoveUci = hintChildId ? currentTree.nodes[hintChildId]?.moveUci ?? null : null;
+      const isAllowedMove = trainingOptions.includes(uci);
+      if (!isAllowedMove) {
+        const hintMoveUci = trainingOptions[Math.floor(Math.random() * trainingOptions.length)] ?? null;
         setTrainingSession((prev) =>
           prev && prev.side === activeSide
             ? {
@@ -1988,8 +2046,41 @@ function App() {
         return;
       }
 
+      let nextTreeForTraining = currentTree;
+      let nextNodeIdForTraining = existingChildId;
+      if (!nextNodeIdForTraining) {
+        const nodeId = createNodeId(currentTree);
+        const newNode: MoveNode = {
+          id: nodeId,
+          parentId: currentNode.id,
+          fen: chess.fen(),
+          moveSan: move.san,
+          moveUci: uci,
+          children: [],
+        };
+        nextTreeForTraining = {
+          ...currentTree,
+          nextId: currentTree.nextId + 1,
+          nodes: {
+            ...currentTree.nodes,
+            [nodeId]: newNode,
+            [currentNode.id]: {
+              ...currentNode,
+              children: [...currentNode.children, nodeId],
+            },
+          },
+        };
+        nextNodeIdForTraining = nodeId;
+        setTrees((prev) => ({
+          ...prev,
+          [activeSide]: nextTreeForTraining,
+        }));
+      }
+
       clearTrainingHint();
-      advanceTrainingPosition(activeSide, trainingSession.rootNodeId, existingChildId);
+      if (nextNodeIdForTraining) {
+        advanceTrainingPosition(activeSide, trainingSession.rootNodeId, nextNodeIdForTraining, nextTreeForTraining);
+      }
       return;
     }
 
@@ -2944,6 +3035,11 @@ function App() {
                 >
                   <TrainIcon />
                 </button>
+                {isTrainingActive && isTrainingLineEnd && (
+                  <button type="button" className="continue-portrait-btn" onClick={restartTrainingLine}>
+                    Continue
+                  </button>
+                )}
                 {isTrainingActive && showHintButton && (
                   <button
                     type="button"
@@ -3050,7 +3146,7 @@ function App() {
                   </div>
                   <div className="controls-row">
                     {isTrainingLineEnd && (
-                      <button type="button" onClick={restartTrainingLine}>
+                      <button type="button" className="continue-training-btn desktop-only" onClick={restartTrainingLine}>
                         Continue
                       </button>
                     )}
