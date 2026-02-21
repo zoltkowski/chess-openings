@@ -2993,15 +2993,6 @@ function App() {
               <button
                 disabled={isTreeEvalRunning}
                 onClick={() => {
-                  setThemeMode((prev) => (prev === 'dark' ? 'light' : 'dark'));
-                  setIsOptionsOpen(false);
-                }}
-              >
-                {themeMode === 'dark' ? 'Disable dark mode' : 'Enable dark mode'}
-              </button>
-              <button
-                disabled={isTreeEvalRunning}
-                onClick={() => {
                   if (isBrowseMode) {
                     setRepertoireSide((prev) => (prev === 'white' ? 'black' : 'white'));
                     setIsTempBoardFlipped(false);
@@ -3101,6 +3092,15 @@ function App() {
                 }}
               >
                 Analyse with Lichess
+              </button>
+              <button
+                disabled={isTreeEvalRunning}
+                onClick={() => {
+                  setThemeMode((prev) => (prev === 'dark' ? 'light' : 'dark'));
+                  setIsOptionsOpen(false);
+                }}
+              >
+                {themeMode === 'dark' ? 'Light mode' : 'Dark mode'}
               </button>
             </div>
           </div>

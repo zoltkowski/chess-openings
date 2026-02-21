@@ -288,6 +288,7 @@ select {
 
 .move-inline-item.has-alternatives {
   font-weight: 700;
+  color: #15803d;
 }
 
 .move-inline-prefix {
@@ -934,6 +935,10 @@ select {
 
 .app.theme-dark .move-inline-item:hover {
   border-color: #60a5fa;
+}
+
+.app.theme-dark .move-inline-item.has-alternatives {
+  color: #4ade80;
 }
 
 .app.theme-dark .modal-backdrop {
