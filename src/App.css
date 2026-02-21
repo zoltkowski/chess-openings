@@ -352,6 +352,27 @@ select {
 .repertoire-hit-list {
   margin-top: 0.2rem;
   line-height: 1.35;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.repertoire-hit-item {
+  padding: 0.2rem 0.45rem;
+  font-size: 0.74rem;
+}
+
+.repertoire-hit-item.active {
+  color: #15803d;
+  font-weight: 700;
+  border-color: #22c55e;
+  background: #ecfdf5;
+}
+
+.current-repertoire.active-repertoire,
+.training-repertoire-name {
+  color: #15803d;
+  font-weight: 700;
 }
 
 .lichess-clickable-row {
@@ -912,6 +933,17 @@ select {
 
 .app.theme-dark .tree-option-leaves {
   color: #4ade80;
+}
+
+.app.theme-dark .repertoire-hit-item.active,
+.app.theme-dark .current-repertoire.active-repertoire,
+.app.theme-dark .training-repertoire-name {
+  color: #4ade80;
+}
+
+.app.theme-dark .repertoire-hit-item.active {
+  border-color: #22c55e;
+  background: #052e16;
 }
 
 .app.theme-dark .table-row,

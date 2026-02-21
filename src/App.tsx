@@ -1275,11 +1275,19 @@ function App() {
 
   const repertoiresAtPosition = useMemo(() => {
     if (selectedNode.fen === START_FEN) return [];
-    const names = repertoiresBySide[activeSide]
+    return repertoiresBySide[activeSide]
       .filter((repertoire) => Object.values(repertoire.tree.nodes).some((node) => node.fen === selectedNode.fen))
-      .map((repertoire) => repertoire.name);
-    return [...new Set(names)].sort((a, b) => a.localeCompare(b));
-  }, [selectedNode.fen, repertoiresBySide, activeSide]);
+      .map((repertoire) => ({
+        id: repertoire.id,
+        name: repertoire.name,
+        isActive: repertoire.id === activeRepertoireIdBySide[activeSide],
+      }))
+      .sort((a, b) => {
+        if (a.isActive && !b.isActive) return -1;
+        if (!a.isActive && b.isActive) return 1;
+        return a.name.localeCompare(b.name);
+      });
+  }, [selectedNode.fen, repertoiresBySide, activeSide, activeRepertoireIdBySide]);
 
   const autoArrows = useMemo<DrawShape[]>(() => {
     const treeArrows = showTreeArrows
@@ -3085,7 +3093,18 @@ function App() {
                   {repertoiresAtPosition.length > 0 && (
                     <div className="repertoire-hit-block">
                       <strong>Repertoires with this position</strong>
-                      <div className="repertoire-hit-list">{repertoiresAtPosition.join(', ')}</div>
+                      <div className="repertoire-hit-list">
+                        {repertoiresAtPosition.map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className={`repertoire-hit-item ${item.isActive ? 'active' : ''}`}
+                            onClick={() => loadRepertoire(item.id, activeSide)}
+                          >
+                            {item.name}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </>
@@ -3099,8 +3118,11 @@ function App() {
       {isOptionsOpen && (
         <div className="modal-backdrop" onClick={() => { if (!isTreeEvalRunning) setIsOptionsOpen(false); }}>
           <div className="modal-card options-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="current-repertoire" title={activeRepertoireName}>
-              {activeSide}: {activeRepertoireName}
+            <div
+              className={`current-repertoire ${!isBrowseMode ? 'active-repertoire' : ''}`}
+              title={activeRepertoireName}
+            >
+              {isBrowseMode ? activeRepertoireName : `${activeSide}: ${activeRepertoireName}`}
             </div>
             <div className="options-grid">
               <button
