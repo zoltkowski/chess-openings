@@ -1194,11 +1194,13 @@ function App() {
     activeRepertoireId ? activeRepertoireList.find((item) => item.id === activeRepertoireId) : null;
   const isBrowseMode = !activeRepertoire;
   const activeRepertoireName = activeRepertoire?.name ?? 'Browse mode';
-  const loadableRepertoires = activeRepertoireList.filter(
-    (entry) => normalizeRepertoireName(entry.name).toLowerCase() !== 'default',
-  );
   const boardOrientation: 'white' | 'black' =
     isTempBoardFlipped ? (repertoireSide === 'white' ? 'black' : 'white') : repertoireSide;
+  const newRepertoireSide: Side = boardOrientation;
+  const loadRepertoireSide: Side = boardOrientation;
+  const loadableRepertoiresForBoardSide = repertoiresBySide[loadRepertoireSide].filter(
+    (entry) => normalizeRepertoireName(entry.name).toLowerCase() !== 'default',
+  );
   const tree = trees[activeSide];
   const selectedNodeId = selectedNodeBySide[activeSide] ?? tree.rootId;
   const selectedNode = tree.nodes[selectedNodeId] ?? tree.nodes[tree.rootId];
@@ -2018,7 +2020,6 @@ function App() {
       repertoiresBySide[side].map((entry) => exportTreeToPgn(entry.tree, side, entry.name)),
     );
     if (games.length === 0) {
-      setStatus('No repertoires to export');
       return;
     }
     downloadPgn(games.join('\n\n'), 'all-repertoires.pgn');
@@ -2029,57 +2030,57 @@ function App() {
     importInputRef.current?.click();
   };
 
-  const createNewRepertoire = () => {
+  const createNewRepertoire = (side: Side = activeSide) => {
     const name = normalizeRepertoireName(newRepertoireName);
-    const next = createEmptyRepertoire(activeSide, name);
+    const next = createEmptyRepertoire(side, name);
     setRepertoiresBySide((prev) => ({
       ...prev,
-      [activeSide]: [...prev[activeSide], next],
+      [side]: [...prev[side], next],
     }));
     setActiveRepertoireIdBySide((prev) => ({
       ...prev,
-      [activeSide]: next.id,
+      [side]: next.id,
     }));
     setTrees((prev) => ({
       ...prev,
-      [activeSide]: next.tree,
+      [side]: next.tree,
     }));
     setSelectedNodeBySide((prev) => ({
       ...prev,
-      [activeSide]: next.selectedNodeId,
+      [side]: next.selectedNodeId,
     }));
-    setUndoStackBySide((prev) => ({ ...prev, [activeSide]: [] }));
-    setTrainingSession((prev) => (prev?.side === activeSide ? null : prev));
+    setUndoStackBySide((prev) => ({ ...prev, [side]: [] }));
+    setTrainingSession((prev) => (prev?.side === side ? null : prev));
     setNewRepertoireName('');
     setIsNewRepertoireOpen(false);
     setIsOptionsOpen(false);
-    setStatus(`Created repertoire "${next.name}" (${activeSide})`);
+    setStatus(`Created repertoire "${next.name}" (${side})`);
   };
 
-  const loadRepertoire = (repertoireId: string) => {
-    const entry = repertoiresBySide[activeSide].find((item) => item.id === repertoireId);
+  const loadRepertoire = (repertoireId: string, side: Side = activeSide) => {
+    const entry = repertoiresBySide[side].find((item) => item.id === repertoireId);
     if (!entry) return;
     setActiveRepertoireIdBySide((prev) => ({
       ...prev,
-      [activeSide]: entry.id,
+      [side]: entry.id,
     }));
     setTrees((prev) => ({
       ...prev,
-      [activeSide]: entry.tree,
+      [side]: entry.tree,
     }));
     setSelectedNodeBySide((prev) => ({
       ...prev,
-      [activeSide]: entry.tree.nodes[entry.selectedNodeId] ? entry.selectedNodeId : entry.tree.rootId,
+      [side]: entry.tree.nodes[entry.selectedNodeId] ? entry.selectedNodeId : entry.tree.rootId,
     }));
-    setUndoStackBySide((prev) => ({ ...prev, [activeSide]: [] }));
-    setTrainingSession((prev) => (prev?.side === activeSide ? null : prev));
+    setUndoStackBySide((prev) => ({ ...prev, [side]: [] }));
+    setTrainingSession((prev) => (prev?.side === side ? null : prev));
     setIsLoadRepertoireOpen(false);
     setIsOptionsOpen(false);
-    setStatus(`Loaded repertoire "${entry.name}" (${activeSide})`);
+    setStatus(`Loaded repertoire "${entry.name}" (${side})`);
   };
 
-  const startRenamingRepertoire = (repertoireId: string) => {
-    const entry = repertoiresBySide[activeSide].find((item) => item.id === repertoireId);
+  const startRenamingRepertoire = (repertoireId: string, side: Side = activeSide) => {
+    const entry = repertoiresBySide[side].find((item) => item.id === repertoireId);
     if (!entry) return;
     setRenamingRepertoireId(repertoireId);
     setRenameDraft(entry.name);
@@ -2090,11 +2091,11 @@ function App() {
     setRenameDraft('');
   };
 
-  const commitRenameRepertoire = (repertoireId: string) => {
+  const commitRenameRepertoire = (repertoireId: string, side: Side = activeSide) => {
     const nextName = normalizeRepertoireName(renameDraft);
     setRepertoiresBySide((prev) => ({
       ...prev,
-      [activeSide]: prev[activeSide].map((entry) =>
+      [side]: prev[side].map((entry) =>
         entry.id === repertoireId
           ? {
               ...entry,
@@ -2108,38 +2109,38 @@ function App() {
     setStatus(`Renamed repertoire to "${nextName}"`);
   };
 
-  const deleteRepertoire = (repertoireId: string) => {
-    const entry = repertoiresBySide[activeSide].find((item) => item.id === repertoireId);
+  const deleteRepertoire = (repertoireId: string, side: Side = activeSide) => {
+    const entry = repertoiresBySide[side].find((item) => item.id === repertoireId);
     if (!entry) return;
     if (normalizeRepertoireName(entry.name).toLowerCase() === 'default') return;
 
     const confirmed = window.confirm(`Delete repertoire "${entry.name}"? This cannot be undone.`);
     if (!confirmed) return;
 
-    const remaining = repertoiresBySide[activeSide].filter((item) => item.id !== repertoireId);
+    const remaining = repertoiresBySide[side].filter((item) => item.id !== repertoireId);
     if (remaining.length === 0) return;
 
     setRepertoiresBySide((prev) => ({
       ...prev,
-      [activeSide]: prev[activeSide].filter((item) => item.id !== repertoireId),
+      [side]: prev[side].filter((item) => item.id !== repertoireId),
     }));
 
-    if (activeRepertoireIdBySide[activeSide] === repertoireId) {
+    if (activeRepertoireIdBySide[side] === repertoireId) {
       const fallback = remaining[0];
       setActiveRepertoireIdBySide((prev) => ({
         ...prev,
-        [activeSide]: null,
+        [side]: null,
       }));
       setTrees((prev) => ({
         ...prev,
-        [activeSide]: fallback.tree,
+        [side]: fallback.tree,
       }));
       setSelectedNodeBySide((prev) => ({
         ...prev,
-        [activeSide]: fallback.selectedNodeId,
+        [side]: fallback.selectedNodeId,
       }));
-      setUndoStackBySide((prev) => ({ ...prev, [activeSide]: [] }));
-      setTrainingSession((prev) => (prev?.side === activeSide ? null : prev));
+      setUndoStackBySide((prev) => ({ ...prev, [side]: [] }));
+      setTrainingSession((prev) => (prev?.side === side ? null : prev));
     }
 
     if (renamingRepertoireId === repertoireId) {
@@ -2198,7 +2199,6 @@ function App() {
       if (importMode === 'db') {
         const chunks = splitPgnGames(pgn);
         if (chunks.length === 0) {
-          setStatus('Import failed');
           return;
         }
 
@@ -2225,7 +2225,6 @@ function App() {
         });
 
         if (importedBySide.white.length === 0 && importedBySide.black.length === 0) {
-          setStatus('Import failed');
           return;
         }
 
@@ -2233,30 +2232,6 @@ function App() {
           white: [...prev.white, ...importedBySide.white],
           black: [...prev.black, ...importedBySide.black],
         }));
-
-        const firstLoaded = importedBySide[activeSide][0] ?? importedBySide.white[0] ?? importedBySide.black[0];
-        if (firstLoaded) {
-          const firstSide: Side = importedBySide.white.some((entry) => entry.id === firstLoaded.id) ? 'white' : 'black';
-          setActiveRepertoireIdBySide((prev) => ({
-            ...prev,
-            [firstSide]: firstLoaded.id,
-          }));
-          setRepertoireSide(firstSide);
-          setTrees((prev) => ({
-            ...prev,
-            [firstSide]: firstLoaded.tree,
-          }));
-          setSelectedNodeBySide((prev) => ({
-            ...prev,
-            [firstSide]: firstLoaded.selectedNodeId,
-          }));
-          setUndoStackBySide((prev) => ({ ...prev, [firstSide]: [] }));
-          setTrainingSession((prev) => (prev?.side === firstSide ? null : prev));
-        }
-
-        setStatus(
-          `Imported DB: ${importedBySide.white.length} white, ${importedBySide.black.length} black repertoires`,
-        );
         return;
       }
 
@@ -2272,9 +2247,8 @@ function App() {
         ...prev,
         [activeSide]: nextTree.nodes[currentSelectedId] ? currentSelectedId : nextTree.rootId,
       }));
-      setStatus(`Imported PGN into "${activeRepertoireName}" (${activeSide})`);
     } catch {
-      setStatus('Import failed');
+      // Keep import flow silent on UI status.
     } finally {
       event.target.value = '';
       setImportMode('current');
@@ -2921,7 +2895,7 @@ function App() {
                   setIsOptionsOpen(false);
                 }}
               >
-                New repertoire
+                New repertoire ({newRepertoireSide})
               </button>
               <button
                 onClick={() => {
@@ -2929,7 +2903,7 @@ function App() {
                   setIsOptionsOpen(false);
                 }}
               >
-                Load repertoire ({activeSide})
+                Load repertoire ({loadRepertoireSide})
               </button>
               <button
                 disabled={isBrowseMode}
@@ -2992,7 +2966,7 @@ function App() {
         <div className="modal-backdrop" onClick={() => setIsNewRepertoireOpen(false)}>
           <div className="modal-card options-modal" onClick={(e) => e.stopPropagation()}>
             <div className="card-head">
-              <h2>New repertoire ({activeSide})</h2>
+              <h2>New repertoire ({newRepertoireSide})</h2>
             </div>
             <div className="options-grid">
               <label className="repertoire-name-row">
@@ -3004,14 +2978,14 @@ function App() {
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
-                      createNewRepertoire();
+                      createNewRepertoire(newRepertoireSide);
                     }
                   }}
                   placeholder="e.g. Sicilian mainline"
                   autoFocus
                 />
               </label>
-              <button type="button" onClick={createNewRepertoire}>
+              <button type="button" onClick={() => createNewRepertoire(newRepertoireSide)}>
                 Create
               </button>
               <button
@@ -3032,12 +3006,12 @@ function App() {
         <div className="modal-backdrop" onClick={() => { setIsLoadRepertoireOpen(false); cancelRenamingRepertoire(); }}>
           <div className="modal-card options-modal" onClick={(e) => e.stopPropagation()}>
             <div className="card-head">
-              <h2>Load repertoire ({activeSide})</h2>
+              <h2>Load repertoire ({loadRepertoireSide})</h2>
             </div>
             <div className="options-grid">
               <div className="repertoire-list">
-                {loadableRepertoires.length === 0 && <span className="status">No saved repertoires</span>}
-                {loadableRepertoires.map((entry) => (
+                {loadableRepertoiresForBoardSide.length === 0 && <span className="status">No saved repertoires</span>}
+                {loadableRepertoiresForBoardSide.map((entry) => (
                   <div key={entry.id} className="repertoire-row">
                     {renamingRepertoireId === entry.id ? (
                       <>
@@ -3048,7 +3022,7 @@ function App() {
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') {
                               e.preventDefault();
-                              commitRenameRepertoire(entry.id);
+                              commitRenameRepertoire(entry.id, loadRepertoireSide);
                             }
                             if (e.key === 'Escape') {
                               e.preventDefault();
@@ -3057,7 +3031,7 @@ function App() {
                           }}
                           autoFocus
                         />
-                        <button type="button" onClick={() => commitRenameRepertoire(entry.id)}>
+                        <button type="button" onClick={() => commitRenameRepertoire(entry.id, loadRepertoireSide)}>
                           Save
                         </button>
                         <button type="button" onClick={cancelRenamingRepertoire}>
@@ -3068,8 +3042,8 @@ function App() {
                       <>
                         <button
                           type="button"
-                          className={entry.id === activeRepertoireIdBySide[activeSide] ? 'active' : ''}
-                          onClick={() => loadRepertoire(entry.id)}
+                          className={entry.id === activeRepertoireIdBySide[loadRepertoireSide] ? 'active' : ''}
+                          onClick={() => loadRepertoire(entry.id, loadRepertoireSide)}
                         >
                           {entry.name}
                         </button>
@@ -3077,7 +3051,7 @@ function App() {
                           type="button"
                           aria-label="Rename repertoire"
                           title="Rename repertoire"
-                          onClick={() => startRenamingRepertoire(entry.id)}
+                          onClick={() => startRenamingRepertoire(entry.id, loadRepertoireSide)}
                         >
                           ✎
                         </button>
@@ -3086,7 +3060,7 @@ function App() {
                           aria-label="Delete repertoire"
                           title="Delete repertoire"
                           className="danger"
-                          onClick={() => deleteRepertoire(entry.id)}
+                          onClick={() => deleteRepertoire(entry.id, loadRepertoireSide)}
                         >
                           🗑
                         </button>
