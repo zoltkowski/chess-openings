@@ -144,6 +144,7 @@ const ARROW_BRUSHES: DrawBrushes = {
 };
 const APP_DB_NAME = 'opening-prep-db';
 const APP_DB_VERSION = 1;
+const PROJECT_GITHUB_URL = 'https://github.com/zoltkowski/chess-openings';
 const APP_DB_STORE = 'kv';
 const APP_STATE_KEY = 'app-state-v1';
 const APP_SETTINGS_KEY = 'settings-v1';
@@ -1156,6 +1157,7 @@ function App() {
   const [engineStatus, setEngineStatus] = useState('stopped');
   const [engineRunning, setEngineRunning] = useState(false);
   const [lichessData, setLichessData] = useState<LichessResponse | null>(null);
+  const [lichessDataFen, setLichessDataFen] = useState<string | null>(null);
   const [openingByFen, setOpeningByFen] = useState<Record<string, { eco: string; name: string }>>({});
   const [lichessStatus, setLichessStatus] = useState('idle');
   const [showTreeArrows, setShowTreeArrows] = useState(true);
@@ -1215,7 +1217,7 @@ function App() {
   const activeRepertoire =
     activeRepertoireId ? activeRepertoireList.find((item) => item.id === activeRepertoireId) : null;
   const isBrowseMode = !activeRepertoire;
-  const activeRepertoireName = activeRepertoire?.name ?? 'Browse mode';
+  const activeRepertoireName = activeRepertoire?.name ?? 'Review mode';
   const boardOrientation: 'white' | 'black' =
     isTempBoardFlipped ? (repertoireSide === 'white' ? 'black' : 'white') : repertoireSide;
   const newRepertoireSide: Side = boardOrientation;
@@ -1692,6 +1694,7 @@ function App() {
 
     if (isPlayerWithoutHandle) {
       setLichessData(null);
+      setLichessDataFen(null);
       setLichessStatus('idle');
       return () => {
         controller.abort();
@@ -1701,7 +1704,8 @@ function App() {
     setLichessStatus('loading');
 
     const run = async () => {
-      const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
+      const fenKey = selectedNode.fen;
+      const fen = fenKey === START_FEN ? new Chess().fen() : fenKey;
       const params = new URLSearchParams({
         fen,
         variant: FIXED_VARIANT,
@@ -1831,6 +1835,7 @@ function App() {
             if (parsed.objects.length > 0) {
               latestData = parsed.objects[parsed.objects.length - 1];
               setLichessData(latestData);
+              setLichessDataFen(fenKey);
             }
           }
 
@@ -1840,6 +1845,7 @@ function App() {
             if (data) {
               latestData = data;
               setLichessData(data);
+              setLichessDataFen(fenKey);
             }
           }
         } else {
@@ -1848,6 +1854,7 @@ function App() {
           if (data) {
             latestData = data;
             setLichessData(data);
+            setLichessDataFen(fenKey);
           }
         }
 
@@ -2261,6 +2268,10 @@ function App() {
     window.open(url, '_blank', 'noopener,noreferrer');
   };
 
+  const openProjectGithub = () => {
+    window.open(PROJECT_GITHUB_URL, '_blank', 'noopener,noreferrer');
+  };
+
   const shareFen = async () => {
     const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
     const payload = {
@@ -2392,9 +2403,9 @@ function App() {
   const isTrainingLineEnd = Boolean(isTrainingActive && displayedChildNodes.length === 0);
   const isMobileClient = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   useEffect(() => {
-    if (!lichessData?.opening) return;
+    if (!lichessData?.opening || !lichessDataFen) return;
     const opening = lichessData.opening;
-    const fenKey = selectedNode.fen;
+    const fenKey = lichessDataFen;
     setOpeningByFen((prev) => {
       const existing = prev[fenKey];
       if (existing && existing.eco === opening.eco && existing.name === opening.name) {
@@ -2405,16 +2416,17 @@ function App() {
         [fenKey]: { eco: opening.eco, name: opening.name },
       };
     });
-  }, [lichessData?.opening, selectedNode.fen]);
+  }, [lichessData?.opening, lichessDataFen]);
 
   const resolvedOpening = useMemo(() => {
-    if (lichessData?.opening) return lichessData.opening;
+    if (selectedNode.fen === START_FEN) return null;
+    if (lichessData?.opening && lichessDataFen === selectedNode.fen) return lichessData.opening;
     for (let i = path.length - 1; i >= 0; i -= 1) {
       const candidate = openingByFen[path[i].fen];
       if (candidate) return candidate;
     }
     return null;
-  }, [lichessData?.opening, openingByFen, path]);
+  }, [lichessData?.opening, lichessDataFen, openingByFen, path, selectedNode.fen]);
 
   const trainingHintArrow = useMemo<DrawShape[]>(() => {
     if (!isTrainingActive || !trainingSession?.hintVisible || !trainingSession.hintMoveUci) return [];
@@ -3198,7 +3210,7 @@ function App() {
                 disabled={isTreeEvalRunning}
                 onClick={() => enterBrowseMode(activeSide)}
               >
-                Browse mode
+                Review mode
               </button>
               <button
                 disabled={isBrowseMode || isTreeEvalRunning}
@@ -3287,6 +3299,18 @@ function App() {
                 {themeMode === 'dark' ? 'Light mode' : 'Dark mode'}
               </button>
             </div>
+            <a
+              className="options-footer-link"
+              href={PROJECT_GITHUB_URL}
+              target="_blank"
+              rel="noopener noreferrer external"
+              onClick={(event) => {
+                event.preventDefault();
+                openProjectGithub();
+              }}
+            >
+              {PROJECT_GITHUB_URL}
+            </a>
           </div>
         </div>
       )}

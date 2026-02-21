@@ -819,6 +819,15 @@ select {
   word-break: break-word;
 }
 
+.options-footer-link {
+  display: block;
+  margin-top: 0.75rem;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  word-break: break-all;
+  text-align: center;
+}
+
 .repertoire-name-row {
   display: grid;
   gap: 0.3rem;
