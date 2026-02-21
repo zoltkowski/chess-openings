@@ -86,6 +86,36 @@ select {
   gap: 0.3rem;
 }
 
+.inline-stepper > button {
+  width: 1.85rem;
+  min-width: 1.85rem;
+  height: 1.85rem;
+  min-height: 1.85rem;
+  border-radius: 999px;
+  padding: 0;
+  line-height: 1;
+}
+
+.inline-stepper > button svg {
+  width: 1rem;
+  height: 1rem;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  fill: none;
+}
+
+.stockfish-controls-row {
+  width: 100%;
+}
+
+.stockfish-controls-right {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .stepper-value {
   min-width: 1.8rem;
   text-align: center;
@@ -819,14 +849,19 @@ select {
   word-break: break-word;
 }
 
-.options-footer-link {
+.options-footer-link-wrap {
   display: flex;
   width: 100%;
   justify-content: flex-end;
-  align-items: center;
   margin-top: 0.75rem;
   padding-right: 0.45rem;
   box-sizing: border-box;
+}
+
+.options-footer-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: #475569;
 }
 

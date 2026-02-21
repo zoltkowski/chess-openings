@@ -2794,7 +2794,7 @@ function App() {
                     })}
                   </div>
                   <div className="stockfish-inline desktop-only">
-                    <div className="controls-row">
+                    <div className="controls-row stockfish-controls-row">
                       <button
                         aria-label={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
                         title={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
@@ -2810,24 +2810,30 @@ function App() {
                       >
                         {engineRunning ? '■' : '▶'}
                       </button>
-                      <span className="inline-stepper">
-                        <button
-                          type="button"
-                          onClick={() => setEngineMultiPv((prev) => Math.max(1, prev - 1))}
-                          aria-label="Decrease lines"
-                        >
-                          -
-                        </button>
-                        <span className="stepper-value">{engineMultiPv}</span>
-                        <button
-                          type="button"
-                          onClick={() => setEngineMultiPv((prev) => Math.min(10, prev + 1))}
-                          aria-label="Increase lines"
-                        >
-                          +
-                        </button>
-                      </span>
-                      {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
+                      <div className="stockfish-controls-right">
+                        <span className="inline-stepper">
+                          <button
+                            type="button"
+                            onClick={() => setEngineMultiPv((prev) => Math.max(1, prev - 1))}
+                            aria-label="Decrease lines"
+                          >
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                              <path d="M6 12h12" />
+                            </svg>
+                          </button>
+                          <span className="stepper-value">{engineMultiPv}</span>
+                          <button
+                            type="button"
+                            onClick={() => setEngineMultiPv((prev) => Math.min(10, prev + 1))}
+                            aria-label="Increase lines"
+                          >
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                              <path d="M12 6v12M6 12h12" />
+                            </svg>
+                          </button>
+                        </span>
+                        {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
+                      </div>
                     </div>
                     <div className="table">
                       {engineLines.map((line) => (
@@ -2964,7 +2970,7 @@ function App() {
               </div>
             </div>
             {!isTrainingActive && <aside className={`stockfish-panel card portrait-only portrait-pane ${portraitTab === 'stockfish' ? 'active' : ''}`}>
-              <div className="controls-row">
+              <div className="controls-row stockfish-controls-row">
                 <button
                   aria-label={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
                   title={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
@@ -2980,24 +2986,30 @@ function App() {
                 >
                   {engineRunning ? '■' : '▶'}
                 </button>
-                <span className="inline-stepper">
-                  <button
-                    type="button"
-                    onClick={() => setEngineMultiPv((prev) => Math.max(1, prev - 1))}
-                    aria-label="Decrease lines"
-                  >
-                    -
-                  </button>
-                  <span className="stepper-value">{engineMultiPv}</span>
-                  <button
-                    type="button"
-                    onClick={() => setEngineMultiPv((prev) => Math.min(10, prev + 1))}
-                    aria-label="Increase lines"
-                  >
-                    +
-                  </button>
-                </span>
-                {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
+                <div className="stockfish-controls-right">
+                  <span className="inline-stepper">
+                    <button
+                      type="button"
+                      onClick={() => setEngineMultiPv((prev) => Math.max(1, prev - 1))}
+                      aria-label="Decrease lines"
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M6 12h12" />
+                      </svg>
+                    </button>
+                    <span className="stepper-value">{engineMultiPv}</span>
+                    <button
+                      type="button"
+                      onClick={() => setEngineMultiPv((prev) => Math.min(10, prev + 1))}
+                      aria-label="Increase lines"
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M12 6v12M6 12h12" />
+                      </svg>
+                    </button>
+                  </span>
+                  {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
+                </div>
               </div>
               <div className="table">
                 {engineLines.map((line) => (
@@ -3299,22 +3311,24 @@ function App() {
                 {themeMode === 'dark' ? 'Light mode' : 'Dark mode'}
               </button>
             </div>
-            <a
-              className="options-footer-link"
-              href={PROJECT_GITHUB_URL}
-              target="_blank"
-              rel="noopener noreferrer external"
-              aria-label="Open project on GitHub"
-              title="Open project on GitHub"
-              onClick={(event) => {
-                event.preventDefault();
-                openProjectGithub();
-              }}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <path d="M12 2A10 10 0 0 0 2 12C2 16.42 4.87 20.17 8.84 21.5C9.34 21.58 9.5 21.27 9.5 21V19.22C6.73 19.82 6.14 17.88 6.14 17.88C5.68 16.73 5.03 16.42 5.03 16.42C4.12 15.8 5.1 15.82 5.1 15.82C6.1 15.89 6.63 16.85 6.63 16.85C7.53 18.38 8.97 17.94 9.54 17.69C9.63 17.03 9.89 16.58 10.18 16.32C7.97 16.07 5.65 15.21 5.65 11.39C5.65 10.31 6.04 9.43 6.68 8.75C6.58 8.5 6.24 7.45 6.77 6.07C6.77 6.07 7.61 5.8 9.5 7.08C10.29 6.86 11.15 6.75 12 6.75C12.85 6.75 13.71 6.86 14.5 7.08C16.39 5.8 17.23 6.07 17.23 6.07C17.76 7.45 17.42 8.5 17.32 8.75C17.96 9.43 18.35 10.31 18.35 11.39C18.35 15.22 16.02 16.06 13.81 16.31C14.17 16.62 14.5 17.24 14.5 18.19V21C14.5 21.27 14.66 21.59 15.17 21.5C19.14 20.16 22 16.42 22 12A10 10 0 0 0 12 2Z" />
-              </svg>
-            </a>
+            <div className="options-footer-link-wrap">
+              <a
+                className="options-footer-link"
+                href={PROJECT_GITHUB_URL}
+                target="_blank"
+                rel="noopener noreferrer external"
+                aria-label="Open project on GitHub"
+                title="Open project on GitHub"
+                onClick={(event) => {
+                  event.preventDefault();
+                  openProjectGithub();
+                }}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M12 2A10 10 0 0 0 2 12C2 16.42 4.87 20.17 8.84 21.5C9.34 21.58 9.5 21.27 9.5 21V19.22C6.73 19.82 6.14 17.88 6.14 17.88C5.68 16.73 5.03 16.42 5.03 16.42C4.12 15.8 5.1 15.82 5.1 15.82C6.1 15.89 6.63 16.85 6.63 16.85C7.53 18.38 8.97 17.94 9.54 17.69C9.63 17.03 9.89 16.58 10.18 16.32C7.97 16.07 5.65 15.21 5.65 11.39C5.65 10.31 6.04 9.43 6.68 8.75C6.58 8.5 6.24 7.45 6.77 6.07C6.77 6.07 7.61 5.8 9.5 7.08C10.29 6.86 11.15 6.75 12 6.75C12.85 6.75 13.71 6.86 14.5 7.08C16.39 5.8 17.23 6.07 17.23 6.07C17.76 7.45 17.42 8.5 17.32 8.75C17.96 9.43 18.35 10.31 18.35 11.39C18.35 15.22 16.02 16.06 13.81 16.31C14.17 16.62 14.5 17.24 14.5 18.19V21C14.5 21.27 14.66 21.59 15.17 21.5C19.14 20.16 22 16.42 22 12A10 10 0 0 0 12 2Z" />
+                </svg>
+              </a>
+            </div>
           </div>
         </div>
       )}
