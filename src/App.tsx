@@ -2080,6 +2080,14 @@ function App() {
     importInputRef.current?.click();
   };
 
+  const enterBrowseMode = (side: Side = activeSide) => {
+    setActiveRepertoireIdBySide((prev) => ({
+      ...prev,
+      [side]: null,
+    }));
+    setIsOptionsOpen(false);
+  };
+
   const createNewRepertoire = (side: Side = activeSide) => {
     const name = normalizeRepertoireName(newRepertoireName);
     const next = createEmptyRepertoire(side, name);
@@ -3127,6 +3135,12 @@ function App() {
                 }}
               >
                 Load repertoire ({loadRepertoireSide})
+              </button>
+              <button
+                disabled={isTreeEvalRunning}
+                onClick={() => enterBrowseMode(activeSide)}
+              >
+                Browse mode
               </button>
               <button
                 disabled={isBrowseMode || isTreeEvalRunning}
