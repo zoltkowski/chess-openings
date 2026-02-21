@@ -13,6 +13,7 @@ import './App.css';
 type Side = 'white' | 'black';
 type LichessSource = 'lichess' | 'masters' | 'player';
 type DateRange = '1m' | '2m' | '3m' | '6m' | '1y' | '3y' | '5y' | '10y' | '20y' | '30y' | '50y' | null;
+type ThemeMode = 'light' | 'dark';
 
 type MoveNode = {
   id: string;
@@ -76,6 +77,7 @@ type PersistedAppState = {
 
 type PersistedSettingsState = {
   version: 1;
+  themeMode: ThemeMode;
   repertoireSide: Side;
   isTempBoardFlipped: boolean;
   lichessSource: LichessSource;
@@ -201,10 +203,12 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
   if (parsed.lichessSource !== 'lichess' && parsed.lichessSource !== 'masters' && parsed.lichessSource !== 'player') {
     return null;
   }
+  const normalizedThemeMode: ThemeMode = parsed.themeMode === 'dark' ? 'dark' : 'light';
   const dateRangeValues: DateRange[] = ['1m', '2m', '3m', '6m', '1y', '3y', '5y', '10y', '20y', '30y', '50y', null];
   if (!dateRangeValues.includes(parsed.dateRange)) return null;
   return {
     ...parsed,
+    themeMode: normalizedThemeMode,
     lichessArrowThreshold: normalizeMoveThreshold(parsed.lichessArrowThreshold),
     engineDepth: clampInt(parsed.engineDepth, 16, 32, 24),
     engineMultiPv: clampInt(parsed.engineMultiPv, 1, 10, 3),
@@ -968,6 +972,7 @@ function Board(props: {
 }
 
 function App() {
+  const initialThemeMode: ThemeMode = 'light';
   const initialLichessSource: LichessSource = 'lichess';
   const initialPlayerHandle = '';
   const initialDateRange: DateRange = null;
@@ -986,6 +991,7 @@ function App() {
     black: 'black-0',
   });
   const [repertoireSide, setRepertoireSide] = useState<'white' | 'black'>('white');
+  const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode);
   const [isTempBoardFlipped, setIsTempBoardFlipped] = useState(false);
   const [status, setStatus] = useState('Ready');
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
@@ -1164,6 +1170,7 @@ function App() {
         const persistedSettings = normalizePersistedSettings(await idbGet<PersistedSettingsState>(APP_SETTINGS_KEY));
 
         if (persistedSettings) {
+          setThemeMode(persistedSettings.themeMode);
           setRepertoireSide(persistedSettings.repertoireSide);
           setIsTempBoardFlipped(persistedSettings.isTempBoardFlipped);
           setLichessSource(persistedSettings.lichessSource);
@@ -1230,6 +1237,7 @@ function App() {
     if (!hasHydratedAppState) return;
     const settingsPayload: PersistedSettingsState = {
       version: 1,
+      themeMode,
       repertoireSide,
       isTempBoardFlipped,
       lichessSource,
@@ -1256,6 +1264,7 @@ function App() {
     return () => window.clearTimeout(timeout);
   }, [
     hasHydratedAppState,
+    themeMode,
     repertoireSide,
     isTempBoardFlipped,
     lichessSource,
@@ -2023,7 +2032,7 @@ function App() {
   };
 
   return (
-    <div className="app">
+    <div className={`app ${themeMode === 'dark' ? 'theme-dark' : ''}`}>
       <header className="topbar">
         <div className="topbar-row">
           <div>{visibleTopStatus && <span className="status">{visibleTopStatus}</span>}</div>
@@ -2409,6 +2418,14 @@ function App() {
               <h2>Options</h2>
             </div>
             <div className="options-grid">
+              <button
+                onClick={() => {
+                  setThemeMode((prev) => (prev === 'dark' ? 'light' : 'dark'));
+                  setIsOptionsOpen(false);
+                }}
+              >
+                {themeMode === 'dark' ? 'Disable dark mode' : 'Enable dark mode'}
+              </button>
               <button
                 onClick={() => {
                   setRepertoireSide((prev) => (prev === 'white' ? 'black' : 'white'));

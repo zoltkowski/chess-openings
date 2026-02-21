@@ -771,6 +771,105 @@ select {
   text-align: right;
 }
 
+.app.theme-dark {
+  background: #0b1220;
+  color: #e2e8f0;
+}
+
+.app.theme-dark .card,
+.app.theme-dark .modal-card {
+  background: #111b2e;
+  border-color: #334155;
+}
+
+.app.theme-dark .status,
+.app.theme-dark .board-meta,
+.app.theme-dark .move-inline-prefix,
+.app.theme-dark .tree-option-leaves,
+.app.theme-dark .move-table th {
+  color: #cbd5e1;
+}
+
+.app.theme-dark .move-table th {
+  background: #1b2a42;
+}
+
+.app.theme-dark .table-row,
+.app.theme-dark .move-table th,
+.app.theme-dark .move-table td,
+.app.theme-dark .move-list .controls-row,
+.app.theme-dark .filters-modal-fixed {
+  border-color: #334155;
+}
+
+.app.theme-dark button {
+  background: #1e293b;
+  border-color: #475569;
+  color: #e2e8f0;
+}
+
+.app.theme-dark button:hover {
+  background: #334155;
+}
+
+.app.theme-dark input,
+.app.theme-dark select {
+  background: #0f172a;
+  border-color: #475569;
+  color: #e2e8f0;
+}
+
+.app.theme-dark .toggle-group .active,
+.app.theme-dark .portrait-tabbar .active,
+.app.theme-dark .icon-toggle-btn.active {
+  background: #1d4f91;
+  border-color: #60a5fa;
+}
+
+.app.theme-dark .table-move-btn {
+  background: #1b2a42;
+}
+
+.app.theme-dark .table-move-btn:hover,
+.app.theme-dark .lichess-clickable-row:hover,
+.app.theme-dark .stockfish-clickable-row:hover,
+.app.theme-dark .move-inline-item:hover {
+  background: #24344f;
+}
+
+.app.theme-dark .move-inline-item:hover {
+  border-color: #60a5fa;
+}
+
+.app.theme-dark .modal-backdrop {
+  background: rgba(2, 6, 23, 0.7);
+}
+
+.app.theme-dark .stats-bar {
+  border-color: #475569;
+  background: #0f172a;
+}
+
+.app.theme-dark .seg-white {
+  background: #f8fafc;
+  color: #020617;
+}
+
+.app.theme-dark .seg-draw {
+  background: #64748b;
+  color: #f8fafc;
+}
+
+.app.theme-dark .seg-black {
+  background: #020617;
+  color: #f8fafc;
+}
+
+.app.theme-dark .spinner {
+  border-color: #334155;
+  border-top-color: #60a5fa;
+}
+
 @media (max-width: 1200px) {
   .board-row {
     grid-template-columns: 1fr;
