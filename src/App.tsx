@@ -3172,7 +3172,7 @@ function App() {
               >
                 {isTreeEvalRunning
                   ? `Stop adding evals (${treeEvalProgress?.done ?? 0}/${treeEvalProgress?.total ?? 0})`
-                  : 'Add Stockfish evals to tree (10s/position)'}
+                  : 'Add Stockfish evals to repertoire'}
               </button>
               <button
                 disabled={isTreeEvalRunning}

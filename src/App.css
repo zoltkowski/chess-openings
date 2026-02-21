@@ -780,13 +780,22 @@ select {
 }
 
 .options-modal {
-  width: min(420px, 100%);
+  width: min(360px, calc(100vw - 2rem));
+  max-width: calc(100vw - 2rem);
+  overflow: hidden;
 }
 
 .options-grid {
   display: grid;
   gap: 0.5rem;
   margin-top: 0.7rem;
+  overflow-x: hidden;
+}
+
+.options-grid > button {
+  width: 100%;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .repertoire-name-row {
