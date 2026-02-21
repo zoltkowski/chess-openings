@@ -10,6 +10,8 @@
 
 body {
   margin: 0;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 button,
@@ -155,6 +157,12 @@ select {
   box-sizing: content-box;
 }
 
+.board .cg-wrap coords {
+  line-height: 1;
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
+}
+
 .board-center {
   display: grid;
   gap: 0.55rem;
@@ -204,6 +212,15 @@ select {
 
 .games-total {
   white-space: nowrap;
+}
+
+.current-repertoire {
+  color: #475569;
+  font-size: 0.82rem;
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .variant-row,
@@ -312,6 +329,19 @@ select {
   font-size: 0.72rem;
   color: #64748b;
   line-height: 1;
+}
+
+.repertoire-hit-block {
+  margin-top: 0.7rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid #e5ebf3;
+  font-size: 0.78rem;
+  color: #475569;
+}
+
+.repertoire-hit-list {
+  margin-top: 0.2rem;
+  line-height: 1.35;
 }
 
 .lichess-clickable-row {
@@ -424,6 +454,11 @@ select {
 }
 
 .toggle-group .active {
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+
+.repertoire-list > button.active {
   background: #dbeafe;
   border-color: #93c5fd;
 }
@@ -714,6 +749,31 @@ select {
   margin-top: 0.7rem;
 }
 
+.repertoire-name-row {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.repertoire-list {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.repertoire-list > button {
+  text-align: left;
+}
+
+.repertoire-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.repertoire-row > button:first-child {
+  text-align: left;
+}
+
 button {
   border: 1px solid #c8d3e6;
   border-radius: 6px;
@@ -784,6 +844,7 @@ select {
 
 .app.theme-dark .status,
 .app.theme-dark .board-meta,
+.app.theme-dark .current-repertoire,
 .app.theme-dark .move-inline-prefix,
 .app.theme-dark .tree-option-leaves,
 .app.theme-dark .move-table th {
@@ -798,7 +859,8 @@ select {
 .app.theme-dark .move-table th,
 .app.theme-dark .move-table td,
 .app.theme-dark .move-list .controls-row,
-.app.theme-dark .filters-modal-fixed {
+.app.theme-dark .filters-modal-fixed,
+.app.theme-dark .repertoire-hit-block {
   border-color: #334155;
 }
 
@@ -825,7 +887,8 @@ select {
 
 .app.theme-dark .toggle-group .active,
 .app.theme-dark .portrait-tabbar .active,
-.app.theme-dark .icon-toggle-btn.active {
+.app.theme-dark .icon-toggle-btn.active,
+.app.theme-dark .repertoire-list > button.active {
   background: #1d4f91;
   border-color: #60a5fa;
 }

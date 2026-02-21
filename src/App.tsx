@@ -70,9 +70,28 @@ type TrainingSession = {
 };
 
 type PersistedAppState = {
+  version: 2;
+  repertoiresBySide: Record<Side, RepertoireEntry[]>;
+  activeRepertoireIdBySide: Record<Side, string | null>;
+};
+
+type LegacyPersistedAppState = {
   version: 1;
   trees: Record<Side, MoveTree>;
   selectedNodeBySide: Record<Side, string>;
+};
+
+type RepertoireEntry = {
+  id: string;
+  name: string;
+  tree: MoveTree;
+  selectedNodeId: string;
+};
+
+type BrowseMoveOption = {
+  moveUci: string;
+  moveSan: string;
+  repertoireNames: string[];
 };
 
 type PersistedSettingsState = {
@@ -125,6 +144,29 @@ const APP_DB_VERSION = 1;
 const APP_DB_STORE = 'kv';
 const APP_STATE_KEY = 'app-state-v1';
 const APP_SETTINGS_KEY = 'settings-v1';
+
+function createRepertoireId(side: Side) {
+  const randomPart =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID().slice(0, 8)
+      : Math.random().toString(36).slice(2, 10);
+  return `${side}-${Date.now().toString(36)}-${randomPart}`;
+}
+
+function normalizeRepertoireName(value: string) {
+  const trimmed = value.trim().replace(/\s+/g, ' ');
+  return trimmed || 'Untitled repertoire';
+}
+
+function createEmptyRepertoire(side: Side, name: string): RepertoireEntry {
+  const tree = createEmptyTree(side);
+  return {
+    id: createRepertoireId(side),
+    name: normalizeRepertoireName(name),
+    tree,
+    selectedNodeId: tree.rootId,
+  };
+}
 
 function clampInt(value: unknown, min: number, max: number, fallback: number) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
@@ -185,14 +227,84 @@ function isValidMoveTree(value: unknown): value is MoveTree {
 
 function normalizePersistedState(value: unknown): PersistedAppState | null {
   if (!value || typeof value !== 'object') return null;
-  const parsed = value as PersistedAppState;
-  if (parsed.version !== 1) return null;
-  if (!parsed.trees || !parsed.selectedNodeBySide) return null;
-  if (!isValidMoveTree(parsed.trees.white) || !isValidMoveTree(parsed.trees.black)) return null;
-  if (typeof parsed.selectedNodeBySide.white !== 'string' || typeof parsed.selectedNodeBySide.black !== 'string') {
+
+  const parsedV2 = value as PersistedAppState;
+  if (parsedV2.version === 2) {
+    if (!parsedV2.repertoiresBySide || !parsedV2.activeRepertoireIdBySide) return null;
+    const normalizeSide = (side: Side): RepertoireEntry[] => {
+      const list = Array.isArray(parsedV2.repertoiresBySide[side]) ? parsedV2.repertoiresBySide[side] : [];
+      const valid = list.filter((entry): entry is RepertoireEntry => {
+        if (!entry || typeof entry !== 'object') return false;
+        if (typeof entry.id !== 'string' || !entry.id.trim()) return false;
+        if (typeof entry.name !== 'string') return false;
+        if (typeof entry.selectedNodeId !== 'string') return false;
+        if (!isValidMoveTree(entry.tree)) return false;
+        return true;
+      });
+      if (valid.length > 0) {
+        return valid.map((entry, index) => ({
+          ...entry,
+          name: normalizeRepertoireName(entry.name || `${side} repertoire ${index + 1}`),
+          selectedNodeId: entry.tree.nodes[entry.selectedNodeId] ? entry.selectedNodeId : entry.tree.rootId,
+        }));
+      }
+      return [createEmptyRepertoire(side, 'Default')];
+    };
+
+    const whiteList = normalizeSide('white');
+    const blackList = normalizeSide('black');
+    const whiteActive =
+      typeof parsedV2.activeRepertoireIdBySide.white === 'string' ? parsedV2.activeRepertoireIdBySide.white : null;
+    const blackActive =
+      typeof parsedV2.activeRepertoireIdBySide.black === 'string' ? parsedV2.activeRepertoireIdBySide.black : null;
+
+    return {
+      version: 2,
+      repertoiresBySide: {
+        white: whiteList,
+        black: blackList,
+      },
+      activeRepertoireIdBySide: {
+        white: whiteActive && whiteList.some((entry) => entry.id === whiteActive) ? whiteActive : null,
+        black: blackActive && blackList.some((entry) => entry.id === blackActive) ? blackActive : null,
+      },
+    };
+  }
+
+  const parsedV1 = value as LegacyPersistedAppState;
+  if (parsedV1.version !== 1) return null;
+  if (!parsedV1.trees || !parsedV1.selectedNodeBySide) return null;
+  if (!isValidMoveTree(parsedV1.trees.white) || !isValidMoveTree(parsedV1.trees.black)) return null;
+  if (typeof parsedV1.selectedNodeBySide.white !== 'string' || typeof parsedV1.selectedNodeBySide.black !== 'string') {
     return null;
   }
-  return parsed;
+
+  const whiteTree = parsedV1.trees.white;
+  const blackTree = parsedV1.trees.black;
+  const whiteRepertoire: RepertoireEntry = {
+    id: createRepertoireId('white'),
+    name: 'Default',
+    tree: whiteTree,
+    selectedNodeId: whiteTree.nodes[parsedV1.selectedNodeBySide.white] ? parsedV1.selectedNodeBySide.white : whiteTree.rootId,
+  };
+  const blackRepertoire: RepertoireEntry = {
+    id: createRepertoireId('black'),
+    name: 'Default',
+    tree: blackTree,
+    selectedNodeId: blackTree.nodes[parsedV1.selectedNodeBySide.black] ? parsedV1.selectedNodeBySide.black : blackTree.rootId,
+  };
+
+  return {
+    version: 2,
+    repertoiresBySide: {
+      white: [whiteRepertoire],
+      black: [blackRepertoire],
+    },
+    activeRepertoireIdBySide: {
+      white: null,
+      black: null,
+    },
+  };
 }
 
 function normalizePersistedSettings(value: unknown): PersistedSettingsState | null {
@@ -351,10 +463,9 @@ function createNodeId(tree: MoveTree) {
   return `n-${tree.nextId}`;
 }
 
-function parsePgnToTree(side: Side, pgn: string, initialTree?: MoveTree): MoveTree {
-  const base = initialTree ?? createEmptyTree(side);
+function splitPgnGames(pgn: string): string[] {
   const normalized = pgn.replace(/\r\n/g, '\n').trim();
-  if (!normalized) return base;
+  if (!normalized) return [];
 
   const chunks = normalized
     .split(/\n{2,}(?=\[Event )/g)
@@ -364,7 +475,25 @@ function parsePgnToTree(side: Side, pgn: string, initialTree?: MoveTree): MoveTr
     .split(/\n{2,}/g)
     .map((part) => part.trim())
     .filter(Boolean);
-  const candidates = chunks.length > 0 ? chunks : fallbackChunks;
+
+  return chunks.length > 0 ? chunks : fallbackChunks;
+}
+
+function parsePgnHeaders(chunk: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const lines = chunk.split('\n');
+  for (const line of lines) {
+    const match = line.match(/^\[([A-Za-z0-9_]+)\s+"(.*)"\]$/);
+    if (!match) continue;
+    out[match[1]] = match[2].replace(/\\"/g, '"');
+  }
+  return out;
+}
+
+function parsePgnToTree(side: Side, pgn: string, initialTree?: MoveTree): MoveTree {
+  const base = initialTree ?? createEmptyTree(side);
+  const candidates = splitPgnGames(pgn);
+  if (candidates.length === 0) return base;
 
   let tree = base;
 
@@ -606,10 +735,11 @@ function buildVariationTokens(tree: MoveTree, nodeId: string, chess: Chess): str
   return tokens;
 }
 
-function exportTreeToPgn(tree: MoveTree, side: Side): string {
+function exportTreeToPgn(tree: MoveTree, side: Side, repertoireName?: string): string {
   const exportDate = new Date().toISOString().slice(0, 10).replace(/-/g, '.');
+  const safeName = repertoireName ? normalizeRepertoireName(repertoireName) : '';
   const headers: Array<[string, string]> = [
-    ['Event', 'Opening Prep Trainer'],
+    ['Event', safeName ? `Opening Prep Trainer - ${safeName}` : 'Opening Prep Trainer'],
     ['Site', 'Local'],
     ['Date', exportDate],
     ['Round', '-'],
@@ -981,14 +1111,24 @@ function App() {
   const initialSelectedSpeeds: string[] = [...SPEEDS];
   const initialSelectedRatings: number[] = [1600, 1800, 2000, 2200];
   const initialSelectedModes: string[] = [...MODES];
+  const initialWhiteRepertoire = createEmptyRepertoire('white', 'Default');
+  const initialBlackRepertoire = createEmptyRepertoire('black', 'Default');
 
   const [trees, setTrees] = useState<Record<Side, MoveTree>>({
-    white: createEmptyTree('white'),
-    black: createEmptyTree('black'),
+    white: initialWhiteRepertoire.tree,
+    black: initialBlackRepertoire.tree,
   });
   const [selectedNodeBySide, setSelectedNodeBySide] = useState<Record<Side, string>>({
-    white: 'white-0',
-    black: 'black-0',
+    white: initialWhiteRepertoire.selectedNodeId,
+    black: initialBlackRepertoire.selectedNodeId,
+  });
+  const [repertoiresBySide, setRepertoiresBySide] = useState<Record<Side, RepertoireEntry[]>>({
+    white: [initialWhiteRepertoire],
+    black: [initialBlackRepertoire],
+  });
+  const [activeRepertoireIdBySide, setActiveRepertoireIdBySide] = useState<Record<Side, string | null>>({
+    white: null,
+    black: null,
   });
   const [repertoireSide, setRepertoireSide] = useState<'white' | 'black'>('white');
   const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode);
@@ -1026,6 +1166,12 @@ function App() {
   });
   const [hasHydratedAppState, setHasHydratedAppState] = useState(false);
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
+  const [isNewRepertoireOpen, setIsNewRepertoireOpen] = useState(false);
+  const [isLoadRepertoireOpen, setIsLoadRepertoireOpen] = useState(false);
+  const [newRepertoireName, setNewRepertoireName] = useState('');
+  const [renamingRepertoireId, setRenamingRepertoireId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [importMode, setImportMode] = useState<'current' | 'db'>('current');
   const [portraitTab, setPortraitTab] = useState<'lichess' | 'stockfish' | 'moves'>('moves');
   const [trainingSession, setTrainingSession] = useState<TrainingSession | null>(null);
 
@@ -1042,6 +1188,15 @@ function App() {
   const [engineReadyTick, setEngineReadyTick] = useState(0);
 
   const activeSide: Side = repertoireSide;
+  const activeRepertoireList = repertoiresBySide[activeSide];
+  const activeRepertoireId = activeRepertoireIdBySide[activeSide];
+  const activeRepertoire =
+    activeRepertoireId ? activeRepertoireList.find((item) => item.id === activeRepertoireId) : null;
+  const isBrowseMode = !activeRepertoire;
+  const activeRepertoireName = activeRepertoire?.name ?? 'Browse mode';
+  const loadableRepertoires = activeRepertoireList.filter(
+    (entry) => normalizeRepertoireName(entry.name).toLowerCase() !== 'default',
+  );
   const boardOrientation: 'white' | 'black' =
     isTempBoardFlipped ? (repertoireSide === 'white' ? 'black' : 'white') : repertoireSide;
   const tree = trees[activeSide];
@@ -1056,16 +1211,67 @@ function App() {
     [selectedNode.children, tree.nodes],
   );
 
+  const browseMoveOptions = useMemo<BrowseMoveOption[]>(() => {
+    if (!isBrowseMode) return [];
+    const byUci = new Map<string, { moveSan: string; repertoireNames: Set<string> }>();
+    const currentFen = selectedNode.fen;
+
+    for (const repertoire of repertoiresBySide[activeSide]) {
+      const nodes = Object.values(repertoire.tree.nodes).filter((node) => node.fen === currentFen);
+      if (nodes.length === 0) continue;
+      for (const node of nodes) {
+        for (const childId of node.children) {
+          const child = repertoire.tree.nodes[childId];
+          if (!child?.moveUci || !child.moveSan) continue;
+          const existing = byUci.get(child.moveUci);
+          if (existing) {
+            existing.repertoireNames.add(repertoire.name);
+          } else {
+            byUci.set(child.moveUci, { moveSan: child.moveSan, repertoireNames: new Set([repertoire.name]) });
+          }
+        }
+      }
+    }
+
+    return [...byUci.entries()]
+      .map(([moveUci, value]) => ({
+        moveUci,
+        moveSan: value.moveSan,
+        repertoireNames: [...value.repertoireNames],
+      }))
+      .sort((a, b) => b.repertoireNames.length - a.repertoireNames.length || a.moveSan.localeCompare(b.moveSan));
+  }, [isBrowseMode, selectedNode.fen, repertoiresBySide, activeSide]);
+
+  const displayedChildNodes = useMemo<MoveNode[]>(() => {
+    if (!isBrowseMode) return childNodes;
+    return browseMoveOptions.map((option, index) => ({
+      id: `browse-${index}-${option.moveUci}`,
+      parentId: selectedNode.id,
+      fen: selectedNode.fen,
+      moveSan: option.moveSan,
+      moveUci: option.moveUci,
+      children: [],
+    }));
+  }, [isBrowseMode, childNodes, browseMoveOptions, selectedNode.id, selectedNode.fen]);
+
+  const repertoiresAtPosition = useMemo(() => {
+    if (selectedNode.fen === START_FEN) return [];
+    const names = repertoiresBySide[activeSide]
+      .filter((repertoire) => Object.values(repertoire.tree.nodes).some((node) => node.fen === selectedNode.fen))
+      .map((repertoire) => repertoire.name);
+    return [...new Set(names)].sort((a, b) => a.localeCompare(b));
+  }, [selectedNode.fen, repertoiresBySide, activeSide]);
+
   const autoArrows = useMemo<DrawShape[]>(() => {
     const treeArrows = showTreeArrows
-      ? childNodes
+      ? displayedChildNodes
           .map((node) => parseUciMove(node.moveUci))
           .filter((value): value is [Key, Key] => Boolean(value))
           .map(([orig, dest]) => ({ orig, dest, brush: 'green' }))
       : [];
 
     const treeChildUcis = new Set(
-      childNodes.map((node) => node.moveUci).filter((uci): uci is string => Boolean(uci)),
+      displayedChildNodes.map((node) => node.moveUci).filter((uci): uci is string => Boolean(uci)),
     );
 
     const positionGames = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
@@ -1142,7 +1348,7 @@ function App() {
 
     return softenOverlappingArrows([...treeArrows, ...lichessArrows, ...engineArrows]);
   }, [
-    childNodes,
+    displayedChildNodes,
     showTreeArrows,
     lichessData,
     lichessArrowThreshold,
@@ -1195,14 +1401,26 @@ function App() {
         }
 
         if (persisted) {
-          setTrees(persisted.trees);
-          setSelectedNodeBySide(persisted.selectedNodeBySide);
+          setRepertoiresBySide(persisted.repertoiresBySide);
+          setActiveRepertoireIdBySide({ white: null, black: null });
+          const whiteActive = persisted.repertoiresBySide.white[0];
+          const blackActive = persisted.repertoiresBySide.black[0];
+          setTrees({
+            white: whiteActive.tree,
+            black: blackActive.tree,
+          });
+          setSelectedNodeBySide({
+            white: whiteActive.selectedNodeId,
+            black: blackActive.selectedNodeId,
+          });
           setUndoStackBySide({ white: [], black: [] });
         } else {
-          const whiteTree = createEmptyTree('white');
-          const blackTree = createEmptyTree('black');
-          setTrees({ white: whiteTree, black: blackTree });
-          setSelectedNodeBySide({ white: whiteTree.rootId, black: blackTree.rootId });
+          const whiteDefault = createEmptyRepertoire('white', 'Default');
+          const blackDefault = createEmptyRepertoire('black', 'Default');
+          setRepertoiresBySide({ white: [whiteDefault], black: [blackDefault] });
+          setActiveRepertoireIdBySide({ white: null, black: null });
+          setTrees({ white: whiteDefault.tree, black: blackDefault.tree });
+          setSelectedNodeBySide({ white: whiteDefault.selectedNodeId, black: blackDefault.selectedNodeId });
           setUndoStackBySide({ white: [], black: [] });
         }
         setStatus('Ready');
@@ -1218,10 +1436,37 @@ function App() {
 
   useEffect(() => {
     if (!hasHydratedAppState) return;
+    setRepertoiresBySide((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      (['white', 'black'] as Side[]).forEach((side) => {
+        const activeId = activeRepertoireIdBySide[side];
+        if (!activeId) return;
+        const idx = prev[side].findIndex((entry) => entry.id === activeId);
+        if (idx < 0) return;
+        const current = prev[side][idx];
+        const currentTree = trees[side];
+        const currentSelectedId = selectedNodeBySide[side] ?? currentTree.rootId;
+        if (current.tree === currentTree && current.selectedNodeId === currentSelectedId) return;
+        const nextList = [...prev[side]];
+        nextList[idx] = {
+          ...current,
+          tree: currentTree,
+          selectedNodeId: currentSelectedId,
+        };
+        next[side] = nextList;
+        changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [hasHydratedAppState, trees, selectedNodeBySide, activeRepertoireIdBySide]);
+
+  useEffect(() => {
+    if (!hasHydratedAppState) return;
     const payload: PersistedAppState = {
-      version: 1,
-      trees,
-      selectedNodeBySide,
+      version: 2,
+      repertoiresBySide,
+      activeRepertoireIdBySide,
     };
 
     const timeout = window.setTimeout(() => {
@@ -1231,7 +1476,7 @@ function App() {
     }, 120);
 
     return () => window.clearTimeout(timeout);
-  }, [hasHydratedAppState, trees, selectedNodeBySide]);
+  }, [hasHydratedAppState, repertoiresBySide, activeRepertoireIdBySide]);
 
   useEffect(() => {
     if (!hasHydratedAppState) return;
@@ -1752,19 +1997,115 @@ function App() {
     playLichessMove(uci);
   };
 
-  const exportPgn = () => {
-    const pgn = exportTreeToPgn(tree, activeSide);
+  const downloadPgn = (pgn: string, filename: string) => {
     const blob = new Blob([pgn], { type: 'application/x-chess-pgn;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `${activeSide}.pgn`;
+    link.download = filename;
     link.click();
     URL.revokeObjectURL(url);
   };
 
-  const openImportDialog = () => {
+  const exportCurrentRepertoirePgn = () => {
+    const pgn = exportTreeToPgn(tree, activeSide, activeRepertoireName);
+    const safeName = normalizeRepertoireName(activeRepertoireName).replace(/[^\w-]+/g, '_');
+    downloadPgn(pgn, `${activeSide}-${safeName || 'repertoire'}.pgn`);
+  };
+
+  const exportWholeDatabasePgn = () => {
+    const games = (['white', 'black'] as Side[]).flatMap((side) =>
+      repertoiresBySide[side].map((entry) => exportTreeToPgn(entry.tree, side, entry.name)),
+    );
+    if (games.length === 0) {
+      setStatus('No repertoires to export');
+      return;
+    }
+    downloadPgn(games.join('\n\n'), 'all-repertoires.pgn');
+  };
+
+  const openImportDialog = (mode: 'current' | 'db' = 'current') => {
+    setImportMode(mode);
     importInputRef.current?.click();
+  };
+
+  const createNewRepertoire = () => {
+    const name = normalizeRepertoireName(newRepertoireName);
+    const next = createEmptyRepertoire(activeSide, name);
+    setRepertoiresBySide((prev) => ({
+      ...prev,
+      [activeSide]: [...prev[activeSide], next],
+    }));
+    setActiveRepertoireIdBySide((prev) => ({
+      ...prev,
+      [activeSide]: next.id,
+    }));
+    setTrees((prev) => ({
+      ...prev,
+      [activeSide]: next.tree,
+    }));
+    setSelectedNodeBySide((prev) => ({
+      ...prev,
+      [activeSide]: next.selectedNodeId,
+    }));
+    setUndoStackBySide((prev) => ({ ...prev, [activeSide]: [] }));
+    setTrainingSession((prev) => (prev?.side === activeSide ? null : prev));
+    setNewRepertoireName('');
+    setIsNewRepertoireOpen(false);
+    setIsOptionsOpen(false);
+    setStatus(`Created repertoire "${next.name}" (${activeSide})`);
+  };
+
+  const loadRepertoire = (repertoireId: string) => {
+    const entry = repertoiresBySide[activeSide].find((item) => item.id === repertoireId);
+    if (!entry) return;
+    setActiveRepertoireIdBySide((prev) => ({
+      ...prev,
+      [activeSide]: entry.id,
+    }));
+    setTrees((prev) => ({
+      ...prev,
+      [activeSide]: entry.tree,
+    }));
+    setSelectedNodeBySide((prev) => ({
+      ...prev,
+      [activeSide]: entry.tree.nodes[entry.selectedNodeId] ? entry.selectedNodeId : entry.tree.rootId,
+    }));
+    setUndoStackBySide((prev) => ({ ...prev, [activeSide]: [] }));
+    setTrainingSession((prev) => (prev?.side === activeSide ? null : prev));
+    setIsLoadRepertoireOpen(false);
+    setIsOptionsOpen(false);
+    setStatus(`Loaded repertoire "${entry.name}" (${activeSide})`);
+  };
+
+  const startRenamingRepertoire = (repertoireId: string) => {
+    const entry = repertoiresBySide[activeSide].find((item) => item.id === repertoireId);
+    if (!entry) return;
+    setRenamingRepertoireId(repertoireId);
+    setRenameDraft(entry.name);
+  };
+
+  const cancelRenamingRepertoire = () => {
+    setRenamingRepertoireId(null);
+    setRenameDraft('');
+  };
+
+  const commitRenameRepertoire = (repertoireId: string) => {
+    const nextName = normalizeRepertoireName(renameDraft);
+    setRepertoiresBySide((prev) => ({
+      ...prev,
+      [activeSide]: prev[activeSide].map((entry) =>
+        entry.id === repertoireId
+          ? {
+              ...entry,
+              name: nextName,
+            }
+          : entry,
+      ),
+    }));
+    setRenamingRepertoireId(null);
+    setRenameDraft('');
+    setStatus(`Renamed repertoire to "${nextName}"`);
   };
 
   const openInLichessAnalysis = () => {
@@ -1813,6 +2154,71 @@ function App() {
     if (!file) return;
     try {
       const pgn = await file.text();
+      if (importMode === 'db') {
+        const chunks = splitPgnGames(pgn);
+        if (chunks.length === 0) {
+          setStatus('Import failed');
+          return;
+        }
+
+        const importedBySide: Record<Side, RepertoireEntry[]> = { white: [], black: [] };
+
+        chunks.forEach((chunk, index) => {
+          const headers = parsePgnHeaders(chunk);
+          const whiteHeader = (headers.White ?? '').toLowerCase();
+          const blackHeader = (headers.Black ?? '').toLowerCase();
+          const side: Side =
+            whiteHeader.includes('repertoire') ? 'white' : blackHeader.includes('repertoire') ? 'black' : activeSide;
+
+          const eventName = headers.Event ?? '';
+          const baseName = eventName.startsWith('Opening Prep Trainer - ')
+            ? eventName.slice('Opening Prep Trainer - '.length)
+            : `Imported ${side} repertoire ${index + 1}`;
+          const treeForSide = parsePgnToTree(side, chunk, createEmptyTree(side));
+          importedBySide[side].push({
+            id: createRepertoireId(side),
+            name: normalizeRepertoireName(baseName),
+            tree: treeForSide,
+            selectedNodeId: treeForSide.rootId,
+          });
+        });
+
+        if (importedBySide.white.length === 0 && importedBySide.black.length === 0) {
+          setStatus('Import failed');
+          return;
+        }
+
+        setRepertoiresBySide((prev) => ({
+          white: [...prev.white, ...importedBySide.white],
+          black: [...prev.black, ...importedBySide.black],
+        }));
+
+        const firstLoaded = importedBySide[activeSide][0] ?? importedBySide.white[0] ?? importedBySide.black[0];
+        if (firstLoaded) {
+          const firstSide: Side = importedBySide.white.some((entry) => entry.id === firstLoaded.id) ? 'white' : 'black';
+          setActiveRepertoireIdBySide((prev) => ({
+            ...prev,
+            [firstSide]: firstLoaded.id,
+          }));
+          setRepertoireSide(firstSide);
+          setTrees((prev) => ({
+            ...prev,
+            [firstSide]: firstLoaded.tree,
+          }));
+          setSelectedNodeBySide((prev) => ({
+            ...prev,
+            [firstSide]: firstLoaded.selectedNodeId,
+          }));
+          setUndoStackBySide((prev) => ({ ...prev, [firstSide]: [] }));
+          setTrainingSession((prev) => (prev?.side === firstSide ? null : prev));
+        }
+
+        setStatus(
+          `Imported DB: ${importedBySide.white.length} white, ${importedBySide.black.length} black repertoires`,
+        );
+        return;
+      }
+
       const currentTree = trees[activeSide];
       const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
       const nextTree = parsePgnToTree(activeSide, pgn, currentTree);
@@ -1825,19 +2231,20 @@ function App() {
         ...prev,
         [activeSide]: nextTree.nodes[currentSelectedId] ? currentSelectedId : nextTree.rootId,
       }));
-      setStatus(`Imported ${activeSide} PGN`);
+      setStatus(`Imported PGN into "${activeRepertoireName}" (${activeSide})`);
     } catch {
       setStatus('Import failed');
     } finally {
       event.target.value = '';
+      setImportMode('current');
     }
   };
 
   const lichessTotal = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
   const isTrainingActive = Boolean(trainingSession && trainingSession.side === activeSide);
   const showHintButton = Boolean(isTrainingActive && trainingSession?.hintRequested);
-  const canStartTraining = childNodes.length > 0;
-  const isTrainingLineEnd = Boolean(isTrainingActive && childNodes.length === 0);
+  const canStartTraining = displayedChildNodes.length > 0;
+  const isTrainingLineEnd = Boolean(isTrainingActive && displayedChildNodes.length === 0);
   const isMobileClient = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   useEffect(() => {
     if (!lichessData?.opening) return;
@@ -1913,6 +2320,20 @@ function App() {
   );
 
   const optionRows = useMemo(() => {
+    if (isBrowseMode) {
+      return browseMoveOptions.map((option) => ({
+        node: {
+          id: `browse-option-${option.moveUci}`,
+          parentId: selectedNode.id,
+          fen: selectedNode.fen,
+          moveSan: option.moveSan,
+          moveUci: option.moveUci,
+          children: [],
+        } as MoveNode,
+        leaves: option.repertoireNames.length,
+      }));
+    }
+
     const leafMemo = new Map<string, number>();
     const countLeaves = (nodeId: string): number => {
       const cached = leafMemo.get(nodeId);
@@ -1934,9 +2355,10 @@ function App() {
         leaves: countLeaves(node.id),
       }))
       .map(({ node, leaves }) => ({ node, leaves }));
-  }, [childNodes, tree.nodes]);
+  }, [isBrowseMode, browseMoveOptions, selectedNode.id, selectedNode.fen, childNodes, tree.nodes]);
 
   useEffect(() => {
+    if (isBrowseMode) return;
     if (lichessStatus !== 'done' || !lichessData?.moves || lichessData.moves.length === 0) return;
 
     setTrees((prev) => {
@@ -1978,7 +2400,7 @@ function App() {
         [activeSide]: nextTree,
       };
     });
-  }, [activeSide, lichessData, lichessStatus, selectedNodeBySide]);
+  }, [activeSide, isBrowseMode, lichessData, lichessStatus, selectedNodeBySide]);
 
   const goBackOneMove = () => {
     if (isTrainingActive) return;
@@ -2331,7 +2753,7 @@ function App() {
                 <button
                   className="danger"
                   onClick={deleteLastMove}
-                  disabled={!canGoBack || isTrainingActive}
+                  disabled={!canGoBack || isTrainingActive || isBrowseMode}
                   aria-label="Delete last move"
                   title="Delete last move"
                 >
@@ -2396,13 +2818,25 @@ function App() {
                         type="button"
                         className="tree-option-btn"
                         disabled={isTrainingActive}
-                        onClick={() => navigateToNode(activeSide, node.id)}
+                        onClick={() => {
+                          if (isBrowseMode) {
+                            if (node.moveUci) playLichessMove(node.moveUci);
+                            return;
+                          }
+                          navigateToNode(activeSide, node.id);
+                        }}
                       >
                         {toFigurineSan(node.moveSan ?? '')}
                       </button>
                       <span className="tree-option-leaves">{leaves}</span>
                     </div>
                   ))}
+                </div>
+              )}
+              {repertoiresAtPosition.length > 0 && (
+                <div className="repertoire-hit-block">
+                  <strong>Repertoires with this position</strong>
+                  <div className="repertoire-hit-list">{repertoiresAtPosition.join(', ')}</div>
                 </div>
               )}
             </aside>}
@@ -2414,8 +2848,8 @@ function App() {
       {isOptionsOpen && (
         <div className="modal-backdrop" onClick={() => setIsOptionsOpen(false)}>
           <div className="modal-card options-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="card-head">
-              <h2>Options</h2>
+            <div className="current-repertoire" title={activeRepertoireName}>
+              {activeSide}: {activeRepertoireName}
             </div>
             <div className="options-grid">
               <button
@@ -2428,28 +2862,67 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  setRepertoireSide((prev) => (prev === 'white' ? 'black' : 'white'));
-                  setIsTempBoardFlipped(false);
+                  if (isBrowseMode) {
+                    setRepertoireSide((prev) => (prev === 'white' ? 'black' : 'white'));
+                    setIsTempBoardFlipped(false);
+                  } else {
+                    setIsTempBoardFlipped((prev) => !prev);
+                  }
                   setIsOptionsOpen(false);
                 }}
               >
-                Switch repertoire side
+                Rotate board
               </button>
               <button
                 onClick={() => {
-                  exportPgn();
+                  setNewRepertoireName('');
+                  setIsNewRepertoireOpen(true);
                   setIsOptionsOpen(false);
                 }}
               >
-                Export {activeSide} PGN
+                New repertoire
               </button>
               <button
                 onClick={() => {
-                  openImportDialog();
+                  setIsLoadRepertoireOpen(true);
                   setIsOptionsOpen(false);
                 }}
               >
-                Import {activeSide} PGN
+                Load repertoire ({activeSide})
+              </button>
+              <button
+                disabled={isBrowseMode}
+                onClick={() => {
+                  exportCurrentRepertoirePgn();
+                  setIsOptionsOpen(false);
+                }}
+              >
+                Export current repertoire PGN
+              </button>
+              <button
+                disabled={isBrowseMode}
+                onClick={() => {
+                  openImportDialog('current');
+                  setIsOptionsOpen(false);
+                }}
+              >
+                Import into current repertoire
+              </button>
+              <button
+                onClick={() => {
+                  exportWholeDatabasePgn();
+                  setIsOptionsOpen(false);
+                }}
+              >
+                Export whole DB PGN
+              </button>
+              <button
+                onClick={() => {
+                  openImportDialog('db');
+                  setIsOptionsOpen(false);
+                }}
+              >
+                Import whole DB
               </button>
               {isMobileClient && (
                 <button
@@ -2474,13 +2947,119 @@ function App() {
         </div>
       )}
 
+      {isNewRepertoireOpen && (
+        <div className="modal-backdrop" onClick={() => setIsNewRepertoireOpen(false)}>
+          <div className="modal-card options-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="card-head">
+              <h2>New repertoire ({activeSide})</h2>
+            </div>
+            <div className="options-grid">
+              <label className="repertoire-name-row">
+                Name
+                <input
+                  type="text"
+                  value={newRepertoireName}
+                  onChange={(e) => setNewRepertoireName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      createNewRepertoire();
+                    }
+                  }}
+                  placeholder="e.g. Sicilian mainline"
+                  autoFocus
+                />
+              </label>
+              <button type="button" onClick={createNewRepertoire}>
+                Create
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsNewRepertoireOpen(false);
+                  setNewRepertoireName('');
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isLoadRepertoireOpen && (
+        <div className="modal-backdrop" onClick={() => { setIsLoadRepertoireOpen(false); cancelRenamingRepertoire(); }}>
+          <div className="modal-card options-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="card-head">
+              <h2>Load repertoire ({activeSide})</h2>
+            </div>
+            <div className="options-grid">
+              <div className="repertoire-list">
+                {loadableRepertoires.length === 0 && <span className="status">No saved repertoires</span>}
+                {loadableRepertoires.map((entry) => (
+                  <div key={entry.id} className="repertoire-row">
+                    {renamingRepertoireId === entry.id ? (
+                      <>
+                        <input
+                          type="text"
+                          value={renameDraft}
+                          onChange={(e) => setRenameDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              commitRenameRepertoire(entry.id);
+                            }
+                            if (e.key === 'Escape') {
+                              e.preventDefault();
+                              cancelRenamingRepertoire();
+                            }
+                          }}
+                          autoFocus
+                        />
+                        <button type="button" onClick={() => commitRenameRepertoire(entry.id)}>
+                          Save
+                        </button>
+                        <button type="button" onClick={cancelRenamingRepertoire}>
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className={entry.id === activeRepertoireIdBySide[activeSide] ? 'active' : ''}
+                          onClick={() => loadRepertoire(entry.id)}
+                        >
+                          {entry.name}
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Rename repertoire"
+                          title="Rename repertoire"
+                          onClick={() => startRenamingRepertoire(entry.id)}
+                        >
+                          ✎
+                        </button>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <button type="button" onClick={() => { setIsLoadRepertoireOpen(false); cancelRenamingRepertoire(); }}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isLichessFilterOpen && (
         <div className="modal-backdrop" onClick={() => setIsLichessFilterOpen(false)}>
           <div className="modal-card filters-modal" onClick={(e) => e.stopPropagation()}>
             <div className="filters-modal-main">
               <div className="filters-grid">
                 <label>
-                  Database
+                  Lichess Database
                   <span className="toggle-group database-toggle">
                     <button
                       type="button"
@@ -2684,14 +3263,6 @@ function App() {
                   </span>
                 </label>
               </div>
-              <label className="inline-check">
-                <input
-                  type="checkbox"
-                  checked={isTempBoardFlipped}
-                  onChange={(e) => setIsTempBoardFlipped(e.target.checked)}
-                />
-                Flip board
-              </label>
               <label className="inline-check">
                 <input
                   type="checkbox"
