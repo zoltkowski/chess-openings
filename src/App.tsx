@@ -2319,7 +2319,7 @@ function App() {
   const visibleEngineStatus =
     engineStatus === 'done' || engineStatus === 'stopped' || engineStatus === 'analyzing' ? '' : engineStatus;
   const currentEngineEval = engineLines[0]?.scoreText ?? selectedNode.stockfishEval ?? null;
-  const visibleEngineEval = currentEngineEval ? `SF ${currentEngineEval}` : '';
+  const visibleEngineEval = currentEngineEval ? `eval ${currentEngineEval}` : '';
   const visibleLichessStatus = lichessStatus === 'done' || lichessStatus === 'idle' ? '' : lichessStatus;
   const openingFullTitle = resolvedOpening ? `${resolvedOpening.eco} ${resolvedOpening.name}` : '';
   const openingTitleContent = useMemo(() => {
@@ -2965,7 +2965,7 @@ function App() {
                         {toFigurineSan(node.moveSan ?? '')}
                       </button>
                       <span className="tree-option-leaves">
-                        {node.stockfishEval ? `SF ${node.stockfishEval} | ${leaves}` : leaves}
+                        {node.stockfishEval ? `eval ${node.stockfishEval} | ${leaves}` : leaves}
                       </span>
                     </div>
                   ))}

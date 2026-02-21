@@ -544,6 +544,10 @@ select {
   margin-top: 0.8rem;
 }
 
+.stockfish-inline .table {
+  margin-top: 0.35rem;
+}
+
 .portrait-tabbar {
   display: none;
 }
@@ -862,6 +866,10 @@ select {
 
 .app.theme-dark .move-table th {
   background: #1b2a42;
+}
+
+.app.theme-dark .tree-option-leaves {
+  color: #4ade80;
 }
 
 .app.theme-dark .table-row,
