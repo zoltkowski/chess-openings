@@ -59,7 +59,7 @@ select {
   margin-left: auto;
 }
 
-.move-list .controls-row > button:not(.hamburger-btn):not(.icon-toggle-btn):not(.continue-training-btn) {
+.move-list .controls-row > button:not(.hamburger-btn):not(.icon-toggle-btn):not(.continue-training-btn):not(.stop-training-btn) {
   width: 2.6rem;
   min-width: 2.6rem;
   padding: 0.3rem 0.2rem;
@@ -611,6 +611,12 @@ select {
 .move-list .controls-row > button.continue-training-btn {
   min-width: 8rem;
   width: 8rem;
+}
+
+.move-list .controls-row > button.stop-training-btn {
+  width: auto;
+  min-width: 7.5rem;
+  white-space: nowrap;
 }
 
 .lichess-panel {

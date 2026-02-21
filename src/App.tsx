@@ -469,6 +469,12 @@ function boardFen(fen: string) {
   return fen === START_FEN ? START_POS_FEN : fen;
 }
 
+function positionFenKey(fen: string) {
+  const fullFen = boardFen(fen);
+  const parts = fullFen.split(' ');
+  return parts.slice(0, 4).join(' ');
+}
+
 function createNodeId(tree: MoveTree) {
   return `n-${tree.nextId}`;
 }
@@ -1238,9 +1244,10 @@ function App() {
 
   const collectBrowseMoveOptionsAtFen = (side: Side, fen: string): BrowseMoveOption[] => {
     const byUci = new Map<string, { moveSan: string; repertoireNames: Set<string> }>();
+    const targetFenKey = positionFenKey(fen);
 
     for (const repertoire of repertoiresBySide[side]) {
-      const nodes = Object.values(repertoire.tree.nodes).filter((node) => node.fen === fen);
+      const nodes = Object.values(repertoire.tree.nodes).filter((node) => positionFenKey(node.fen) === targetFenKey);
       if (nodes.length === 0) continue;
       for (const node of nodes) {
         for (const childId of node.children) {
@@ -1283,9 +1290,12 @@ function App() {
   }, [isBrowseMode, childNodes, browseMoveOptions, selectedNode.id, selectedNode.fen]);
 
   const repertoiresAtPosition = useMemo(() => {
+    const targetFenKey = positionFenKey(selectedNode.fen);
     return repertoiresBySide[activeSide]
       .filter((repertoire) => repertoireHasMoves(repertoire.tree))
-      .filter((repertoire) => Object.values(repertoire.tree.nodes).some((node) => node.fen === selectedNode.fen))
+      .filter((repertoire) =>
+        Object.values(repertoire.tree.nodes).some((node) => positionFenKey(node.fen) === targetFenKey),
+      )
       .map((repertoire) => ({
         id: repertoire.id,
         name: repertoire.name,
@@ -3133,6 +3143,11 @@ function App() {
             <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''} ${isTrainingActive ? 'training-pane' : ''}`}>
               {isTrainingActive ? (
                 <>
+                  <div className="controls-row">
+                    <button type="button" className="desktop-only stop-training-btn" onClick={stopTraining}>
+                      Stop train
+                    </button>
+                  </div>
                   {!isBrowseMode && (
                     <div className="training-repertoire-name" title={activeRepertoireName}>
                       {activeSide}: {activeRepertoireName}
