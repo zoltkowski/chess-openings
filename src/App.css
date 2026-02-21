@@ -820,12 +820,32 @@ select {
 }
 
 .options-footer-link {
-  display: block;
+  display: flex;
+  width: 100%;
+  justify-content: flex-end;
+  align-items: center;
   margin-top: 0.75rem;
-  font-size: 0.82rem;
-  line-height: 1.35;
-  word-break: break-all;
-  text-align: center;
+  padding-right: 0.45rem;
+  box-sizing: border-box;
+  color: #475569;
+}
+
+.options-footer-link svg {
+  width: 1.35rem;
+  height: 1.35rem;
+  fill: currentColor;
+}
+
+.options-footer-link:hover {
+  color: #0f172a;
+}
+
+.app.theme-dark .options-footer-link {
+  color: #e2e8f0;
+}
+
+.app.theme-dark .options-footer-link:hover {
+  color: #f8fafc;
 }
 
 .repertoire-name-row {
