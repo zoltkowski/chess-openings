@@ -68,6 +68,8 @@ type TrainingSession = {
   hintRequested: boolean;
   hintVisible: boolean;
   hintMoveUci: string | null;
+  completedLeafNodeIds: string[];
+  errorCount: number;
 };
 
 type PersistedAppState = {
@@ -1898,7 +1900,15 @@ function App() {
   const startTraining = () => {
     const side = activeSide;
     const rootNodeId = selectedNode.id;
-    setTrainingSession({ side, rootNodeId, hintRequested: false, hintVisible: false, hintMoveUci: null });
+    setTrainingSession({
+      side,
+      rootNodeId,
+      hintRequested: false,
+      hintVisible: false,
+      hintMoveUci: null,
+      completedLeafNodeIds: [],
+      errorCount: 0,
+    });
     advanceTrainingPosition(side, rootNodeId, rootNodeId);
     setPortraitTab('moves');
   };
@@ -1946,13 +1956,14 @@ function App() {
         setTrainingSession((prev) =>
           prev && prev.side === activeSide
             ? {
-                ...prev,
-                hintRequested: true,
-                hintVisible: false,
-                hintMoveUci,
-              }
-            : prev,
-        );
+              ...prev,
+              hintRequested: true,
+              hintVisible: false,
+              hintMoveUci,
+              errorCount: prev.errorCount + 1,
+            }
+          : prev,
+      );
         return;
       }
 
@@ -2046,6 +2057,22 @@ function App() {
       return;
     }
     downloadPgn(games.join('\n\n'), 'all-repertoires.pgn');
+  };
+
+  const clearWholeDatabase = () => {
+    const confirmed = window.confirm('Delete all repertoires from local DB? This cannot be undone.');
+    if (!confirmed) return;
+
+    const whiteDefault = createEmptyRepertoire('white', 'Default');
+    const blackDefault = createEmptyRepertoire('black', 'Default');
+
+    setRepertoiresBySide({ white: [whiteDefault], black: [blackDefault] });
+    setActiveRepertoireIdBySide({ white: null, black: null });
+    setTrees({ white: whiteDefault.tree, black: blackDefault.tree });
+    setSelectedNodeBySide({ white: whiteDefault.selectedNodeId, black: blackDefault.selectedNodeId });
+    setUndoStackBySide({ white: [], black: [] });
+    setTrainingSession(null);
+    setIsOptionsOpen(false);
   };
 
   const openImportDialog = (mode: 'current' | 'db' = 'current') => {
@@ -2250,10 +2277,39 @@ function App() {
           return;
         }
 
-        setRepertoiresBySide((prev) => ({
-          white: [...prev.white, ...importedBySide.white],
-          black: [...prev.black, ...importedBySide.black],
-        }));
+        setRepertoiresBySide((prev) => {
+          const mergeSide = (side: Side): RepertoireEntry[] => {
+            const nextList = [...prev[side]];
+            const byName = new Map<string, number>();
+            nextList.forEach((entry, idx) => {
+              byName.set(normalizeRepertoireName(entry.name).toLowerCase(), idx);
+            });
+
+            for (const imported of importedBySide[side]) {
+              const key = normalizeRepertoireName(imported.name).toLowerCase();
+              const existingIdx = byName.get(key);
+              if (existingIdx === undefined) {
+                nextList.push(imported);
+                byName.set(key, nextList.length - 1);
+                continue;
+              }
+              const existing = nextList[existingIdx];
+              nextList[existingIdx] = {
+                ...existing,
+                name: imported.name,
+                tree: imported.tree,
+                selectedNodeId: imported.selectedNodeId,
+              };
+            }
+
+            return nextList;
+          };
+
+          return {
+            white: mergeSide('white'),
+            black: mergeSide('black'),
+          };
+        });
         return;
       }
 
@@ -2394,6 +2450,42 @@ function App() {
       }))
       .map(({ node, leaves }) => ({ node, leaves }));
   }, [isBrowseMode, browseMoveOptions, selectedNode.id, selectedNode.fen, childNodes, tree.nodes]);
+
+  const trainingTotalLines = useMemo(() => {
+    if (!trainingSession || trainingSession.side !== activeSide) return 0;
+    const sideTree = trees[trainingSession.side];
+    const root = sideTree.nodes[trainingSession.rootNodeId];
+    if (!root) return 0;
+    const countLeaves = (nodeId: string): number => {
+      const node = sideTree.nodes[nodeId];
+      if (!node) return 0;
+      if (node.children.length === 0) return 1;
+      return node.children.reduce((acc, childId) => acc + countLeaves(childId), 0);
+    };
+    return countLeaves(root.id);
+  }, [trainingSession, activeSide, trees]);
+
+  const trainingAnsweredLines = useMemo(() => {
+    if (!trainingSession || trainingSession.side !== activeSide) return 0;
+    return new Set(trainingSession.completedLeafNodeIds).size;
+  }, [trainingSession, activeSide]);
+  const trainingProgressPct = trainingTotalLines > 0 ? Math.round((trainingAnsweredLines / trainingTotalLines) * 100) : 0;
+
+  useEffect(() => {
+    if (!trainingSession || trainingSession.side !== activeSide) return;
+    if (!isTrainingLineEnd) return;
+    const sideTree = trees[trainingSession.side];
+    const currentNode = sideTree.nodes[selectedNode.id];
+    if (!currentNode || currentNode.children.length !== 0) return;
+    setTrainingSession((prev) => {
+      if (!prev || prev.side !== activeSide) return prev;
+      if (prev.completedLeafNodeIds.includes(currentNode.id)) return prev;
+      return {
+        ...prev,
+        completedLeafNodeIds: [...prev.completedLeafNodeIds, currentNode.id],
+      };
+    });
+  }, [trainingSession, activeSide, isTrainingLineEnd, selectedNode.id, trees]);
 
   const runTreeStockfishEval = async () => {
     if (isBrowseMode || isTreeEvalRunning) return;
@@ -2782,6 +2874,15 @@ function App() {
                 >
                   <TrainIcon />
                 </button>
+                {isTrainingActive && showHintButton && (
+                  <button
+                    type="button"
+                    className="hint-portrait-btn"
+                    onClick={() => setTrainingSession((prev) => (prev ? { ...prev, hintVisible: true } : prev))}
+                  >
+                    Hint
+                  </button>
+                )}
                 {!isTrainingActive && (
                   visibleEngineEval && <span className="status stockfish-eval-text portrait-stockfish-eval">{visibleEngineEval}</span>
                 )}
@@ -2797,25 +2898,6 @@ function App() {
                   </button>
                 )}
               </div>
-              {isTrainingActive && showHintButton && (
-                <div className="controls-row training-hint-row">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setTrainingSession((prev) => (prev ? { ...prev, hintVisible: true } : prev))
-                    }
-                  >
-                    Hint
-                  </button>
-                </div>
-              )}
-              {isTrainingLineEnd && (
-                <div className="controls-row training-hint-row">
-                  <button type="button" onClick={restartTrainingLine}>
-                    Continue
-                  </button>
-                </div>
-              )}
             </div>
             {!isTrainingActive && <aside className={`stockfish-panel card portrait-only portrait-pane ${portraitTab === 'stockfish' ? 'active' : ''}`}>
               <div className="controls-row">
@@ -2876,108 +2958,131 @@ function App() {
               </div>
             </aside>}
 
-            {!isTrainingActive && <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''}`}>
-              <div className="controls-row">
-                <button
-                  onClick={goBackOneMove}
-                  disabled={!canGoBack || isTrainingActive}
-                  aria-label="Back 1 move"
-                  title="Back 1 move"
-                >
-                  ←
-                </button>
-                <button
-                  className="danger"
-                  onClick={deleteLastMove}
-                  disabled={!canGoBack || isTrainingActive || isBrowseMode}
-                  aria-label="Delete last move"
-                  title="Delete last move"
-                >
-                  ✕
-                </button>
-                <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0 || isTrainingActive}>
-                  Undo
-                </button>
-                <button
-                  className="desktop-only"
-                  type="button"
-                  onClick={() => (isTrainingActive ? stopTraining() : startTraining())}
-                  disabled={!isTrainingActive && !canStartTraining}
-                >
-                  {isTrainingActive ? 'Stop train' : 'Train'}
-                </button>
-                <div className="arrow-toggle-group">
-                  <button
-                    type="button"
-                    className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-lichess ${showLichessArrows ? 'active' : ''}`}
-                    onClick={() => setShowLichessArrows((prev) => !prev)}
-                    aria-label="Toggle Lichess arrows"
-                    title="Toggle Lichess arrows"
-                  />
-                  <button
-                    type="button"
-                    className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-stockfish ${showStockfishArrows ? 'active' : ''}`}
-                    onClick={() => setShowStockfishArrows((prev) => !prev)}
-                    aria-label="Toggle Stockfish arrows"
-                    title="Toggle Stockfish arrows"
-                  />
-                  <button
-                    type="button"
-                    className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-tree ${showTreeArrows ? 'active' : ''}`}
-                    onClick={() => setShowTreeArrows((prev) => !prev)}
-                    aria-label="Toggle tree arrows"
-                    title="Toggle tree arrows"
-                  />
-                </div>
-              </div>
-              <div className="move-notation-line">
-                <div className="move-inline-wrap">
-                  {inlineMoves.map((move) => (
+            <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''} ${isTrainingActive ? 'training-pane' : ''}`}>
+              {isTrainingActive ? (
+                <>
+                  {!isBrowseMode && (
+                    <div className="training-repertoire-name" title={activeRepertoireName}>
+                      {activeSide}: {activeRepertoireName}
+                    </div>
+                  )}
+                  <div className="controls-row">
+                    <span className="status">{`Progress: ${trainingAnsweredLines}/${trainingTotalLines} (${trainingProgressPct}%)`}</span>
+                  </div>
+                  <div className="controls-row">
+                    <span className="status">{`Errors: ${trainingSession?.errorCount ?? 0}`}</span>
+                  </div>
+                  <div className="controls-row">
+                    {isTrainingLineEnd && (
+                      <button type="button" onClick={restartTrainingLine}>
+                        Continue
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="controls-row">
                     <button
-                      key={move.id}
-                      type="button"
-                      className={`move-inline-item ${move.hasAlternatives ? 'has-alternatives' : ''}`}
-                      disabled={isTrainingActive}
-                      onClick={() => navigateToNode(activeSide, move.id)}
+                      onClick={goBackOneMove}
+                      disabled={!canGoBack}
+                      aria-label="Back 1 move"
+                      title="Back 1 move"
                     >
-                      {move.prefix ? <span className="move-inline-prefix">{move.prefix}</span> : null}
-                      <span>{move.san}</span>
+                      ←
                     </button>
-                  ))}
-                </div>
-              </div>
-              {optionRows.length > 0 && (
-                <div className="tree-options-wrap">
-                  {optionRows.map(({ node, leaves }) => (
-                    <div key={node.id} className="tree-option">
+                    <button
+                      className="danger"
+                      onClick={deleteLastMove}
+                      disabled={!canGoBack || isBrowseMode}
+                      aria-label="Delete last move"
+                      title="Delete last move"
+                    >
+                      ✕
+                    </button>
+                    <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
+                      Undo
+                    </button>
+                    <button
+                      className="desktop-only"
+                      type="button"
+                      onClick={startTraining}
+                      disabled={!canStartTraining}
+                    >
+                      Train
+                    </button>
+                    <div className="arrow-toggle-group">
                       <button
                         type="button"
-                        className="tree-option-btn"
-                        disabled={isTrainingActive}
-                        onClick={() => {
-                          if (isBrowseMode) {
-                            if (node.moveUci) playLichessMove(node.moveUci);
-                            return;
-                          }
-                          navigateToNode(activeSide, node.id);
-                        }}
-                      >
-                        {toFigurineSan(node.moveSan ?? '')}
-                      </button>
-                      <span className="tree-option-leaves">
-                        {node.stockfishEval ? `eval ${node.stockfishEval} | ${leaves}` : leaves}
-                      </span>
+                        className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-lichess ${showLichessArrows ? 'active' : ''}`}
+                        onClick={() => setShowLichessArrows((prev) => !prev)}
+                        aria-label="Toggle Lichess arrows"
+                        title="Toggle Lichess arrows"
+                      />
+                      <button
+                        type="button"
+                        className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-stockfish ${showStockfishArrows ? 'active' : ''}`}
+                        onClick={() => setShowStockfishArrows((prev) => !prev)}
+                        aria-label="Toggle Stockfish arrows"
+                        title="Toggle Stockfish arrows"
+                      />
+                      <button
+                        type="button"
+                        className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-tree ${showTreeArrows ? 'active' : ''}`}
+                        onClick={() => setShowTreeArrows((prev) => !prev)}
+                        aria-label="Toggle tree arrows"
+                        title="Toggle tree arrows"
+                      />
                     </div>
-                  ))}
-                </div>
+                  </div>
+                  <div className="move-notation-line">
+                    <div className="move-inline-wrap">
+                      {inlineMoves.map((move) => (
+                        <button
+                          key={move.id}
+                          type="button"
+                          className={`move-inline-item ${move.hasAlternatives ? 'has-alternatives' : ''}`}
+                          onClick={() => navigateToNode(activeSide, move.id)}
+                        >
+                          {move.prefix ? <span className="move-inline-prefix">{move.prefix}</span> : null}
+                          <span>{move.san}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {optionRows.length > 0 && (
+                    <div className="tree-options-wrap">
+                      {optionRows.map(({ node, leaves }) => (
+                        <div key={node.id} className="tree-option">
+                          <button
+                            type="button"
+                            className="tree-option-btn"
+                            onClick={() => {
+                              if (isBrowseMode) {
+                                if (node.moveUci) playLichessMove(node.moveUci);
+                                return;
+                              }
+                              navigateToNode(activeSide, node.id);
+                            }}
+                          >
+                            {toFigurineSan(node.moveSan ?? '')}
+                          </button>
+                          <span className="tree-option-leaves">
+                            {node.stockfishEval ? `SF ${node.stockfishEval} | ${leaves}` : leaves}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {repertoiresAtPosition.length > 0 && (
+                    <div className="repertoire-hit-block">
+                      <strong>Repertoires with this position</strong>
+                      <div className="repertoire-hit-list">{repertoiresAtPosition.join(', ')}</div>
+                    </div>
+                  )}
+                </>
               )}
-              {repertoiresAtPosition.length > 0 && (
-                <div className="repertoire-hit-block">
-                  <strong>Repertoires with this position</strong>
-                  <div className="repertoire-hit-list">{repertoiresAtPosition.join(', ')}</div>
-                </div>
-              )}
-            </aside>}
+            </aside>
           </div>
 
         </section>
@@ -3072,6 +3177,13 @@ function App() {
                 }}
               >
                 Import whole DB
+              </button>
+              <button
+                className="danger"
+                disabled={isTreeEvalRunning}
+                onClick={clearWholeDatabase}
+              >
+                Delete whole DB
               </button>
               {isMobileClient && (
                 <button

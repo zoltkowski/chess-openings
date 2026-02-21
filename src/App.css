@@ -125,7 +125,15 @@ select {
 }
 
 .board-row.training-mode {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: 460px minmax(520px, 1fr) 430px;
+}
+
+.board-row.training-mode .board-center {
+  grid-column: 2;
+}
+
+.board-row.training-mode .move-list {
+  grid-column: 3;
 }
 
 .card {
@@ -203,6 +211,19 @@ select {
 }
 
 .current-repertoire {
+  color: #475569;
+  font-size: 0.82rem;
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.training-repertoire-name {
+  margin: 0.15rem 0 0.2rem;
+  padding: 0.35rem 0;
+  border-top: 1px solid #e5ebf3;
+  border-bottom: 1px solid #e5ebf3;
   color: #475569;
   font-size: 0.82rem;
   line-height: 1.15;
@@ -528,6 +549,12 @@ select {
   border-bottom: 1px solid #e5ebf3;
   padding-bottom: 0.45rem;
   margin-bottom: 0.45rem;
+}
+
+.move-list.training-pane .controls-row {
+  border-bottom: 0;
+  padding-bottom: 0;
+  margin-bottom: 0.35rem;
 }
 
 .lichess-panel {
@@ -858,10 +885,16 @@ select {
 .app.theme-dark .status,
 .app.theme-dark .board-meta,
 .app.theme-dark .current-repertoire,
+.app.theme-dark .training-repertoire-name,
 .app.theme-dark .move-inline-prefix,
 .app.theme-dark .tree-option-leaves,
 .app.theme-dark .move-table th {
   color: #cbd5e1;
+}
+
+.app.theme-dark .training-repertoire-name {
+  border-top-color: #334155;
+  border-bottom-color: #334155;
 }
 
 .app.theme-dark .move-table th {
@@ -1033,7 +1066,18 @@ select {
   }
 
   .board-row.training-mode {
-    grid-template-rows: min-content;
+    grid-template-columns: 1fr;
+    grid-template-rows: min-content minmax(0, 1fr);
+  }
+
+  .board-row.training-mode .board-center {
+    grid-column: auto;
+    grid-row: 1;
+  }
+
+  .board-row.training-mode .move-list {
+    grid-column: auto;
+    grid-row: 2;
   }
 
   .board-center {
@@ -1052,6 +1096,13 @@ select {
   .portrait-tabbar .active {
     background: #dbeafe;
     border-color: #93c5fd;
+  }
+
+  .portrait-tabbar > button.hint-portrait-btn {
+    width: auto;
+    min-width: 3.4rem;
+    padding: 0.35rem 0.55rem;
+    margin-left: auto;
   }
 
   .desktop-only {
