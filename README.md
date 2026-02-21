@@ -2,7 +2,7 @@
 
 React + Vite web app for opening preparation and training.
 
-## http://chess-openings.pages.dev/
+## https://chess-openings.pages.dev/
 
 ## Local Development
 
