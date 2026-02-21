@@ -1059,6 +1059,9 @@ function Board(props: {
     if (!containerRef.current) return;
 
     apiRef.current = Chessground(containerRef.current, {
+      coordinates: false,
+      coordinatesOnSquares: false,
+      ranksPosition: 'left',
       blockTouchScroll: true,
       movable: {
         color: 'both',
@@ -1079,6 +1082,9 @@ function Board(props: {
     apiRef.current?.set({
       fen: boardFen(fen),
       orientation,
+      coordinates: false,
+      coordinatesOnSquares: false,
+      ranksPosition: 'left',
       turnColor: toTurnColor(fen),
       blockTouchScroll: true,
       movable: {

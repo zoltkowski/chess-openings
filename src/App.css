@@ -151,18 +151,6 @@ select {
   touch-action: none;
 }
 
-/* Chessground coordinate overlay expects content-box sizing. */
-.board .cg-wrap,
-.board .cg-wrap * {
-  box-sizing: content-box;
-}
-
-.board .cg-wrap coords {
-  line-height: 1;
-  -webkit-text-size-adjust: none;
-  text-size-adjust: none;
-}
-
 .board-center {
   display: grid;
   gap: 0.55rem;
@@ -1086,4 +1074,5 @@ select {
   .move-list {
     order: initial;
   }
+
 }
