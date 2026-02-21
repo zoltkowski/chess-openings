@@ -21,6 +21,7 @@ type MoveNode = {
   fen: string;
   moveSan: string | null;
   moveUci: string | null;
+  stockfishEval?: string | null;
   children: string[];
 };
 
@@ -1133,7 +1134,7 @@ function App() {
   const [repertoireSide, setRepertoireSide] = useState<'white' | 'black'>('white');
   const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode);
   const [isTempBoardFlipped, setIsTempBoardFlipped] = useState(false);
-  const [status, setStatus] = useState('Ready');
+  const [, setStatus] = useState('Ready');
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
   const [engineMultiPv, setEngineMultiPv] = useState(3);
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
@@ -1174,6 +1175,9 @@ function App() {
   const [importMode, setImportMode] = useState<'current' | 'db'>('current');
   const [portraitTab, setPortraitTab] = useState<'lichess' | 'stockfish' | 'moves'>('moves');
   const [trainingSession, setTrainingSession] = useState<TrainingSession | null>(null);
+  const [treeEvalProgress, setTreeEvalProgress] = useState<{ running: boolean; done: number; total: number } | null>(
+    null,
+  );
 
   const stockfishRef = useRef<Worker | null>(null);
   const engineReadyRef = useRef(false);
@@ -1186,6 +1190,10 @@ function App() {
   const previousFenRef = useRef<string>(START_FEN);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [engineReadyTick, setEngineReadyTick] = useState(0);
+  const treeEvalAwaiterRef = useRef<{ latestScore: string | null; resolve: (score: string | null) => void } | null>(
+    null,
+  );
+  const treeEvalCancelRef = useRef(false);
 
   const activeSide: Side = repertoireSide;
   const activeRepertoireList = repertoiresBySide[activeSide];
@@ -1205,6 +1213,7 @@ function App() {
   const selectedNodeId = selectedNodeBySide[activeSide] ?? tree.rootId;
   const selectedNode = tree.nodes[selectedNodeId] ?? tree.nodes[tree.rootId];
   const trainingForActive = trainingSession?.side === activeSide;
+  const isTreeEvalRunning = Boolean(treeEvalProgress?.running);
 
   const path = useMemo(() => buildPath(tree, selectedNode.id), [tree, selectedNode.id]);
 
@@ -1599,11 +1608,19 @@ function App() {
 
         lineCacheRef.current.set(multipv, { multipv, scoreText, pv, bestMove, evalValue });
         setEngineLines(Array.from(lineCacheRef.current.values()).sort((a, b) => a.multipv - b.multipv));
+        if (multipv === 1 && treeEvalAwaiterRef.current) {
+          treeEvalAwaiterRef.current.latestScore = scoreText;
+        }
         return;
       }
 
       if (text.startsWith('bestmove')) {
         isSearchingRef.current = false;
+        if (treeEvalAwaiterRef.current) {
+          const { latestScore, resolve } = treeEvalAwaiterRef.current;
+          treeEvalAwaiterRef.current = null;
+          resolve(latestScore ?? null);
+        }
         setEngineStatus('done');
         tryStartPendingRef.current?.();
       }
@@ -2076,7 +2093,6 @@ function App() {
     setTrainingSession((prev) => (prev?.side === side ? null : prev));
     setIsLoadRepertoireOpen(false);
     setIsOptionsOpen(false);
-    setStatus(`Loaded repertoire "${entry.name}" (${side})`);
   };
 
   const startRenamingRepertoire = (repertoireId: string, side: Side = activeSide) => {
@@ -2294,9 +2310,10 @@ function App() {
     return [{ orig, dest, brush: 'green' }];
   }, [isTrainingActive, trainingSession]);
   const canGoBack = Boolean(selectedNode.parentId);
-  const visibleTopStatus = status === 'Ready' ? '' : status;
   const visibleEngineStatus =
     engineStatus === 'done' || engineStatus === 'stopped' || engineStatus === 'analyzing' ? '' : engineStatus;
+  const currentEngineEval = engineLines[0]?.scoreText ?? selectedNode.stockfishEval ?? null;
+  const visibleEngineEval = currentEngineEval ? `SF ${currentEngineEval}` : '';
   const visibleLichessStatus = lichessStatus === 'done' || lichessStatus === 'idle' ? '' : lichessStatus;
   const openingFullTitle = resolvedOpening ? `${resolvedOpening.eco} ${resolvedOpening.name}` : '';
   const openingTitleContent = useMemo(() => {
@@ -2371,6 +2388,98 @@ function App() {
       }))
       .map(({ node, leaves }) => ({ node, leaves }));
   }, [isBrowseMode, browseMoveOptions, selectedNode.id, selectedNode.fen, childNodes, tree.nodes]);
+
+  const runTreeStockfishEval = async () => {
+    if (isBrowseMode || isTreeEvalRunning) return;
+    const side = activeSide;
+    const worker = stockfishRef.current;
+    const sourceTree = trees[side];
+    if (!worker || !sourceTree) return;
+
+    const getPlyDepth = (nodeId: string) => {
+      let depth = 0;
+      let cursor: string | null = nodeId;
+      while (cursor) {
+        const current: MoveNode | undefined = sourceTree.nodes[cursor];
+        if (!current?.parentId) break;
+        depth += 1;
+        cursor = current.parentId;
+      }
+      return depth;
+    };
+
+    const nodesToAnalyze = Object.values(sourceTree.nodes).filter(
+      (node) => node.children.length === 0 && getPlyDepth(node.id) >= 8,
+    );
+    if (nodesToAnalyze.length === 0) return;
+
+    setEngineRunning(false);
+    treeEvalCancelRef.current = false;
+    pendingAnalysisRef.current = null;
+    worker.postMessage('stop');
+    setEngineStatus('analyzing');
+    setTreeEvalProgress({ running: true, done: 0, total: nodesToAnalyze.length });
+
+    const waitForReady = async () => {
+      if (engineReadyRef.current) return true;
+      for (let i = 0; i < 100; i += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        if (engineReadyRef.current) return true;
+      }
+      return false;
+    };
+
+    const ready = await waitForReady();
+    if (!ready) {
+      setTreeEvalProgress(null);
+      setEngineStatus('stopped');
+      return;
+    }
+
+    for (let i = 0; i < nodesToAnalyze.length; i += 1) {
+      if (treeEvalCancelRef.current) break;
+      const node = nodesToAnalyze[i];
+      const fen = node.fen === START_FEN ? new Chess().fen() : node.fen;
+
+      const scoreText = await new Promise<string | null>((resolve) => {
+        treeEvalAwaiterRef.current = { latestScore: null, resolve };
+        worker.postMessage('setoption name MultiPV value 1');
+        worker.postMessage(`position fen ${fen}`);
+        worker.postMessage('go movetime 10000');
+      });
+      if (treeEvalCancelRef.current) break;
+
+      setTrees((prev) => {
+        const currentTree = prev[side];
+        const currentNode = currentTree.nodes[node.id];
+        if (!currentNode) return prev;
+        return {
+          ...prev,
+          [side]: {
+            ...currentTree,
+            nodes: {
+              ...currentTree.nodes,
+              [node.id]: {
+                ...currentNode,
+                stockfishEval: scoreText ?? null,
+              },
+            },
+          },
+        };
+      });
+      setTreeEvalProgress({ running: true, done: i + 1, total: nodesToAnalyze.length });
+    }
+
+    setTreeEvalProgress((prev) => (prev ? { ...prev, running: false } : null));
+    setEngineStatus('stopped');
+  };
+
+  const stopTreeStockfishEval = () => {
+    if (!isTreeEvalRunning) return;
+    treeEvalCancelRef.current = true;
+    pendingAnalysisRef.current = null;
+    stockfishRef.current?.postMessage('stop');
+  };
 
   useEffect(() => {
     if (isBrowseMode) return;
@@ -2471,9 +2580,7 @@ function App() {
   return (
     <div className={`app ${themeMode === 'dark' ? 'theme-dark' : ''}`}>
       <header className="topbar">
-        <div className="topbar-row">
-          <div>{visibleTopStatus && <span className="status">{visibleTopStatus}</span>}</div>
-        </div>
+        <div className="topbar-row" />
       </header>
       <input
         ref={importInputRef}
@@ -2622,6 +2729,11 @@ function App() {
                 arrows={trainingForActive ? trainingHintArrow : autoArrows}
                 onMove={makeMove}
               />
+              {visibleEngineEval && (
+                <div className="stockfish-eval-row desktop-only">
+                  <span className="status stockfish-eval-text">{visibleEngineEval}</span>
+                </div>
+              )}
               <div className="portrait-tabbar">
                 {!isTrainingActive && (
                   <>
@@ -2665,8 +2777,11 @@ function App() {
                   <TrainIcon />
                 </button>
                 {!isTrainingActive && (
+                  visibleEngineEval && <span className="status stockfish-eval-text portrait-stockfish-eval">{visibleEngineEval}</span>
+                )}
+                {!isTrainingActive && (
                   <button
-                    className="gear-btn portrait-filters-btn"
+                    className={`gear-btn portrait-filters-btn ${visibleEngineEval ? 'with-eval' : ''}`}
                     type="button"
                     aria-label="Filters"
                     title="Filters"
@@ -2843,7 +2958,9 @@ function App() {
                       >
                         {toFigurineSan(node.moveSan ?? '')}
                       </button>
-                      <span className="tree-option-leaves">{leaves}</span>
+                      <span className="tree-option-leaves">
+                        {node.stockfishEval ? `SF ${node.stockfishEval} | ${leaves}` : leaves}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -2861,13 +2978,14 @@ function App() {
       </main>
 
       {isOptionsOpen && (
-        <div className="modal-backdrop" onClick={() => setIsOptionsOpen(false)}>
+        <div className="modal-backdrop" onClick={() => { if (!isTreeEvalRunning) setIsOptionsOpen(false); }}>
           <div className="modal-card options-modal" onClick={(e) => e.stopPropagation()}>
             <div className="current-repertoire" title={activeRepertoireName}>
               {activeSide}: {activeRepertoireName}
             </div>
             <div className="options-grid">
               <button
+                disabled={isTreeEvalRunning}
                 onClick={() => {
                   setThemeMode((prev) => (prev === 'dark' ? 'light' : 'dark'));
                   setIsOptionsOpen(false);
@@ -2876,6 +2994,7 @@ function App() {
                 {themeMode === 'dark' ? 'Disable dark mode' : 'Enable dark mode'}
               </button>
               <button
+                disabled={isTreeEvalRunning}
                 onClick={() => {
                   if (isBrowseMode) {
                     setRepertoireSide((prev) => (prev === 'white' ? 'black' : 'white'));
@@ -2889,6 +3008,7 @@ function App() {
                 Rotate board
               </button>
               <button
+                disabled={isTreeEvalRunning}
                 onClick={() => {
                   setNewRepertoireName('');
                   setIsNewRepertoireOpen(true);
@@ -2898,6 +3018,7 @@ function App() {
                 New repertoire ({newRepertoireSide})
               </button>
               <button
+                disabled={isTreeEvalRunning}
                 onClick={() => {
                   setIsLoadRepertoireOpen(true);
                   setIsOptionsOpen(false);
@@ -2906,7 +3027,7 @@ function App() {
                 Load repertoire ({loadRepertoireSide})
               </button>
               <button
-                disabled={isBrowseMode}
+                disabled={isBrowseMode || isTreeEvalRunning}
                 onClick={() => {
                   exportCurrentRepertoirePgn();
                   setIsOptionsOpen(false);
@@ -2915,7 +3036,7 @@ function App() {
                 Export current repertoire PGN
               </button>
               <button
-                disabled={isBrowseMode}
+                disabled={isBrowseMode || isTreeEvalRunning}
                 onClick={() => {
                   openImportDialog('current');
                   setIsOptionsOpen(false);
@@ -2924,6 +3045,21 @@ function App() {
                 Import into current repertoire
               </button>
               <button
+                disabled={isBrowseMode}
+                onClick={() => {
+                  if (isTreeEvalRunning) {
+                    stopTreeStockfishEval();
+                    return;
+                  }
+                  void runTreeStockfishEval();
+                }}
+              >
+                {isTreeEvalRunning
+                  ? `Stop adding evals (${treeEvalProgress?.done ?? 0}/${treeEvalProgress?.total ?? 0})`
+                  : 'Add Stockfish evals to tree (10s/position)'}
+              </button>
+              <button
+                disabled={isTreeEvalRunning}
                 onClick={() => {
                   exportWholeDatabasePgn();
                   setIsOptionsOpen(false);
@@ -2932,6 +3068,7 @@ function App() {
                 Export whole DB PGN
               </button>
               <button
+                disabled={isTreeEvalRunning}
                 onClick={() => {
                   openImportDialog('db');
                   setIsOptionsOpen(false);
@@ -2941,6 +3078,7 @@ function App() {
               </button>
               {isMobileClient && (
                 <button
+                  disabled={isTreeEvalRunning}
                   onClick={() => {
                     void shareFen();
                     setIsOptionsOpen(false);
@@ -2950,6 +3088,7 @@ function App() {
                 </button>
               )}
               <button
+                disabled={isTreeEvalRunning}
                 onClick={() => {
                   openInLichessAnalysis();
                   setIsOptionsOpen(false);

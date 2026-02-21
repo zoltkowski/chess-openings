@@ -559,6 +559,22 @@ select {
   display: none;
 }
 
+.stockfish-eval-row {
+  width: min(100%, 760px);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+}
+
+.stockfish-eval-text {
+  font-weight: 600;
+}
+
+.portrait-stockfish-eval {
+  margin-left: auto;
+  font-size: 0.82rem;
+}
+
 .portrait-tabbar > button {
   width: 2.5rem;
   min-width: 2.5rem;
@@ -635,6 +651,10 @@ select {
 
 .portrait-filters-btn {
   margin-left: auto;
+}
+
+.portrait-filters-btn.with-eval {
+  margin-left: 0;
 }
 
 .left-panel-gear {
@@ -894,17 +914,27 @@ select {
 }
 
 .app.theme-dark .table-move-btn,
-.app.theme-dark .move-inline-item,
-.app.theme-dark .tree-option-btn {
+.app.theme-dark .move-inline-item {
   background: transparent;
   border-color: transparent;
   color: #b8c1cf;
 }
 
 .app.theme-dark .table-move-btn:hover,
-.app.theme-dark .move-inline-item:hover,
-.app.theme-dark .tree-option-btn:hover {
+.app.theme-dark .move-inline-item:hover {
   color: #cbd5e1;
+}
+
+.app.theme-dark .tree-option-btn {
+  background: #1e293b;
+  border-color: #475569;
+  color: #e2e8f0;
+}
+
+.app.theme-dark .tree-option-btn:hover {
+  background: #334155;
+  border-color: #60a5fa;
+  color: #e2e8f0;
 }
 
 .app.theme-dark .table-move-btn:hover,
