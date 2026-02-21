@@ -2108,6 +2108,47 @@ function App() {
     setStatus(`Renamed repertoire to "${nextName}"`);
   };
 
+  const deleteRepertoire = (repertoireId: string) => {
+    const entry = repertoiresBySide[activeSide].find((item) => item.id === repertoireId);
+    if (!entry) return;
+    if (normalizeRepertoireName(entry.name).toLowerCase() === 'default') return;
+
+    const confirmed = window.confirm(`Delete repertoire "${entry.name}"? This cannot be undone.`);
+    if (!confirmed) return;
+
+    const remaining = repertoiresBySide[activeSide].filter((item) => item.id !== repertoireId);
+    if (remaining.length === 0) return;
+
+    setRepertoiresBySide((prev) => ({
+      ...prev,
+      [activeSide]: prev[activeSide].filter((item) => item.id !== repertoireId),
+    }));
+
+    if (activeRepertoireIdBySide[activeSide] === repertoireId) {
+      const fallback = remaining[0];
+      setActiveRepertoireIdBySide((prev) => ({
+        ...prev,
+        [activeSide]: null,
+      }));
+      setTrees((prev) => ({
+        ...prev,
+        [activeSide]: fallback.tree,
+      }));
+      setSelectedNodeBySide((prev) => ({
+        ...prev,
+        [activeSide]: fallback.selectedNodeId,
+      }));
+      setUndoStackBySide((prev) => ({ ...prev, [activeSide]: [] }));
+      setTrainingSession((prev) => (prev?.side === activeSide ? null : prev));
+    }
+
+    if (renamingRepertoireId === repertoireId) {
+      cancelRenamingRepertoire();
+    }
+
+    setStatus(`Deleted repertoire "${entry.name}"`);
+  };
+
   const openInLichessAnalysis = () => {
     const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
     const fenPath = fen.replace(/ /g, '_');
@@ -3039,6 +3080,15 @@ function App() {
                           onClick={() => startRenamingRepertoire(entry.id)}
                         >
                           ✎
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Delete repertoire"
+                          title="Delete repertoire"
+                          className="danger"
+                          onClick={() => deleteRepertoire(entry.id)}
+                        >
+                          🗑
                         </button>
                       </>
                     )}
