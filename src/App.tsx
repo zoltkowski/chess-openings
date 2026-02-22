@@ -3113,7 +3113,7 @@ function App() {
         if (selectedNode.id !== tree.rootId) {
           navigateToNode(activeSide, tree.rootId);
         }
-      }, 450);
+      }, 800);
     }
   };
 
