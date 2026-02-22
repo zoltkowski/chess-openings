@@ -82,6 +82,7 @@ type TrainingSession = {
   hintMoveUci: string | null;
   completedLeafNodeIds: string[];
   errorCount: number;
+  correctCount: number;
   currentPromptFen: string | null;
   currentPromptHadError: boolean;
   currentPromptScopeIds: string[];
@@ -92,6 +93,7 @@ type TrainingPositionStat = {
 };
 
 type TrainingStatsState = Record<Side, Record<string, Record<string, TrainingPositionStat>>>;
+type TrainingLeafLastShownState = Record<Side, Record<string, Record<string, number>>>;
 
 type PersistedAppState = {
   version: 2;
@@ -172,6 +174,7 @@ const APP_DB_STORE = 'kv';
 const APP_STATE_KEY = 'app-state-v1';
 const APP_SETTINGS_KEY = 'settings-v1';
 const APP_TRAINING_STATS_KEY = 'training-stats-v1';
+const APP_TRAINING_LEAF_LAST_SHOWN_KEY = 'training-leaf-last-shown-v1';
 const TRAINING_SCOPE_WHOLE_DB = 'whole-db';
 const TRAINING_STATS_QUEUE_MIN = 1;
 const TRAINING_STATS_QUEUE_MAX = 30;
@@ -386,6 +389,13 @@ function createEmptyTrainingStatsState(): TrainingStatsState {
   };
 }
 
+function createEmptyTrainingLeafLastShownState(): TrainingLeafLastShownState {
+  return {
+    white: {},
+    black: {},
+  };
+}
+
 function normalizeTrainingStats(value: unknown): TrainingStatsState | null {
   if (!value || typeof value !== 'object') return null;
   const parsed = value as Partial<TrainingStatsState>;
@@ -425,6 +435,32 @@ function normalizeTrainingStats(value: unknown): TrainingStatsState | null {
       });
       if (Object.keys(nextFenStats).length > 0) {
         nextScopes[scopeKey] = nextFenStats;
+      }
+    });
+    return nextScopes;
+  };
+  return {
+    white: normalizeSide('white'),
+    black: normalizeSide('black'),
+  };
+}
+
+function normalizeTrainingLeafLastShown(value: unknown): TrainingLeafLastShownState | null {
+  if (!value || typeof value !== 'object') return null;
+  const parsed = value as Partial<TrainingLeafLastShownState>;
+  const normalizeSide = (side: Side) => {
+    const sideValue = parsed[side];
+    if (!sideValue || typeof sideValue !== 'object') return {};
+    const nextScopes: Record<string, Record<string, number>> = {};
+    Object.entries(sideValue as Record<string, unknown>).forEach(([scopeId, scopeValue]) => {
+      if (!scopeValue || typeof scopeValue !== 'object') return;
+      const nextLeafEntries: Record<string, number> = {};
+      Object.entries(scopeValue as Record<string, unknown>).forEach(([leafKey, rawTimestamp]) => {
+        if (typeof rawTimestamp !== 'number' || !Number.isFinite(rawTimestamp)) return;
+        nextLeafEntries[leafKey] = rawTimestamp;
+      });
+      if (Object.keys(nextLeafEntries).length > 0) {
+        nextScopes[scopeId] = nextLeafEntries;
       }
     });
     return nextScopes;
@@ -1327,6 +1363,9 @@ function App() {
   const [portraitTab, setPortraitTab] = useState<'lichess' | 'stockfish' | 'moves'>('moves');
   const [trainingSession, setTrainingSession] = useState<TrainingSession | null>(null);
   const [trainingStatsBySide, setTrainingStatsBySide] = useState<TrainingStatsState>(createEmptyTrainingStatsState());
+  const [trainingLeafLastShownBySide, setTrainingLeafLastShownBySide] = useState<TrainingLeafLastShownState>(
+    createEmptyTrainingLeafLastShownState(),
+  );
   const [treeEvalProgress, setTreeEvalProgress] = useState<{ running: boolean; done: number; total: number } | null>(
     null,
   );
@@ -1567,6 +1606,9 @@ function App() {
         const persisted = normalizePersistedState(await idbGet<PersistedAppState>(APP_STATE_KEY));
         const persistedSettings = normalizePersistedSettings(await idbGet<PersistedSettingsState>(APP_SETTINGS_KEY));
         const persistedTrainingStats = normalizeTrainingStats(await idbGet<TrainingStatsState>(APP_TRAINING_STATS_KEY));
+        const persistedTrainingLeafLastShown = normalizeTrainingLeafLastShown(
+          await idbGet<TrainingLeafLastShownState>(APP_TRAINING_LEAF_LAST_SHOWN_KEY),
+        );
 
         if (persistedSettings) {
           setThemeMode(persistedSettings.themeMode);
@@ -1621,6 +1663,7 @@ function App() {
           setUndoStackBySide({ white: [], black: [] });
         }
         setTrainingStatsBySide(persistedTrainingStats ?? createEmptyTrainingStatsState());
+        setTrainingLeafLastShownBySide(persistedTrainingLeafLastShown ?? createEmptyTrainingLeafLastShownState());
         setStatus('Ready');
       } catch {
         setStatus('Local storage load failed');
@@ -1739,6 +1782,17 @@ function App() {
 
     return () => window.clearTimeout(timeout);
   }, [hasHydratedAppState, trainingStatsBySide]);
+
+  useEffect(() => {
+    if (!hasHydratedAppState) return;
+    const timeout = window.setTimeout(() => {
+      void idbSet(APP_TRAINING_LEAF_LAST_SHOWN_KEY, trainingLeafLastShownBySide).catch(() => {
+        setStatus('Local training last-shown save failed');
+      });
+    }, 120);
+
+    return () => window.clearTimeout(timeout);
+  }, [hasHydratedAppState, trainingLeafLastShownBySide]);
 
   useEffect(() => {
     setTrainingStatsBySide((prev) => {
@@ -2264,6 +2318,7 @@ function App() {
       hintMoveUci: null,
       completedLeafNodeIds: [],
       errorCount: 0,
+      correctCount: 0,
       currentPromptFen: null,
       currentPromptHadError: false,
       currentPromptScopeIds: [],
@@ -2285,6 +2340,11 @@ function App() {
   const getActiveTrainingStatsScopeId = (side: Side) =>
     isBrowseMode || !activeRepertoireIdBySide[side] ? TRAINING_SCOPE_WHOLE_DB : `repo:${activeRepertoireIdBySide[side]}`;
 
+  const getTrainingLeafKey = (node: MoveNode) => {
+    if (isBrowseMode) return `fen:${positionFenKey(node.fen)}`;
+    return `node:${node.id}`;
+  };
+
   const clearActiveTrainingStatistics = () => {
     const scopeId = getActiveTrainingStatsScopeId(activeSide);
     const confirmed = window.confirm('Clear training statistics for current scope?');
@@ -2299,12 +2359,23 @@ function App() {
         [activeSide]: nextSideStats,
       };
     });
+    setTrainingLeafLastShownBySide((prev) => {
+      const sideEntries = prev[activeSide];
+      if (!sideEntries[scopeId]) return prev;
+      const nextSideEntries = { ...sideEntries };
+      delete nextSideEntries[scopeId];
+      return {
+        ...prev,
+        [activeSide]: nextSideEntries,
+      };
+    });
   };
 
   const clearAllTrainingStatistics = () => {
     const confirmed = window.confirm('Clear all training statistics?');
     if (!confirmed) return;
     setTrainingStatsBySide(createEmptyTrainingStatsState());
+    setTrainingLeafLastShownBySide(createEmptyTrainingLeafLastShownState());
   };
 
   useEffect(() => {
@@ -2373,6 +2444,14 @@ function App() {
       if (!trainingSession.currentPromptHadError) {
         appendTrainingAnswer(activeSide, scoredFen, scoredScopeIds, 1);
       }
+      setTrainingSession((prev) =>
+        prev && prev.side === activeSide
+          ? {
+              ...prev,
+              correctCount: prev.correctCount + 1,
+            }
+          : prev,
+      );
 
       let nextTreeForTraining = currentTree;
       let nextNodeIdForTraining = existingChildId;
@@ -3141,19 +3220,49 @@ function App() {
     const sideTree = trees[trainingSession.side];
     const root = sideTree.nodes[trainingSession.rootNodeId];
     if (!root) return 0;
-    const countLeaves = (nodeId: string): number => {
-      const node = sideTree.nodes[nodeId];
+
+    const countLeavesInTree = (treeToCount: MoveTree, nodeId: string, memo: Map<string, number>): number => {
+      const cached = memo.get(nodeId);
+      if (cached !== undefined) return cached;
+      const node = treeToCount.nodes[nodeId];
       if (!node) return 0;
-      if (node.children.length === 0) return 1;
-      return node.children.reduce((acc, childId) => acc + countLeaves(childId), 0);
+      const value =
+        node.children.length === 0
+          ? 1
+          : node.children.reduce((acc, childId) => acc + countLeavesInTree(treeToCount, childId, memo), 0);
+      memo.set(nodeId, value);
+      return value;
     };
-    return countLeaves(root.id);
-  }, [trainingSession, activeSide, trees]);
+
+    if (!isBrowseMode) {
+      return countLeavesInTree(sideTree, root.id, new Map<string, number>());
+    }
+
+    const rootFenKey = positionFenKey(root.fen);
+    return repertoiresBySide[trainingSession.side]
+      .filter((repertoire) => repertoireHasMoves(repertoire.tree))
+      .reduce((repoSum, repertoire) => {
+        const memo = new Map<string, number>();
+        const matchingNodes = Object.values(repertoire.tree.nodes).filter(
+          (node) => positionFenKey(node.fen) === rootFenKey,
+        );
+        if (matchingNodes.length === 0) return repoSum;
+        const leavesFromRepo = matchingNodes.reduce(
+          (acc, node) => acc + countLeavesInTree(repertoire.tree, node.id, memo),
+          0,
+        );
+        return repoSum + leavesFromRepo;
+      }, 0);
+  }, [trainingSession, activeSide, trees, isBrowseMode, repertoiresBySide]);
 
   const trainingAnsweredLines = useMemo(() => {
     if (!trainingSession || trainingSession.side !== activeSide) return 0;
     return new Set(trainingSession.completedLeafNodeIds).size;
   }, [trainingSession, activeSide]);
+  const trainingCorrectCount = trainingSession?.side === activeSide ? trainingSession.correctCount : 0;
+  const trainingErrorCount = trainingSession?.side === activeSide ? trainingSession.errorCount : 0;
+  const trainingAttemptCount = trainingCorrectCount + trainingErrorCount;
+  const trainingSessionSuccessPct = trainingAttemptCount > 0 ? Math.round((trainingCorrectCount / trainingAttemptCount) * 100) : 0;
   const trainingProgressPct = trainingTotalLines > 0 ? Math.round((trainingAnsweredLines / trainingTotalLines) * 100) : 0;
   const trainingPositionSuccessPct = useMemo(() => {
     if (!isTrainingActive) return 0;
@@ -3165,6 +3274,22 @@ function App() {
     const correct = recentAnswers.reduce((acc, value) => acc + (value ? 1 : 0), 0);
     return Math.round((correct / recentAnswers.length) * 100);
   }, [isTrainingActive, trainingStatsBySide, activeSide, selectedNode.fen, isBrowseMode, activeRepertoireId]);
+  const trainingRepoOverallSuccessPct = useMemo(() => {
+    if (!isTrainingActive || !activeRepertoireId || !activeRepertoire) return null;
+    const sideStats = trainingStatsBySide[activeSide] ?? {};
+    const scopeId = `repo:${activeRepertoireId}`;
+    const scopeStats = sideStats[scopeId] ?? {};
+    const nodes = Object.values(activeRepertoire.tree.nodes);
+    if (nodes.length === 0) return 0;
+    const avgRate =
+      nodes.reduce((acc, node) => {
+        const recentAnswers = scopeStats[positionFenKey(node.fen)]?.recentAnswers ?? [];
+        if (recentAnswers.length === 0) return acc;
+        const correct = recentAnswers.reduce((sum, value) => sum + (value ? 1 : 0), 0);
+        return acc + correct / recentAnswers.length;
+      }, 0) / nodes.length;
+    return Math.round(avgRate * 100);
+  }, [isTrainingActive, activeRepertoireId, activeRepertoire, trainingStatsBySide, activeSide]);
 
   useEffect(() => {
     if (!trainingSession || trainingSession.side !== activeSide) return;
@@ -3172,6 +3297,24 @@ function App() {
     const sideTree = trees[trainingSession.side];
     const currentNode = sideTree.nodes[selectedNode.id];
     if (!currentNode || currentNode.children.length !== 0) return;
+    const scopeId = getActiveTrainingStatsScopeId(activeSide);
+    const leafKey = getTrainingLeafKey(currentNode);
+    const shownAt = Date.now();
+    setTrainingLeafLastShownBySide((prev) => {
+      const sideEntries = prev[activeSide];
+      const scopeEntries = sideEntries[scopeId] ?? {};
+      if (scopeEntries[leafKey] === shownAt) return prev;
+      return {
+        ...prev,
+        [activeSide]: {
+          ...sideEntries,
+          [scopeId]: {
+            ...scopeEntries,
+            [leafKey]: shownAt,
+          },
+        },
+      };
+    });
     setTrainingSession((prev) => {
       if (!prev || prev.side !== activeSide) return prev;
       if (prev.completedLeafNodeIds.includes(currentNode.id)) return prev;
@@ -3180,7 +3323,7 @@ function App() {
         completedLeafNodeIds: [...prev.completedLeafNodeIds, currentNode.id],
       };
     });
-  }, [trainingSession, activeSide, isTrainingLineEnd, selectedNode.id, trees]);
+  }, [trainingSession, activeSide, isTrainingLineEnd, selectedNode.id, trees, isBrowseMode, activeRepertoireIdBySide]);
 
   const runTreeStockfishEval = async () => {
     if (isBrowseMode || isTreeEvalRunning) return;
@@ -3897,7 +4040,7 @@ function App() {
                             clearActiveTrainingStatistics();
                           }}
                         >
-                          Clear stats
+                          Clear current repertoire stats
                         </button>
                         <button
                           type="button"
@@ -3940,11 +4083,22 @@ function App() {
                     <span className="status">{`Progress: ${trainingAnsweredLines}/${trainingTotalLines} (${trainingProgressPct}%)`}</span>
                   </div>
                   <div className="controls-row">
-                    <span className="status">{`Errors: ${trainingSession?.errorCount ?? 0}`}</span>
+                    <span className="status">{`Success rate: ${trainingSessionSuccessPct}%`}</span>
+                  </div>
+                  <div className="controls-row">
+                    <span className="status">{`Correct: ${trainingCorrectCount}`}</span>
+                  </div>
+                  <div className="controls-row">
+                    <span className="status">{`Errors: ${trainingErrorCount}`}</span>
                   </div>
                   <div className="controls-row training-position-stats">
                     <span className="status">{`This position success rate: ${trainingPositionSuccessPct}%`}</span>
                   </div>
+                  {trainingRepoOverallSuccessPct !== null && (
+                    <div className="controls-row training-position-stats">
+                      <span className="status">{`Overall repo success rate: ${trainingRepoOverallSuccessPct}%`}</span>
+                    </div>
+                  )}
                   <div className="controls-row">
                     {isTrainingLineEnd && (
                       <button type="button" className="continue-training-btn desktop-only" onClick={restartTrainingLine}>
