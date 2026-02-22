@@ -127,13 +127,14 @@ type PersistedSettingsState = {
   showTreeArrows: boolean;
   showLichessArrows: boolean;
   showStockfishArrows: boolean;
+  stockfishEvalSeconds: number;
 };
 
 const START_FEN = 'start';
 const START_POS_FEN = new Chess().fen();
 const FIXED_VARIANT = 'standard';
 const FIXED_SOURCE = 'analysis';
-const MOVE_THRESHOLD_OPTIONS = [0, 1, 5, 10, 20] as const;
+const MOVE_THRESHOLD_OPTIONS = [0, 1, 2, 3, 4, 5, 10, 20] as const;
 type MoveThreshold = (typeof MOVE_THRESHOLD_OPTIONS)[number];
 const SPEEDS = ['bullet', 'blitz', 'rapid', 'classical', 'correspondence'] as const;
 const MODES = ['casual', 'rated'] as const;
@@ -354,6 +355,7 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
       MODES.includes(mode as (typeof MODES)[number]),
     ),
     playerHandle: typeof parsed.playerHandle === 'string' ? parsed.playerHandle : '',
+    stockfishEvalSeconds: clampInt((parsed as Partial<PersistedSettingsState>).stockfishEvalSeconds, 1, 30, 10),
   };
 }
 
@@ -451,6 +453,29 @@ function TrainIcon() {
   );
 }
 
+function BackIcon() {
+  return (
+    <TabIconBase>
+      <path
+        d="M18 12H7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M10.5 8.8L7 12l3.5 3.2"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </TabIconBase>
+  );
+}
+
 function createEmptyTree(side: Side): MoveTree {
   const rootId = `${side}-0`;
   return {
@@ -485,6 +510,11 @@ function positionFenKey(fen: string) {
   const fullFen = boardFen(fen);
   const parts = fullFen.split(' ');
   return parts.slice(0, 4).join(' ');
+}
+
+function whitePerspectiveMultiplierFromFen(fen: string) {
+  const turn = fen.split(' ')[1];
+  return turn === 'b' ? -1 : 1;
 }
 
 function createNodeId(tree: MoveTree) {
@@ -1169,6 +1199,7 @@ function App() {
   const [isTempBoardFlipped, setIsTempBoardFlipped] = useState(false);
   const [, setStatus] = useState('Ready');
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
+  const [stockfishEvalSeconds, setStockfishEvalSeconds] = useState(10);
   const [engineMultiPv, setEngineMultiPv] = useState(3);
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
@@ -1236,10 +1267,14 @@ function App() {
     null,
   );
   const treeEvalCancelRef = useRef(false);
+  const engineWhitePerspectiveMultiplierRef = useRef(1);
   const treeOptionLongPressTimeoutRef = useRef<number | null>(null);
   const treeOptionLongPressHandledNodeRef = useRef<string | null>(null);
   const inlineMoveLongPressTimeoutRef = useRef<number | null>(null);
   const inlineMoveLongPressHandledNodeRef = useRef<string | null>(null);
+  const stockfishButtonLongPressTimeoutRef = useRef<number | null>(null);
+  const stockfishButtonLongPressHandledRef = useRef(false);
+  const [isStockfishQuickOpen, setIsStockfishQuickOpen] = useState(false);
   const dbButtonLongPressTimeoutRef = useRef<number | null>(null);
   const dbButtonLongPressHandledRef = useRef(false);
   const movePaneRef = useRef<HTMLElement | null>(null);
@@ -1473,6 +1508,7 @@ function App() {
           setShowTreeArrows(persistedSettings.showTreeArrows);
           setShowLichessArrows(persistedSettings.showLichessArrows);
           setShowStockfishArrows(persistedSettings.showStockfishArrows);
+          setStockfishEvalSeconds(persistedSettings.stockfishEvalSeconds);
         }
 
         if (persisted) {
@@ -1575,6 +1611,7 @@ function App() {
       showTreeArrows,
       showLichessArrows,
       showStockfishArrows,
+      stockfishEvalSeconds,
     };
 
     const timeout = window.setTimeout(() => {
@@ -1602,6 +1639,7 @@ function App() {
     showTreeArrows,
     showLichessArrows,
     showStockfishArrows,
+    stockfishEvalSeconds,
   ]);
 
   useEffect(() => {
@@ -1628,6 +1666,7 @@ function App() {
       lineCacheRef.current = new Map();
       setEngineLines([]);
       setEngineStatus('analyzing');
+      engineWhitePerspectiveMultiplierRef.current = whitePerspectiveMultiplierFromFen(pending.fen);
       w.postMessage(`setoption name MultiPV value ${pending.multipv}`);
       w.postMessage(`position fen ${pending.fen}`);
       w.postMessage(`go depth ${pending.depth}`);
@@ -1661,10 +1700,13 @@ function App() {
         const multipv = Number(multipvMatch[1]);
         const pv = pvMatch[1].trim();
         const bestMove = pv.split(' ')[0] || '';
+        const perspective = engineWhitePerspectiveMultiplierRef.current;
+        const normalizedCp = cpMatch ? Number(cpMatch[1]) * perspective : null;
+        const normalizedMate = mateMatch ? Number(mateMatch[1]) * perspective : null;
         const scoreText = cpMatch
-          ? `${(Number(cpMatch[1]) / 100).toFixed(2)}`
+          ? `${(normalizedCp! / 100).toFixed(2)}`
           : mateMatch
-            ? `M${mateMatch[1]}`
+            ? `M${normalizedMate}`
             : '?';
         const evalValue = cpMatch
           ? Number(cpMatch[1])
@@ -2933,9 +2975,10 @@ function App() {
 
       const scoreText = await new Promise<string | null>((resolve) => {
         treeEvalAwaiterRef.current = { latestScore: null, resolve };
+        engineWhitePerspectiveMultiplierRef.current = whitePerspectiveMultiplierFromFen(fen);
         worker.postMessage('setoption name MultiPV value 1');
         worker.postMessage(`position fen ${fen}`);
-        worker.postMessage('go movetime 10000');
+        worker.postMessage(`go movetime ${stockfishEvalSeconds * 1000}`);
       });
       if (treeEvalCancelRef.current) break;
 
@@ -3100,12 +3143,43 @@ function App() {
     setPortraitTab('lichess');
   };
 
+  const clearStockfishButtonLongPress = () => {
+    if (stockfishButtonLongPressTimeoutRef.current !== null) {
+      window.clearTimeout(stockfishButtonLongPressTimeoutRef.current);
+      stockfishButtonLongPressTimeoutRef.current = null;
+    }
+  };
+
+  const handlePortraitStockfishPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    clearStockfishButtonLongPress();
+    stockfishButtonLongPressHandledRef.current = false;
+    stockfishButtonLongPressTimeoutRef.current = window.setTimeout(() => {
+      stockfishButtonLongPressHandledRef.current = true;
+      setIsStockfishQuickOpen(true);
+    }, 420);
+  };
+
+  const handlePortraitStockfishPointerEnd = () => {
+    clearStockfishButtonLongPress();
+  };
+
+  const handlePortraitStockfishClick: MouseEventHandler<HTMLButtonElement> = (event) => {
+    if (stockfishButtonLongPressHandledRef.current) {
+      event.preventDefault();
+      stockfishButtonLongPressHandledRef.current = false;
+      return;
+    }
+    setPortraitTab('stockfish');
+  };
+
   useEffect(
     () => () => {
       clearBackLongPress();
       clearTreeOptionLongPress();
       clearInlineMoveLongPress();
       clearDbButtonLongPress();
+      clearStockfishButtonLongPress();
     },
     [],
   );
@@ -3317,35 +3391,32 @@ function App() {
                   <span className="status stockfish-eval-text">{visibleEngineEval}</span>
                 </div>
               )}
-              {!isTrainingActive && (
-                <div className="portrait-eval-row portrait-only">
-                  <span className="status stockfish-eval-text portrait-stockfish-eval">
-                    {visibleEngineEval || '\u00a0'}
-                  </span>
-                </div>
-              )}
               <div className="portrait-tabbar">
                 {!isTrainingActive && (
                   <>
                     <button
                       type="button"
-                      className={portraitTab === 'lichess' ? 'active' : ''}
+                      className={`long-pressable-btn ${portraitTab === 'lichess' ? 'active' : ''}`}
                       onClick={handlePortraitDbClick}
                       onPointerDown={handlePortraitDbPointerDown}
                       onPointerUp={handlePortraitDbPointerEnd}
                       onPointerCancel={handlePortraitDbPointerEnd}
                       onPointerLeave={handlePortraitDbPointerEnd}
                       aria-label="Lichess"
-                      title="Lichess"
+                      title="Lichess (long press: filters)"
                     >
                       <DbIcon />
                     </button>
                     <button
                       type="button"
-                      className={portraitTab === 'stockfish' ? 'active' : ''}
-                      onClick={() => setPortraitTab('stockfish')}
+                      className={`long-pressable-btn ${portraitTab === 'stockfish' ? 'active' : ''}`}
+                      onClick={handlePortraitStockfishClick}
+                      onPointerDown={handlePortraitStockfishPointerDown}
+                      onPointerUp={handlePortraitStockfishPointerEnd}
+                      onPointerCancel={handlePortraitStockfishPointerEnd}
+                      onPointerLeave={handlePortraitStockfishPointerEnd}
                       aria-label="Stockfish"
-                      title="Stockfish"
+                      title="Stockfish (long press: quick settings)"
                     >
                       <ComputerIcon />
                     </button>
@@ -3387,7 +3458,7 @@ function App() {
                 {!isTrainingActive && (
                   <button
                     type="button"
-                    className="portrait-back-btn"
+                    className="portrait-back-btn long-pressable-btn"
                     onClick={handleBackClick}
                     onPointerDown={handleBackPointerDown}
                     onPointerUp={handleBackPointerEnd}
@@ -3395,21 +3466,13 @@ function App() {
                     onPointerLeave={handleBackPointerEnd}
                     disabled={!canGoBack}
                     aria-label="Back 1 move"
-                    title="Back 1 move"
+                    title="Back 1 move (long press: previous branch)"
                   >
-                    ←
+                    <BackIcon />
                   </button>
                 )}
                 {!isTrainingActive && (
-                  <button
-                    className={`gear-btn portrait-filters-btn ${visibleEngineEval ? 'with-eval' : ''}`}
-                    type="button"
-                    aria-label="Filters"
-                    title="Filters"
-                    onClick={() => setIsLichessFilterOpen(true)}
-                  >
-                    ⚙
-                  </button>
+                  <span className="status stockfish-eval-text portrait-stockfish-eval">{visibleEngineEval || ''}</span>
                 )}
               </div>
             </div>
@@ -3524,7 +3587,7 @@ function App() {
                       aria-label="Back 1 move"
                       title="Back 1 move"
                     >
-                      ←
+                      <BackIcon />
                     </button>
                     <button
                       className="danger"
@@ -3629,7 +3692,13 @@ function App() {
                             key={item.id}
                             type="button"
                             className={`repertoire-hit-item ${item.isActive ? 'active' : ''}`}
-                            onClick={() => loadRepertoire(item.id, activeSide)}
+                            onClick={() => {
+                              if (item.isActive) {
+                                enterBrowseMode(activeSide);
+                                return;
+                              }
+                              loadRepertoire(item.id, activeSide);
+                            }}
                           >
                             {item.name}
                           </button>
@@ -3665,6 +3734,49 @@ function App() {
             </button>
           </div>
         </>
+      )}
+
+      {isStockfishQuickOpen && (
+        <div className="modal-backdrop" onClick={() => setIsStockfishQuickOpen(false)}>
+          <div className="modal-card stockfish-quick-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="slider-stack single-column">
+              <label>
+                {`Stockfish depth: ${engineDepth}`}
+                <span className="slider-field">
+                  <input
+                    className="threshold-slider"
+                    type="range"
+                    min={16}
+                    max={32}
+                    step={1}
+                    value={engineDepth}
+                    onChange={(e) => {
+                      const next = Number.parseInt(e.target.value, 10);
+                      if (Number.isFinite(next)) setEngineDepth(next);
+                    }}
+                  />
+                </span>
+              </label>
+              <label>
+                {`Add eval seconds: ${stockfishEvalSeconds}s`}
+                <span className="slider-field">
+                  <input
+                    className="threshold-slider"
+                    type="range"
+                    min={1}
+                    max={30}
+                    step={1}
+                    value={stockfishEvalSeconds}
+                    onChange={(e) => {
+                      const next = Number.parseInt(e.target.value, 10);
+                      if (Number.isFinite(next)) setStockfishEvalSeconds(Math.min(30, Math.max(1, next)));
+                    }}
+                  />
+                </span>
+              </label>
+            </div>
+          </div>
+        </div>
       )}
 
       {isOptionsOpen && (
@@ -4118,7 +4230,7 @@ function App() {
                   {`Min frequency: ${lichessArrowThreshold}%`}
                   <span className="slider-field">
                     <input
-                      className="threshold-slider"
+                      className="threshold-slider min-frequency-slider"
                       type="range"
                       min={0}
                       max={MOVE_THRESHOLD_OPTIONS.length - 1}
@@ -4128,23 +4240,6 @@ function App() {
                         const idx = Number.parseInt(e.target.value, 10);
                         const next = MOVE_THRESHOLD_OPTIONS[idx] ?? 5;
                         setLichessArrowThreshold(next);
-                      }}
-                    />
-                  </span>
-                </label>
-                <label>
-                  {`Stockfish depth: ${engineDepth}`}
-                  <span className="slider-field">
-                    <input
-                      className="threshold-slider"
-                      type="range"
-                      min={16}
-                      max={32}
-                      step={1}
-                      value={engineDepth}
-                      onChange={(e) => {
-                        const next = Number.parseInt(e.target.value, 10);
-                        if (Number.isFinite(next)) setEngineDepth(next);
                       }}
                     />
                   </span>

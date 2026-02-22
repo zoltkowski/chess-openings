@@ -328,6 +328,7 @@ select {
   align-items: center;
   gap: 0.18rem;
   padding: 0.2rem 0.35rem;
+  font-size: 0.9rem;
   border: 1px solid transparent;
   background: transparent;
 }
@@ -376,7 +377,7 @@ select {
   transform: translateX(-50%);
   z-index: 1101;
   background: #ffffff;
-  border: 1px solid #c8d3e6;
+  border: 0;
   border-radius: 8px;
   padding: 0.35rem;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.22);
@@ -388,7 +389,6 @@ select {
 
 .app.theme-dark .tree-delete-popup {
   background: #111b2e;
-  border-color: #475569;
 }
 
 .tree-option-leaves {
@@ -685,19 +685,31 @@ select {
   font-size: 0.82rem;
 }
 
-.portrait-eval-row {
-  display: none;
-}
 
-.portrait-tabbar > button {
-  width: 2.5rem;
-  min-width: 2.5rem;
-  display: inline-flex;
-  align-items: center;
+  .portrait-tabbar > button {
+    width: 2.5rem;
+    min-width: 2.5rem;
+    display: inline-flex;
+    align-items: center;
   justify-content: center;
   padding: 0.35rem 0;
-  color: #111827;
-}
+    color: #111827;
+  }
+
+  .portrait-tabbar > button.long-pressable-btn {
+    position: relative;
+  }
+
+  .portrait-tabbar > button.long-pressable-btn::after {
+    content: "•";
+    position: absolute;
+    right: 0.16rem;
+    bottom: 0.08rem;
+    font-size: 0.55rem;
+    line-height: 1;
+    opacity: 0.72;
+    pointer-events: none;
+  }
 
 .tab-icon {
   width: 1.35rem;
@@ -994,6 +1006,10 @@ select {
   align-items: start;
 }
 
+.slider-stack.single-column {
+  grid-template-columns: 1fr;
+}
+
 .slider-stack label {
   display: grid;
   gap: 0.3rem;
@@ -1003,9 +1019,18 @@ select {
   width: 8rem;
 }
 
+.min-frequency-slider {
+  width: 12rem;
+}
+
 .slider-value {
   min-width: 2.6rem;
   text-align: right;
+}
+
+.stockfish-quick-modal {
+  width: min(340px, calc(100vw - 2rem));
+  max-width: calc(100vw - 2rem);
 }
 
 .app.theme-dark {
@@ -1233,7 +1258,7 @@ select {
     grid-row: 1;
     min-height: 0;
     overflow: hidden;
-    gap: 0.275rem;
+    gap: 0.18rem;
   }
 
   .portrait-tabbar {
@@ -1243,15 +1268,7 @@ select {
     position: relative;
   }
 
-  .portrait-eval-row.portrait-only {
-    display: flex;
-    width: 100%;
-    justify-content: flex-end;
-    margin-top: 0;
-    min-height: 1rem;
-  }
-
-  .portrait-eval-row .portrait-stockfish-eval {
+  .portrait-tabbar .portrait-stockfish-eval {
     margin-left: auto;
     font-size: 0.72rem;
   }
