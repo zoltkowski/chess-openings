@@ -1233,6 +1233,7 @@ select {
   .board-row {
     grid-template-columns: 1fr;
     grid-template-rows: min-content minmax(0, 1fr);
+    gap: 0.35rem;
     height: 100%;
     min-height: 0;
     overflow: hidden;
