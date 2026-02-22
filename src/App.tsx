@@ -1280,6 +1280,8 @@ function App() {
   const movePaneRef = useRef<HTMLElement | null>(null);
   const backLongPressTimeoutRef = useRef<number | null>(null);
   const backLongPressHandledRef = useRef(false);
+  const backLongPressIsDownRef = useRef(false);
+  const backLongPressStageRef = useRef<0 | 1 | 2>(0);
 
   const activeSide: Side = repertoireSide;
   const activeRepertoireList = repertoiresBySide[activeSide];
@@ -3090,17 +3092,42 @@ function App() {
     }
   };
 
+  const scheduleBackLongPressStage = () => {
+    clearBackLongPress();
+    if (!backLongPressIsDownRef.current) return;
+    if (backLongPressStageRef.current === 0) {
+      backLongPressTimeoutRef.current = window.setTimeout(() => {
+        if (!backLongPressIsDownRef.current) return;
+        backLongPressHandledRef.current = true;
+        backLongPressStageRef.current = 1;
+        goBackToPreviousBranchMove();
+        scheduleBackLongPressStage();
+      }, 450);
+      return;
+    }
+    if (backLongPressStageRef.current === 1) {
+      backLongPressTimeoutRef.current = window.setTimeout(() => {
+        if (!backLongPressIsDownRef.current) return;
+        backLongPressHandledRef.current = true;
+        backLongPressStageRef.current = 2;
+        if (selectedNode.id !== tree.rootId) {
+          navigateToNode(activeSide, tree.rootId);
+        }
+      }, 450);
+    }
+  };
+
   const handleBackPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
     if (event.pointerType === 'mouse' && event.button !== 0) return;
-    clearBackLongPress();
+    backLongPressIsDownRef.current = true;
+    backLongPressStageRef.current = 0;
     backLongPressHandledRef.current = false;
-    backLongPressTimeoutRef.current = window.setTimeout(() => {
-      backLongPressHandledRef.current = true;
-      goBackToPreviousBranchMove();
-    }, 450);
+    scheduleBackLongPressStage();
   };
 
   const handleBackPointerEnd = () => {
+    backLongPressIsDownRef.current = false;
+    backLongPressStageRef.current = 0;
     clearBackLongPress();
   };
 
