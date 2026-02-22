@@ -1384,6 +1384,10 @@ select {
     display: none;
   }
 
+  .move-list .controls-row > button.desktop-only {
+    display: none;
+  }
+
   .portrait-only {
     display: block;
   }
