@@ -1,4 +1,16 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEventHandler, type ReactNode } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEventHandler,
+  type MouseEvent,
+  type MouseEventHandler,
+  type PointerEvent,
+  type PointerEventHandler,
+  type ReactNode,
+  type TouchEvent,
+} from 'react';
 import { Chess, type Move } from 'chess.js';
 import { Chessground } from '@lichess-org/chessground';
 import type { Api as ChessgroundApi } from '@lichess-org/chessground/api';
@@ -1192,6 +1204,14 @@ function App() {
   const [isNewRepertoireOpen, setIsNewRepertoireOpen] = useState(false);
   const [isLoadRepertoireOpen, setIsLoadRepertoireOpen] = useState(false);
   const [newRepertoireName, setNewRepertoireName] = useState('');
+  const [treeOptionDeletePopup, setTreeOptionDeletePopup] = useState<{
+    nodeId?: string;
+    moveUci?: string;
+    fenKey?: string;
+    x: number;
+    y: number;
+    openedAt: number;
+  } | null>(null);
   const [renamingRepertoireId, setRenamingRepertoireId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [importMode, setImportMode] = useState<'current' | 'db'>('current');
@@ -1216,6 +1236,15 @@ function App() {
     null,
   );
   const treeEvalCancelRef = useRef(false);
+  const treeOptionLongPressTimeoutRef = useRef<number | null>(null);
+  const treeOptionLongPressHandledNodeRef = useRef<string | null>(null);
+  const inlineMoveLongPressTimeoutRef = useRef<number | null>(null);
+  const inlineMoveLongPressHandledNodeRef = useRef<string | null>(null);
+  const dbButtonLongPressTimeoutRef = useRef<number | null>(null);
+  const dbButtonLongPressHandledRef = useRef(false);
+  const movePaneRef = useRef<HTMLElement | null>(null);
+  const backLongPressTimeoutRef = useRef<number | null>(null);
+  const backLongPressHandledRef = useRef(false);
 
   const activeSide: Side = repertoireSide;
   const activeRepertoireList = repertoiresBySide[activeSide];
@@ -2616,6 +2645,204 @@ function App() {
       .map(({ node, leaves }) => ({ node, leaves }));
   }, [isBrowseMode, browseMoveOptions, selectedNode.id, selectedNode.fen, childNodes, tree.nodes]);
 
+  const clearTreeOptionLongPress = () => {
+    if (treeOptionLongPressTimeoutRef.current !== null) {
+      window.clearTimeout(treeOptionLongPressTimeoutRef.current);
+      treeOptionLongPressTimeoutRef.current = null;
+    }
+  };
+
+  const getDeletePopupPosition = (element: HTMLButtonElement) => {
+    const rect = element.getBoundingClientRect();
+    const paneRect = movePaneRef.current?.getBoundingClientRect();
+    const rawX = rect.left + rect.width / 2;
+    const rawY = rect.bottom + 8;
+    if (!paneRect) return { x: rawX, y: rawY };
+    const horizontalPadding = 74;
+    const verticalPadding = 8;
+    const popupApproxHeight = 50;
+    const x = Math.max(paneRect.left + horizontalPadding, Math.min(rawX, paneRect.right - horizontalPadding));
+    const y = Math.max(
+      paneRect.top + verticalPadding,
+      Math.min(rawY, paneRect.bottom - popupApproxHeight - verticalPadding),
+    );
+    return { x, y };
+  };
+
+  const handleTreeOptionPointerDown = (node: MoveNode, event: PointerEvent<HTMLButtonElement>) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    clearTreeOptionLongPress();
+    treeOptionLongPressHandledNodeRef.current = null;
+    const { x, y } = getDeletePopupPosition(event.currentTarget);
+    treeOptionLongPressTimeoutRef.current = globalThis.setTimeout(() => {
+      treeOptionLongPressHandledNodeRef.current = node.id;
+      setTreeOptionDeletePopup(
+        isBrowseMode && node.moveUci
+          ? { nodeId: node.id, moveUci: node.moveUci, fenKey: positionFenKey(selectedNode.fen), x, y, openedAt: Date.now() }
+          : { nodeId: node.id, x, y, openedAt: Date.now() },
+      );
+    }, 320);
+  };
+
+  const handleTreeOptionMouseDown = (node: MoveNode, event: MouseEvent<HTMLButtonElement>) => {
+    if ('PointerEvent' in window) return;
+    if (event.button !== 0) return;
+    clearTreeOptionLongPress();
+    treeOptionLongPressHandledNodeRef.current = null;
+    const { x, y } = getDeletePopupPosition(event.currentTarget);
+    treeOptionLongPressTimeoutRef.current = globalThis.setTimeout(() => {
+      treeOptionLongPressHandledNodeRef.current = node.id;
+      setTreeOptionDeletePopup(
+        isBrowseMode && node.moveUci
+          ? { nodeId: node.id, moveUci: node.moveUci, fenKey: positionFenKey(selectedNode.fen), x, y, openedAt: Date.now() }
+          : { nodeId: node.id, x, y, openedAt: Date.now() },
+      );
+    }, 320);
+  };
+
+  const handleTreeOptionTouchStart = (node: MoveNode, event: TouchEvent<HTMLButtonElement>) => {
+    if ('PointerEvent' in window) return;
+    clearTreeOptionLongPress();
+    treeOptionLongPressHandledNodeRef.current = null;
+    const { x, y } = getDeletePopupPosition(event.currentTarget);
+    treeOptionLongPressTimeoutRef.current = globalThis.setTimeout(() => {
+      treeOptionLongPressHandledNodeRef.current = node.id;
+      setTreeOptionDeletePopup(
+        isBrowseMode && node.moveUci
+          ? { nodeId: node.id, moveUci: node.moveUci, fenKey: positionFenKey(selectedNode.fen), x, y, openedAt: Date.now() }
+          : { nodeId: node.id, x, y, openedAt: Date.now() },
+      );
+    }, 320);
+  };
+
+  const openTreeOptionDeleteFromContextMenu = (node: MoveNode, element: HTMLButtonElement) => {
+    const { x, y } = getDeletePopupPosition(element);
+    treeOptionLongPressHandledNodeRef.current = node.id;
+    setTreeOptionDeletePopup(
+      isBrowseMode && node.moveUci
+        ? { nodeId: node.id, moveUci: node.moveUci, fenKey: positionFenKey(selectedNode.fen), x, y, openedAt: Date.now() }
+        : { nodeId: node.id, x, y, openedAt: Date.now() },
+    );
+  };
+
+  const handleTreeOptionPointerEnd = () => {
+    clearTreeOptionLongPress();
+  };
+
+  const handleTreeOptionClick = (node: MoveNode, event: MouseEvent<HTMLButtonElement>) => {
+    if (treeOptionLongPressHandledNodeRef.current === node.id) {
+      event.preventDefault();
+      treeOptionLongPressHandledNodeRef.current = null;
+      return;
+    }
+    if (isBrowseMode) {
+      if (node.moveUci) playLichessMove(node.moveUci);
+      return;
+    }
+    navigateToNode(activeSide, node.id);
+  };
+
+  const clearInlineMoveLongPress = () => {
+    if (inlineMoveLongPressTimeoutRef.current !== null) {
+      window.clearTimeout(inlineMoveLongPressTimeoutRef.current);
+      inlineMoveLongPressTimeoutRef.current = null;
+    }
+  };
+
+  const handleInlineMovePointerDown = (nodeId: string, event: PointerEvent<HTMLButtonElement>) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    clearInlineMoveLongPress();
+    inlineMoveLongPressHandledNodeRef.current = null;
+    const { x, y } = getDeletePopupPosition(event.currentTarget);
+    inlineMoveLongPressTimeoutRef.current = globalThis.setTimeout(() => {
+      inlineMoveLongPressHandledNodeRef.current = nodeId;
+      setTreeOptionDeletePopup({ nodeId, x, y, openedAt: Date.now() });
+    }, 320);
+  };
+
+  const handleInlineMovePointerEnd = () => {
+    clearInlineMoveLongPress();
+  };
+
+  const handleInlineMoveClick = (moveId: string, event: MouseEvent<HTMLButtonElement>) => {
+    if (inlineMoveLongPressHandledNodeRef.current === moveId) {
+      event.preventDefault();
+      inlineMoveLongPressHandledNodeRef.current = null;
+      return;
+    }
+    navigateToNode(activeSide, moveId);
+  };
+
+  const deleteTreeOptionBranch = () => {
+    const popup = treeOptionDeletePopup;
+    if (!popup) return;
+    const nodeId = popup.nodeId;
+    if (isTrainingActive) return;
+    if (popup.moveUci && popup.fenKey) {
+      const moveUci = popup.moveUci;
+      const targetFenKey = popup.fenKey;
+      if (!moveUci) {
+        setTreeOptionDeletePopup(null);
+        return;
+      }
+      setRepertoiresBySide((prev) => {
+        const nextSideList = prev[activeSide].map((entry) => {
+          let nextTree = entry.tree;
+          let changed = false;
+          while (true) {
+            let branchRootId: string | null = null;
+            for (const node of Object.values(nextTree.nodes)) {
+              if (positionFenKey(node.fen) !== targetFenKey) continue;
+              const childId = node.children.find((id) => nextTree.nodes[id]?.moveUci === moveUci);
+              if (childId) {
+                branchRootId = childId;
+                break;
+              }
+            }
+            if (!branchRootId) break;
+            nextTree = removeBranch(nextTree, branchRootId);
+            changed = true;
+          }
+          if (!changed) return entry;
+          return {
+            ...entry,
+            tree: nextTree,
+            selectedNodeId: nextTree.nodes[entry.selectedNodeId] ? entry.selectedNodeId : nextTree.rootId,
+          };
+        });
+        return {
+          ...prev,
+          [activeSide]: nextSideList,
+        };
+      });
+      setTreeOptionDeletePopup(null);
+      return;
+    }
+    if (!nodeId) {
+      setTreeOptionDeletePopup(null);
+      return;
+    }
+    const currentTree = trees[activeSide];
+    const branchRoot = currentTree.nodes[nodeId];
+    if (!branchRoot) return;
+    const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
+    const fallbackId = branchRoot.parentId ?? currentTree.rootId;
+    const nextTree = removeBranch(currentTree, nodeId);
+    const nextSelectedId = nextTree.nodes[currentSelectedId]
+      ? currentSelectedId
+      : nextTree.nodes[fallbackId]
+        ? fallbackId
+        : nextTree.rootId;
+
+    setUndoStackBySide((prev) => ({
+      ...prev,
+      [activeSide]: [...prev[activeSide], { tree: currentTree, selectedNodeId: currentSelectedId }].slice(-200),
+    }));
+    setTrees((prev) => ({ ...prev, [activeSide]: nextTree }));
+    setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: nextSelectedId }));
+    setTreeOptionDeletePopup(null);
+  };
+
   const trainingTotalLines = useMemo(() => {
     if (!trainingSession || trainingSession.side !== activeSide) return 0;
     const sideTree = trees[trainingSession.side];
@@ -2795,6 +3022,93 @@ function App() {
     if (!parentId) return;
     navigateToNode(activeSide, parentId);
   };
+
+  const goBackToPreviousBranchMove = () => {
+    if (isTrainingActive) return;
+    let cursorId = selectedNode.parentId;
+    while (cursorId) {
+      const node = tree.nodes[cursorId];
+      if (!node) break;
+      if (node.children.length > 1) {
+        navigateToNode(activeSide, node.id);
+        return;
+      }
+      cursorId = node.parentId;
+    }
+    if (selectedNode.id !== tree.rootId) {
+      navigateToNode(activeSide, tree.rootId);
+    }
+  };
+
+  const clearBackLongPress = () => {
+    if (backLongPressTimeoutRef.current !== null) {
+      window.clearTimeout(backLongPressTimeoutRef.current);
+      backLongPressTimeoutRef.current = null;
+    }
+  };
+
+  const handleBackPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    clearBackLongPress();
+    backLongPressHandledRef.current = false;
+    backLongPressTimeoutRef.current = window.setTimeout(() => {
+      backLongPressHandledRef.current = true;
+      goBackToPreviousBranchMove();
+    }, 450);
+  };
+
+  const handleBackPointerEnd = () => {
+    clearBackLongPress();
+  };
+
+  const handleBackClick: MouseEventHandler<HTMLButtonElement> = (event) => {
+    if (backLongPressHandledRef.current) {
+      event.preventDefault();
+      backLongPressHandledRef.current = false;
+      return;
+    }
+    goBackOneMove();
+  };
+
+  const clearDbButtonLongPress = () => {
+    if (dbButtonLongPressTimeoutRef.current !== null) {
+      window.clearTimeout(dbButtonLongPressTimeoutRef.current);
+      dbButtonLongPressTimeoutRef.current = null;
+    }
+  };
+
+  const handlePortraitDbPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    clearDbButtonLongPress();
+    dbButtonLongPressHandledRef.current = false;
+    dbButtonLongPressTimeoutRef.current = window.setTimeout(() => {
+      dbButtonLongPressHandledRef.current = true;
+      setIsLichessFilterOpen(true);
+    }, 420);
+  };
+
+  const handlePortraitDbPointerEnd = () => {
+    clearDbButtonLongPress();
+  };
+
+  const handlePortraitDbClick: MouseEventHandler<HTMLButtonElement> = (event) => {
+    if (dbButtonLongPressHandledRef.current) {
+      event.preventDefault();
+      dbButtonLongPressHandledRef.current = false;
+      return;
+    }
+    setPortraitTab('lichess');
+  };
+
+  useEffect(
+    () => () => {
+      clearBackLongPress();
+      clearTreeOptionLongPress();
+      clearInlineMoveLongPress();
+      clearDbButtonLongPress();
+    },
+    [],
+  );
 
   const deleteLastMove = () => {
     if (isTrainingActive) return;
@@ -3003,13 +3317,24 @@ function App() {
                   <span className="status stockfish-eval-text">{visibleEngineEval}</span>
                 </div>
               )}
+              {!isTrainingActive && (
+                <div className="portrait-eval-row portrait-only">
+                  <span className="status stockfish-eval-text portrait-stockfish-eval">
+                    {visibleEngineEval || '\u00a0'}
+                  </span>
+                </div>
+              )}
               <div className="portrait-tabbar">
                 {!isTrainingActive && (
                   <>
                     <button
                       type="button"
                       className={portraitTab === 'lichess' ? 'active' : ''}
-                      onClick={() => setPortraitTab('lichess')}
+                      onClick={handlePortraitDbClick}
+                      onPointerDown={handlePortraitDbPointerDown}
+                      onPointerUp={handlePortraitDbPointerEnd}
+                      onPointerCancel={handlePortraitDbPointerEnd}
+                      onPointerLeave={handlePortraitDbPointerEnd}
                       aria-label="Lichess"
                       title="Lichess"
                     >
@@ -3060,7 +3385,20 @@ function App() {
                   </button>
                 )}
                 {!isTrainingActive && (
-                  visibleEngineEval && <span className="status stockfish-eval-text portrait-stockfish-eval">{visibleEngineEval}</span>
+                  <button
+                    type="button"
+                    className="portrait-back-btn"
+                    onClick={handleBackClick}
+                    onPointerDown={handleBackPointerDown}
+                    onPointerUp={handleBackPointerEnd}
+                    onPointerCancel={handleBackPointerEnd}
+                    onPointerLeave={handleBackPointerEnd}
+                    disabled={!canGoBack}
+                    aria-label="Back 1 move"
+                    title="Back 1 move"
+                  >
+                    ←
+                  </button>
                 )}
                 {!isTrainingActive && (
                   <button
@@ -3140,7 +3478,12 @@ function App() {
               </div>
             </aside>}
 
-            <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''} ${isTrainingActive ? 'training-pane' : ''}`}>
+            <aside
+              ref={(element) => {
+                movePaneRef.current = element;
+              }}
+              className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''} ${isTrainingActive ? 'training-pane' : ''}`}
+            >
               {isTrainingActive ? (
                 <>
                   <div className="controls-row">
@@ -3171,7 +3514,12 @@ function App() {
                 <>
                   <div className="controls-row">
                     <button
-                      onClick={goBackOneMove}
+                      className="desktop-only"
+                      onClick={handleBackClick}
+                      onPointerDown={handleBackPointerDown}
+                      onPointerUp={handleBackPointerEnd}
+                      onPointerCancel={handleBackPointerEnd}
+                      onPointerLeave={handleBackPointerEnd}
                       disabled={!canGoBack}
                       aria-label="Back 1 move"
                       title="Back 1 move"
@@ -3229,7 +3577,11 @@ function App() {
                           key={move.id}
                           type="button"
                           className={`move-inline-item ${move.hasAlternatives ? 'has-alternatives' : ''}`}
-                          onClick={() => navigateToNode(activeSide, move.id)}
+                          onClick={(event) => handleInlineMoveClick(move.id, event)}
+                          onPointerDown={(event) => handleInlineMovePointerDown(move.id, event)}
+                          onPointerUp={handleInlineMovePointerEnd}
+                          onPointerCancel={handleInlineMovePointerEnd}
+                          onPointerLeave={handleInlineMovePointerEnd}
                         >
                           {move.prefix ? <span className="move-inline-prefix">{move.prefix}</span> : null}
                           <span>{move.san}</span>
@@ -3244,12 +3596,19 @@ function App() {
                           <button
                             type="button"
                             className="tree-option-btn"
-                            onClick={() => {
-                              if (isBrowseMode) {
-                                if (node.moveUci) playLichessMove(node.moveUci);
-                                return;
-                              }
-                              navigateToNode(activeSide, node.id);
+                            onClick={(event) => handleTreeOptionClick(node, event)}
+                            onPointerDown={(event) => handleTreeOptionPointerDown(node, event)}
+                            onPointerUp={handleTreeOptionPointerEnd}
+                            onPointerCancel={handleTreeOptionPointerEnd}
+                            onMouseDown={(event) => handleTreeOptionMouseDown(node, event)}
+                            onMouseUp={handleTreeOptionPointerEnd}
+                            onMouseLeave={handleTreeOptionPointerEnd}
+                            onTouchStart={(event) => handleTreeOptionTouchStart(node, event)}
+                            onTouchEnd={handleTreeOptionPointerEnd}
+                            onTouchCancel={handleTreeOptionPointerEnd}
+                            onContextMenu={(event) => {
+                              event.preventDefault();
+                              openTreeOptionDeleteFromContextMenu(node, event.currentTarget);
                             }}
                           >
                             {toFigurineSan(node.moveSan ?? '')}
@@ -3285,6 +3644,28 @@ function App() {
 
         </section>
       </main>
+
+      {treeOptionDeletePopup && (
+        <>
+          <div
+            className="tree-delete-popup-backdrop"
+            onClick={() => {
+              if (!treeOptionDeletePopup) return;
+              if (Date.now() - treeOptionDeletePopup.openedAt < 350) return;
+              setTreeOptionDeletePopup(null);
+            }}
+          />
+          <div
+            className="tree-delete-popup"
+            style={{ left: `${treeOptionDeletePopup.x}px`, top: `${treeOptionDeletePopup.y}px` }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button type="button" className="danger" onClick={deleteTreeOptionBranch}>
+              Delete branch
+            </button>
+          </div>
+        </>
+      )}
 
       {isOptionsOpen && (
         <div className="modal-backdrop" onClick={() => { if (!isTreeEvalRunning) setIsOptionsOpen(false); }}>
