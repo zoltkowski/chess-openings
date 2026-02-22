@@ -1284,6 +1284,13 @@ select {
     padding: 0.35rem 0.55rem;
   }
 
+  .portrait-tabbar > button.training-stop-btn {
+    width: auto;
+    min-width: 7.6rem;
+    white-space: nowrap;
+    padding: 0.35rem 0.6rem;
+  }
+
   .portrait-tabbar > button.hint-portrait-btn {
     margin-left: auto;
   }

@@ -3433,13 +3433,13 @@ function App() {
                 )}
                 <button
                   type="button"
-                  className={isTrainingActive ? 'active' : ''}
+                  className={`${isTrainingActive ? 'active training-stop-btn' : ''}`}
                   onClick={() => (isTrainingActive ? stopTraining() : startTraining())}
-                  aria-label="Train"
-                  title="Train"
+                  aria-label={isTrainingActive ? 'Stop training' : 'Train'}
+                  title={isTrainingActive ? 'Stop training' : 'Train'}
                   disabled={!isTrainingActive && !canStartTraining}
                 >
-                  <TrainIcon />
+                  {isTrainingActive ? 'Stop training' : <TrainIcon />}
                 </button>
                 {isTrainingActive && isTrainingLineEnd && (
                   <button type="button" className="continue-portrait-btn" onClick={restartTrainingLine}>
