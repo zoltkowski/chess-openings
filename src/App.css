@@ -59,9 +59,10 @@ select {
   margin-left: auto;
 }
 
-.move-list .controls-row > button:not(.hamburger-btn):not(.icon-toggle-btn):not(.continue-training-btn):not(.stop-training-btn) {
+.move-list .controls-row > button:not(.hamburger-btn):not(.icon-toggle-btn):not(.continue-training-btn):not(.stop-training-btn):not(.back-btn) {
   width: 2.6rem;
   min-width: 2.6rem;
+  height: 2.2rem;
   padding: 0.3rem 0.2rem;
   font-size: 0.82rem;
   text-align: center;
@@ -114,6 +115,10 @@ select {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+.stockfish-settings-btn {
+  min-width: 2.2rem;
 }
 
 .stepper-value {
@@ -311,6 +316,12 @@ select {
   border-bottom: 1px solid #eef1f5;
 }
 
+.lichess-table-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0.2rem 0 0.35rem;
+}
+
 .move-inline-wrap {
   display: flex;
   flex-wrap: wrap;
@@ -321,6 +332,12 @@ select {
 .move-notation-line {
   min-height: 2.1rem;
   margin: 0.2rem 0 0.7rem;
+}
+
+@media (orientation: landscape) {
+  .move-list .move-notation-line {
+    min-height: 10.5rem;
+  }
 }
 
 .move-inline-item {
@@ -645,6 +662,22 @@ select {
   white-space: nowrap;
 }
 
+.move-list .controls-row > button.back-btn {
+  width: 4.2rem;
+  min-width: 4.2rem;
+  height: 2.2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3rem 0.2rem;
+  line-height: 1;
+}
+
+.move-list .controls-row > button.back-btn .tab-icon {
+  width: 1.55rem;
+  height: 1.55rem;
+}
+
 .lichess-panel {
   align-self: stretch;
   height: 100%;
@@ -656,7 +689,8 @@ select {
 }
 
 .stockfish-inline {
-  margin-top: 0.8rem;
+  margin-top: 1.15rem;
+  padding-top: 0.75rem;
 }
 
 .stockfish-inline .table {
@@ -781,13 +815,6 @@ select {
 
 .portrait-filters-btn.with-eval {
   margin-left: auto;
-}
-
-.left-panel-gear {
-  position: absolute;
-  left: 0.8rem;
-  bottom: 0.8rem;
-  z-index: 2;
 }
 
 .stockfish-inline .table-row span:first-child {
@@ -1086,6 +1113,7 @@ select {
 .app.theme-dark .repertoire-hit-block {
   border-color: #334155;
 }
+
 
 .app.theme-dark button {
   background: #1e293b;

@@ -3309,6 +3309,17 @@ function App() {
                       );
                     })}
                   </div>
+                  <div className="lichess-table-actions desktop-only">
+                    <button
+                      className="gear-btn"
+                      type="button"
+                      aria-label="Filters"
+                      title="Filters"
+                      onClick={() => setIsLichessFilterOpen(true)}
+                    >
+                      ⚙
+                    </button>
+                  </div>
                   <div className="stockfish-inline desktop-only">
                     <div className="controls-row stockfish-controls-row">
                       <button
@@ -3325,6 +3336,15 @@ function App() {
                         }}
                       >
                         {engineRunning ? '■' : '▶'}
+                      </button>
+                      <button
+                        type="button"
+                        className="stockfish-settings-btn"
+                        aria-label="Stockfish options"
+                        title="Stockfish options"
+                        onClick={() => setIsStockfishQuickOpen(true)}
+                      >
+                        ⚙
                       </button>
                       <div className="stockfish-controls-right">
                         <span className="inline-stepper">
@@ -3375,15 +3395,6 @@ function App() {
                   </div>
                 </>
               )}
-              <button
-                className="gear-btn left-panel-gear desktop-only"
-                type="button"
-                aria-label="Filters"
-                title="Filters"
-                onClick={() => setIsLichessFilterOpen(true)}
-              >
-                ⚙
-              </button>
             </aside>}
 
             <div className="board-center">
@@ -3520,6 +3531,15 @@ function App() {
                 >
                   {engineRunning ? '■' : '▶'}
                 </button>
+                <button
+                  type="button"
+                  className="stockfish-settings-btn"
+                  aria-label="Stockfish options"
+                  title="Stockfish options"
+                  onClick={() => setIsStockfishQuickOpen(true)}
+                >
+                  ⚙
+                </button>
                 <div className="stockfish-controls-right">
                   <span className="inline-stepper">
                     <button
@@ -3604,7 +3624,7 @@ function App() {
                 <>
                   <div className="controls-row">
                     <button
-                      className="desktop-only"
+                      className="desktop-only back-btn"
                       onClick={handleBackClick}
                       onPointerDown={handleBackPointerDown}
                       onPointerUp={handleBackPointerEnd}
