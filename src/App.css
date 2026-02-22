@@ -255,9 +255,10 @@ select {
 }
 
 .training-repertoire-name {
+  display: flex;
+  align-items: center;
   margin: 0.15rem 0 0.2rem;
   padding: 0.35rem 0;
-  border-top: 1px solid #e5ebf3;
   border-bottom: 1px solid #e5ebf3;
   color: #475569;
   font-size: 0.82rem;
@@ -662,6 +663,33 @@ select {
   white-space: nowrap;
 }
 
+.training-stats-gear-btn {
+  margin-left: auto;
+}
+
+.training-stats-dropdown {
+  margin: -0.05rem 0 0.35rem;
+  padding: 0.55rem 0.6rem;
+  width: min(20rem, 100%);
+  margin-left: auto;
+  border: 1px solid #e5ebf3;
+  border-radius: 8px;
+}
+
+.training-position-stats {
+  margin: 0.1rem 0 0.35rem;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.training-position-stats-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.82rem;
+  color: #334155;
+}
+
 .move-list .controls-row > button.back-btn {
   width: 4.2rem;
   min-width: 4.2rem;
@@ -1060,6 +1088,12 @@ select {
   max-width: calc(100vw - 2rem);
 }
 
+.training-stats-menu-actions {
+  display: grid;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
 .app.theme-dark {
   background: #0b1220;
   color: #e2e8f0;
@@ -1075,6 +1109,7 @@ select {
 .app.theme-dark .board-meta,
 .app.theme-dark .current-repertoire,
 .app.theme-dark .training-repertoire-name,
+.app.theme-dark .training-position-stats-row,
 .app.theme-dark .move-inline-prefix,
 .app.theme-dark .tree-option-leaves,
 .app.theme-dark .move-table th {
@@ -1109,6 +1144,7 @@ select {
 .app.theme-dark .move-table th,
 .app.theme-dark .move-table td,
 .app.theme-dark .move-list .controls-row,
+.app.theme-dark .training-stats-dropdown,
 .app.theme-dark .filters-modal-fixed,
 .app.theme-dark .repertoire-hit-block {
   border-color: #334155;
@@ -1324,6 +1360,10 @@ select {
     margin-left: auto;
   }
 
+  .portrait-tabbar > button.training-stats-portrait-gear {
+    margin-left: auto;
+  }
+
   .portrait-tabbar > button.continue-portrait-btn {
     width: auto;
     min-width: 4.7rem;
@@ -1372,6 +1412,16 @@ select {
 
   .move-list {
     order: initial;
+  }
+
+  .move-list.training-pane {
+    padding-top: 0.45rem;
+  }
+
+  .move-list.training-pane .training-repertoire-name {
+    margin-top: 0;
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
   }
 
 }

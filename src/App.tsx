@@ -82,7 +82,16 @@ type TrainingSession = {
   hintMoveUci: string | null;
   completedLeafNodeIds: string[];
   errorCount: number;
+  currentPromptFen: string | null;
+  currentPromptHadError: boolean;
+  currentPromptScopeIds: string[];
 };
+
+type TrainingPositionStat = {
+  recentAnswers: number[];
+};
+
+type TrainingStatsState = Record<Side, Record<string, Record<string, TrainingPositionStat>>>;
 
 type PersistedAppState = {
   version: 2;
@@ -128,6 +137,7 @@ type PersistedSettingsState = {
   showLichessArrows: boolean;
   showStockfishArrows: boolean;
   stockfishEvalSeconds: number;
+  trainingStatsQueueLength: number;
 };
 
 const START_FEN = 'start';
@@ -161,6 +171,10 @@ const PROJECT_GITHUB_URL = 'https://github.com/zoltkowski/chess-openings';
 const APP_DB_STORE = 'kv';
 const APP_STATE_KEY = 'app-state-v1';
 const APP_SETTINGS_KEY = 'settings-v1';
+const APP_TRAINING_STATS_KEY = 'training-stats-v1';
+const TRAINING_SCOPE_WHOLE_DB = 'whole-db';
+const TRAINING_STATS_QUEUE_MIN = 1;
+const TRAINING_STATS_QUEUE_MAX = 30;
 
 function createRepertoireId(side: Side) {
   const randomPart =
@@ -356,6 +370,68 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
     ),
     playerHandle: typeof parsed.playerHandle === 'string' ? parsed.playerHandle : '',
     stockfishEvalSeconds: clampInt((parsed as Partial<PersistedSettingsState>).stockfishEvalSeconds, 1, 30, 10),
+    trainingStatsQueueLength: clampInt(
+      (parsed as Partial<PersistedSettingsState>).trainingStatsQueueLength,
+      TRAINING_STATS_QUEUE_MIN,
+      TRAINING_STATS_QUEUE_MAX,
+      5,
+    ),
+  };
+}
+
+function createEmptyTrainingStatsState(): TrainingStatsState {
+  return {
+    white: {},
+    black: {},
+  };
+}
+
+function normalizeTrainingStats(value: unknown): TrainingStatsState | null {
+  if (!value || typeof value !== 'object') return null;
+  const parsed = value as Partial<TrainingStatsState>;
+  const normalizeSide = (side: Side) => {
+    const sideValue = parsed[side];
+    if (!sideValue || typeof sideValue !== 'object') return {};
+    const nextScopes: Record<string, Record<string, TrainingPositionStat>> = {};
+    Object.entries(sideValue as Record<string, unknown>).forEach(([scopeKey, scopeValue]) => {
+      if (!scopeValue || typeof scopeValue !== 'object') return;
+      const nextFenStats: Record<string, TrainingPositionStat> = {};
+      Object.entries(scopeValue as Record<string, unknown>).forEach(([fenKey, fenStatValue]) => {
+        if (!fenStatValue || typeof fenStatValue !== 'object') return;
+        const raw = fenStatValue as Partial<TrainingPositionStat> & { shown?: number; correct?: number };
+        if (Array.isArray(raw.recentAnswers)) {
+          const normalizedRecentAnswers = raw.recentAnswers
+            .map((value) => (value ? 1 : 0))
+            .slice(-TRAINING_STATS_QUEUE_MAX);
+          nextFenStats[fenKey] = {
+            recentAnswers: normalizedRecentAnswers,
+          };
+          return;
+        }
+
+        // Backward compatibility: old format stored cumulative shown/correct counts.
+        const shown = typeof raw.shown === 'number' && Number.isFinite(raw.shown) ? Math.max(0, Math.floor(raw.shown)) : 0;
+        const correct = typeof raw.correct === 'number' && Number.isFinite(raw.correct)
+          ? Math.max(0, Math.floor(raw.correct))
+          : 0;
+        const boundedShown = Math.min(TRAINING_STATS_QUEUE_MAX, shown);
+        const boundedCorrect = Math.min(boundedShown, correct);
+        nextFenStats[fenKey] = {
+          recentAnswers: [
+            ...new Array(boundedCorrect).fill(1),
+            ...new Array(boundedShown - boundedCorrect).fill(0),
+          ],
+        };
+      });
+      if (Object.keys(nextFenStats).length > 0) {
+        nextScopes[scopeKey] = nextFenStats;
+      }
+    });
+    return nextScopes;
+  };
+  return {
+    white: normalizeSide('white'),
+    black: normalizeSide('black'),
   };
 }
 
@@ -1175,6 +1251,7 @@ function App() {
   const initialSelectedSpeeds: string[] = SPEEDS.filter((speed) => speed !== 'bullet');
   const initialSelectedRatings: number[] = [2000, 2200, 2500];
   const initialSelectedModes: string[] = [...MODES];
+  const initialTrainingStatsQueueLength = 5;
   const initialWhiteTree = createEmptyTree('white');
   const initialBlackTree = createEmptyTree('black');
 
@@ -1200,6 +1277,7 @@ function App() {
   const [, setStatus] = useState('Ready');
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
   const [stockfishEvalSeconds, setStockfishEvalSeconds] = useState(10);
+  const [trainingStatsQueueLength, setTrainingStatsQueueLength] = useState(initialTrainingStatsQueueLength);
   const [engineMultiPv, setEngineMultiPv] = useState(3);
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
@@ -1248,6 +1326,7 @@ function App() {
   const [importMode, setImportMode] = useState<'current' | 'db'>('current');
   const [portraitTab, setPortraitTab] = useState<'lichess' | 'stockfish' | 'moves'>('moves');
   const [trainingSession, setTrainingSession] = useState<TrainingSession | null>(null);
+  const [trainingStatsBySide, setTrainingStatsBySide] = useState<TrainingStatsState>(createEmptyTrainingStatsState());
   const [treeEvalProgress, setTreeEvalProgress] = useState<{ running: boolean; done: number; total: number } | null>(
     null,
   );
@@ -1275,6 +1354,7 @@ function App() {
   const stockfishButtonLongPressTimeoutRef = useRef<number | null>(null);
   const stockfishButtonLongPressHandledRef = useRef(false);
   const [isStockfishQuickOpen, setIsStockfishQuickOpen] = useState(false);
+  const [isTrainingStatsMenuOpen, setIsTrainingStatsMenuOpen] = useState(false);
   const dbButtonLongPressTimeoutRef = useRef<number | null>(null);
   const dbButtonLongPressHandledRef = useRef(false);
   const movePaneRef = useRef<HTMLElement | null>(null);
@@ -1486,6 +1566,7 @@ function App() {
       try {
         const persisted = normalizePersistedState(await idbGet<PersistedAppState>(APP_STATE_KEY));
         const persistedSettings = normalizePersistedSettings(await idbGet<PersistedSettingsState>(APP_SETTINGS_KEY));
+        const persistedTrainingStats = normalizeTrainingStats(await idbGet<TrainingStatsState>(APP_TRAINING_STATS_KEY));
 
         if (persistedSettings) {
           setThemeMode(persistedSettings.themeMode);
@@ -1511,6 +1592,7 @@ function App() {
           setShowLichessArrows(persistedSettings.showLichessArrows);
           setShowStockfishArrows(persistedSettings.showStockfishArrows);
           setStockfishEvalSeconds(persistedSettings.stockfishEvalSeconds);
+          setTrainingStatsQueueLength(persistedSettings.trainingStatsQueueLength);
         }
 
         if (persisted) {
@@ -1538,6 +1620,7 @@ function App() {
           setSelectedNodeBySide({ white: whiteTree.rootId, black: blackTree.rootId });
           setUndoStackBySide({ white: [], black: [] });
         }
+        setTrainingStatsBySide(persistedTrainingStats ?? createEmptyTrainingStatsState());
         setStatus('Ready');
       } catch {
         setStatus('Local storage load failed');
@@ -1614,6 +1697,7 @@ function App() {
       showLichessArrows,
       showStockfishArrows,
       stockfishEvalSeconds,
+      trainingStatsQueueLength,
     };
 
     const timeout = window.setTimeout(() => {
@@ -1642,7 +1726,41 @@ function App() {
     showLichessArrows,
     showStockfishArrows,
     stockfishEvalSeconds,
+    trainingStatsQueueLength,
   ]);
+
+  useEffect(() => {
+    if (!hasHydratedAppState) return;
+    const timeout = window.setTimeout(() => {
+      void idbSet(APP_TRAINING_STATS_KEY, trainingStatsBySide).catch(() => {
+        setStatus('Local training stats save failed');
+      });
+    }, 120);
+
+    return () => window.clearTimeout(timeout);
+  }, [hasHydratedAppState, trainingStatsBySide]);
+
+  useEffect(() => {
+    setTrainingStatsBySide((prev) => {
+      let changed = false;
+      const next: TrainingStatsState = { white: {}, black: {} };
+      (['white', 'black'] as Side[]).forEach((side) => {
+        const sideScopes = prev[side];
+        const nextScopes: Record<string, Record<string, TrainingPositionStat>> = {};
+        Object.entries(sideScopes).forEach(([scopeId, fenStats]) => {
+          const nextFenStats: Record<string, TrainingPositionStat> = {};
+          Object.entries(fenStats).forEach(([fenKey, stat]) => {
+            const trimmed = stat.recentAnswers.slice(-trainingStatsQueueLength);
+            if (trimmed.length !== stat.recentAnswers.length) changed = true;
+            nextFenStats[fenKey] = { recentAnswers: trimmed };
+          });
+          nextScopes[scopeId] = nextFenStats;
+        });
+        next[side] = nextScopes;
+      });
+      return changed ? next : prev;
+    });
+  }, [trainingStatsQueueLength]);
 
   useEffect(() => {
     engineRunningRef.current = engineRunning;
@@ -1982,6 +2100,56 @@ function App() {
     );
   };
 
+  const getScopeIdsForTrainingPosition = (side: Side, fen: string) => {
+    const fenKey = positionFenKey(fen);
+    const repertoireScopeIds = repertoiresBySide[side]
+      .filter((repertoire) => repertoireHasMoves(repertoire.tree))
+      .filter((repertoire) =>
+        Object.values(repertoire.tree.nodes).some((node) => positionFenKey(node.fen) === fenKey),
+      )
+      .map((repertoire) => `repo:${repertoire.id}`);
+    return [TRAINING_SCOPE_WHOLE_DB, ...repertoireScopeIds];
+  };
+
+  const appendTrainingAnswer = (
+    side: Side,
+    fen: string,
+    scopeIds: string[],
+    answer: 0 | 1,
+  ) => {
+    if (scopeIds.length === 0) return;
+    const fenKey = positionFenKey(fen);
+    const uniqueScopeIds = Array.from(new Set(scopeIds));
+    setTrainingStatsBySide((prev) => {
+      const sideStats = prev[side];
+      let sideChanged = false;
+      const nextSideStats: Record<string, Record<string, TrainingPositionStat>> = { ...sideStats };
+
+      uniqueScopeIds.forEach((scopeId) => {
+        const scopeStats = nextSideStats[scopeId] ?? {};
+        const current = scopeStats[fenKey] ?? { recentAnswers: [] };
+        const nextRecentAnswers = [...current.recentAnswers, answer].slice(-trainingStatsQueueLength);
+        const unchanged =
+          nextRecentAnswers.length === current.recentAnswers.length &&
+          nextRecentAnswers.every((value, index) => value === current.recentAnswers[index]);
+        if (unchanged) return;
+        sideChanged = true;
+        nextSideStats[scopeId] = {
+          ...scopeStats,
+          [fenKey]: {
+            recentAnswers: nextRecentAnswers,
+          },
+        };
+      });
+
+      if (!sideChanged) return prev;
+      return {
+        ...prev,
+        [side]: nextSideStats,
+      };
+    });
+  };
+
   const advanceTrainingPosition = (
     side: Side,
     rootNodeId: string,
@@ -2050,6 +2218,37 @@ function App() {
     if (sideTree !== baseTree) {
       setTrees((prev) => ({ ...prev, [side]: sideTree }));
     }
+    const promptNode = sideTree.nodes[cursorId] ?? rootNode;
+    const promptTurnMatches = toTurnColor(promptNode.fen) === side;
+    const promptOptions = isBrowseMode
+      ? collectBrowseMoveOptionsAtFen(side, promptNode.fen).map((option) => option.moveUci)
+      : promptNode.children
+          .map((childId) => sideTree.nodes[childId]?.moveUci)
+          .filter((value): value is string => Boolean(value));
+    if (promptTurnMatches && promptOptions.length > 0) {
+      const scopeIds = getScopeIdsForTrainingPosition(side, promptNode.fen);
+      setTrainingSession((prev) =>
+        prev && prev.side === side && prev.rootNodeId === rootNodeId
+          ? {
+              ...prev,
+              currentPromptFen: promptNode.fen,
+              currentPromptHadError: false,
+              currentPromptScopeIds: scopeIds,
+            }
+          : prev,
+      );
+    } else {
+      setTrainingSession((prev) =>
+        prev && prev.side === side && prev.rootNodeId === rootNodeId
+          ? {
+              ...prev,
+              currentPromptFen: null,
+              currentPromptHadError: false,
+              currentPromptScopeIds: [],
+            }
+          : prev,
+      );
+    }
     setSelectedNodeBySide((prev) => ({ ...prev, [side]: cursorId }));
     clearTrainingHint();
   };
@@ -2065,6 +2264,9 @@ function App() {
       hintMoveUci: null,
       completedLeafNodeIds: [],
       errorCount: 0,
+      currentPromptFen: null,
+      currentPromptHadError: false,
+      currentPromptScopeIds: [],
     });
     advanceTrainingPosition(side, rootNodeId, rootNodeId);
     setPortraitTab('moves');
@@ -2078,6 +2280,31 @@ function App() {
     if (!trainingSession) return;
     clearTrainingHint();
     advanceTrainingPosition(trainingSession.side, trainingSession.rootNodeId, trainingSession.rootNodeId);
+  };
+
+  const getActiveTrainingStatsScopeId = (side: Side) =>
+    isBrowseMode || !activeRepertoireIdBySide[side] ? TRAINING_SCOPE_WHOLE_DB : `repo:${activeRepertoireIdBySide[side]}`;
+
+  const clearActiveTrainingStatistics = () => {
+    const scopeId = getActiveTrainingStatsScopeId(activeSide);
+    const confirmed = window.confirm('Clear training statistics for current scope?');
+    if (!confirmed) return;
+    setTrainingStatsBySide((prev) => {
+      const sideStats = prev[activeSide];
+      if (!sideStats[scopeId]) return prev;
+      const nextSideStats = { ...sideStats };
+      delete nextSideStats[scopeId];
+      return {
+        ...prev,
+        [activeSide]: nextSideStats,
+      };
+    });
+  };
+
+  const clearAllTrainingStatistics = () => {
+    const confirmed = window.confirm('Clear all training statistics?');
+    if (!confirmed) return;
+    setTrainingStatsBySide(createEmptyTrainingStatsState());
   };
 
   useEffect(() => {
@@ -2114,6 +2341,14 @@ function App() {
 
       const isAllowedMove = trainingOptions.includes(uci);
       if (!isAllowedMove) {
+        if (!trainingSession.currentPromptHadError) {
+          const scoredFen = trainingSession.currentPromptFen ?? currentNode.fen;
+          const scoredScopeIds =
+            trainingSession.currentPromptScopeIds.length > 0
+              ? trainingSession.currentPromptScopeIds
+              : getScopeIdsForTrainingPosition(activeSide, scoredFen);
+          appendTrainingAnswer(activeSide, scoredFen, scoredScopeIds, 0);
+        }
         const hintMoveUci = trainingOptions[Math.floor(Math.random() * trainingOptions.length)] ?? null;
         setTrainingSession((prev) =>
           prev && prev.side === activeSide
@@ -2123,10 +2358,20 @@ function App() {
               hintVisible: false,
               hintMoveUci,
               errorCount: prev.errorCount + 1,
+              currentPromptHadError: true,
             }
           : prev,
       );
         return;
+      }
+
+      const scoredFen = trainingSession.currentPromptFen ?? currentNode.fen;
+      const scoredScopeIds =
+        trainingSession.currentPromptScopeIds.length > 0
+          ? trainingSession.currentPromptScopeIds
+          : getScopeIdsForTrainingPosition(activeSide, scoredFen);
+      if (!trainingSession.currentPromptHadError) {
+        appendTrainingAnswer(activeSide, scoredFen, scoredScopeIds, 1);
       }
 
       let nextTreeForTraining = currentTree;
@@ -2565,6 +2810,10 @@ function App() {
 
   const lichessTotal = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
   const isTrainingActive = Boolean(trainingSession && trainingSession.side === activeSide);
+  useEffect(() => {
+    if (isTrainingActive) return;
+    setIsTrainingStatsMenuOpen(false);
+  }, [isTrainingActive]);
   const hasExportableDbGames = useMemo(
     () =>
       (['white', 'black'] as Side[]).some((side) =>
@@ -2906,6 +3155,16 @@ function App() {
     return new Set(trainingSession.completedLeafNodeIds).size;
   }, [trainingSession, activeSide]);
   const trainingProgressPct = trainingTotalLines > 0 ? Math.round((trainingAnsweredLines / trainingTotalLines) * 100) : 0;
+  const trainingPositionSuccessPct = useMemo(() => {
+    if (!isTrainingActive) return 0;
+    const sideStats = trainingStatsBySide[activeSide] ?? {};
+    const fenKey = positionFenKey(selectedNode.fen);
+    const scopeId = isBrowseMode || !activeRepertoireId ? TRAINING_SCOPE_WHOLE_DB : `repo:${activeRepertoireId}`;
+    const recentAnswers = sideStats[scopeId]?.[fenKey]?.recentAnswers ?? [];
+    if (recentAnswers.length === 0) return 0;
+    const correct = recentAnswers.reduce((acc, value) => acc + (value ? 1 : 0), 0);
+    return Math.round((correct / recentAnswers.length) * 100);
+  }, [isTrainingActive, trainingStatsBySide, activeSide, selectedNode.fen, isBrowseMode, activeRepertoireId]);
 
   useEffect(() => {
     if (!trainingSession || trainingSession.side !== activeSide) return;
@@ -3138,6 +3397,15 @@ function App() {
       return;
     }
     goBackOneMove();
+  };
+
+  const handleTrainButtonClick: MouseEventHandler<HTMLButtonElement> = () => {
+    if (isTrainingActive) {
+      stopTraining();
+      return;
+    }
+    if (!canStartTraining) return;
+    startTraining();
   };
 
   const clearDbButtonLongPress = () => {
@@ -3472,10 +3740,9 @@ function App() {
                 <button
                   type="button"
                   className={`${isTrainingActive ? 'active training-stop-btn' : ''}`}
-                  onClick={() => (isTrainingActive ? stopTraining() : startTraining())}
+                  onClick={handleTrainButtonClick}
                   aria-label={isTrainingActive ? 'Stop training' : 'Train'}
                   title={isTrainingActive ? 'Stop training' : 'Train'}
-                  disabled={!isTrainingActive && !canStartTraining}
                 >
                   {isTrainingActive ? 'Stop training' : <TrainIcon />}
                 </button>
@@ -3491,6 +3758,17 @@ function App() {
                     onClick={() => setTrainingSession((prev) => (prev ? { ...prev, hintVisible: true } : prev))}
                   >
                     Hint
+                  </button>
+                )}
+                {isTrainingActive && (
+                  <button
+                    type="button"
+                    className={`gear-btn training-stats-portrait-gear ${isTrainingStatsMenuOpen ? 'active' : ''}`}
+                    aria-label="Training statistics options"
+                    title="Training statistics options"
+                    onClick={() => setIsTrainingStatsMenuOpen((prev) => !prev)}
+                  >
+                    ⚙
                   </button>
                 )}
                 {!isTrainingActive && (
@@ -3596,21 +3874,76 @@ function App() {
             >
               {isTrainingActive ? (
                 <>
-                  <div className="controls-row">
-                    <button type="button" className="desktop-only stop-training-btn" onClick={stopTraining}>
-                      Stop train
+                  <div className="controls-row desktop-only">
+                    <button type="button" className="stop-training-btn" onClick={stopTraining}>
+                      Stop training
+                    </button>
+                    <button
+                      type="button"
+                      className="gear-btn training-stats-gear-btn"
+                      aria-label="Training statistics options"
+                      title="Training statistics options"
+                      onClick={() => setIsTrainingStatsMenuOpen((prev) => !prev)}
+                    >
+                      ⚙
                     </button>
                   </div>
-                  {!isBrowseMode && (
-                    <div className="training-repertoire-name" title={activeRepertoireName}>
-                      {activeSide}: {activeRepertoireName}
+                  {isTrainingStatsMenuOpen && (
+                    <div className="training-stats-dropdown">
+                      <div className="training-stats-menu-actions">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            clearActiveTrainingStatistics();
+                          }}
+                        >
+                          Clear stats
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            clearAllTrainingStatistics();
+                          }}
+                        >
+                          Clear all stats
+                        </button>
+                      </div>
+                      <div className="slider-stack single-column">
+                        <label>
+                          {`Stats FIFO length: ${trainingStatsQueueLength}`}
+                          <span className="slider-field">
+                            <input
+                              className="threshold-slider"
+                              type="range"
+                              min={TRAINING_STATS_QUEUE_MIN}
+                              max={TRAINING_STATS_QUEUE_MAX}
+                              step={1}
+                              value={trainingStatsQueueLength}
+                              onChange={(e) => {
+                                const next = Number.parseInt(e.target.value, 10);
+                                if (Number.isFinite(next)) {
+                                  setTrainingStatsQueueLength(
+                                    Math.min(TRAINING_STATS_QUEUE_MAX, Math.max(TRAINING_STATS_QUEUE_MIN, next)),
+                                  );
+                                }
+                              }}
+                            />
+                          </span>
+                        </label>
+                      </div>
                     </div>
                   )}
+                  <div className="training-repertoire-name" title={isBrowseMode ? `${activeSide}: whole db` : activeRepertoireName}>
+                    {isBrowseMode ? `${activeSide}: whole db` : `${activeSide}: ${activeRepertoireName}`}
+                  </div>
                   <div className="controls-row">
                     <span className="status">{`Progress: ${trainingAnsweredLines}/${trainingTotalLines} (${trainingProgressPct}%)`}</span>
                   </div>
                   <div className="controls-row">
                     <span className="status">{`Errors: ${trainingSession?.errorCount ?? 0}`}</span>
+                  </div>
+                  <div className="controls-row training-position-stats">
+                    <span className="status">{`This position success rate: ${trainingPositionSuccessPct}%`}</span>
                   </div>
                   <div className="controls-row">
                     {isTrainingLineEnd && (
@@ -3651,8 +3984,8 @@ function App() {
                     <button
                       className="desktop-only"
                       type="button"
-                      onClick={startTraining}
-                      disabled={!canStartTraining}
+                      onClick={handleTrainButtonClick}
+                      title="Train"
                     >
                       Train
                     </button>
