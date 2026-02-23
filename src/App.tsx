@@ -4096,7 +4096,7 @@ function App() {
                   </div>
                   {trainingRepoOverallSuccessPct !== null && (
                     <div className="controls-row training-position-stats">
-                      <span className="status">{`Overall repo success rate: ${trainingRepoOverallSuccessPct}%`}</span>
+                      <span className="status">{`Overall success rate: ${trainingRepoOverallSuccessPct}%`}</span>
                     </div>
                   )}
                   <div className="controls-row">
