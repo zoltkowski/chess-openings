@@ -1884,8 +1884,8 @@ function App() {
             black: blackTree,
           });
           setSelectedNodeBySide({
-            white: whiteActive?.selectedNodeId ?? whiteTree.rootId,
-            black: blackActive?.selectedNodeId ?? blackTree.rootId,
+            white: whiteTree.rootId,
+            black: blackTree.rootId,
           });
           setUndoStackBySide({ white: [], black: [] });
         } else {
