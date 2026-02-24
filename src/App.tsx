@@ -2758,7 +2758,7 @@ function App() {
 
     if (isAndroid) {
       const fallbackUrl = encodeURIComponent(url);
-      const intentUrl = `intent://lichess.org/analysis/${encodedFenPath}?color=${boardOrientation}#Intent;scheme=https;package=org.lichess.mobileapp;S.browser_fallback_url=${fallbackUrl};end`;
+      const intentUrl = `intent://lichess.org/analysis/${encodedFenPath}?color=${boardOrientation}#Intent;scheme=https;package=org.lichess.mobileV2;S.browser_fallback_url=${fallbackUrl};end`;
       window.location.href = intentUrl;
       return;
     }
