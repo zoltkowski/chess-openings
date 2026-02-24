@@ -59,7 +59,7 @@ select {
   margin-left: auto;
 }
 
-.move-list .controls-row > button:not(.hamburger-btn):not(.icon-toggle-btn):not(.continue-training-btn):not(.stop-training-btn):not(.back-btn) {
+.move-list .controls-row > button:not(.hamburger-btn):not(.icon-toggle-btn):not(.continue-training-btn):not(.stop-training-btn):not(.back-btn):not(.flashcard-toggle-btn):not(.sudden-death-toggle-btn) {
   width: 2.6rem;
   min-width: 2.6rem;
   height: 2.2rem;
@@ -68,11 +68,58 @@ select {
   text-align: center;
 }
 
+.flashcard-toggle-btn {
+  width: auto;
+}
+
+.sudden-death-toggle-btn {
+  width: auto;
+}
+
+.mode-icon-btn {
+  width: 2.2rem;
+  min-width: 2.2rem;
+  height: 2.2rem;
+  padding: 0.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.has-submenu-dot {
+  position: relative;
+}
+
+.has-submenu-dot::after {
+  content: "•";
+  position: absolute;
+  right: 0.16rem;
+  bottom: 0.08rem;
+  font-size: 0.55rem;
+  line-height: 1;
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.flashcard-toggle-btn.active {
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+
+.sudden-death-toggle-btn.active {
+  background: #fee2e2;
+  border-color: #fca5a5;
+}
+
 .controls-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
+}
+
+.controls-row-break {
+  display: none;
 }
 
 .controls-row label {
@@ -150,7 +197,7 @@ select {
 
 .board-row {
   display: grid;
-  grid-template-columns: 460px minmax(520px, 1fr) 430px;
+  grid-template-columns: minmax(clamp(300px, 34vw, 420px), 1fr) minmax(clamp(220px, 28vw, 500px), 760px) minmax(clamp(300px, 34vw, 420px), 1fr);
   gap: 1rem;
   align-items: start;
   width: 100%;
@@ -160,7 +207,7 @@ select {
 }
 
 .board-row.training-mode {
-  grid-template-columns: 460px minmax(520px, 1fr) 430px;
+  grid-template-columns: minmax(clamp(300px, 34vw, 420px), 1fr) minmax(clamp(220px, 28vw, 500px), 760px) minmax(clamp(300px, 34vw, 420px), 1fr);
 }
 
 .board-row.training-mode .board-center {
@@ -344,6 +391,12 @@ select {
   .move-list .move-notation-line {
     min-height: 10.5rem;
   }
+
+  .move-list .controls-row .controls-row-break {
+    display: block;
+    flex-basis: 100%;
+    height: 0;
+  }
 }
 
 .move-inline-item {
@@ -426,6 +479,17 @@ select {
   border-top: 1px solid #e5ebf3;
   font-size: 0.78rem;
   color: #475569;
+}
+
+.repertoire-hit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
+.repertoire-hit-block.move-tools-only {
+  margin-top: 0.45rem;
 }
 
 .repertoire-hit-list {
@@ -601,6 +665,13 @@ select {
   gap: 0.4rem;
 }
 
+.lichess-rate-limit-note {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+  opacity: 0.92;
+}
+
 .player-handle-row {
   display: inline-flex;
   align-items: center;
@@ -662,6 +733,21 @@ select {
   width: 8rem;
 }
 
+.move-list .controls-row > button.next-missing-btn {
+  width: auto;
+  min-width: 3rem;
+}
+
+.move-list .controls-row > button.next-missing-btn svg {
+  width: 1rem;
+  height: 1rem;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+}
+
 .move-list .controls-row > button.stop-training-btn {
   width: auto;
   min-width: 7.5rem;
@@ -685,6 +771,17 @@ select {
   margin: 0.1rem 0 0.35rem;
   display: grid;
   gap: 0.2rem;
+}
+
+.training-thinking-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.training-game-over-row .status {
+  color: #b91c1c;
+  font-weight: 600;
 }
 
 .training-position-stats-row {
@@ -762,6 +859,10 @@ select {
     line-height: 1;
     opacity: 0.72;
     pointer-events: none;
+  }
+
+  .portrait-tabbar > button.training-stop-btn.long-pressable-btn::after {
+    content: none;
   }
 
 .tab-icon {
@@ -1079,6 +1180,118 @@ select {
   max-width: calc(100vw - 2rem);
 }
 
+.move-tools-modal {
+  width: min(360px, calc(100vw - 2rem));
+  max-width: calc(100vw - 2rem);
+}
+
+.sudden-death-settings-modal {
+  width: min(360px, calc(100vw - 2rem));
+  max-width: calc(100vw - 2rem);
+}
+
+.eval-manager-modal {
+  width: min(420px, calc(100vw - 2rem));
+  max-width: calc(100vw - 2rem);
+}
+
+.eval-manager-title {
+  margin: 0 0 0.55rem;
+  font-size: 1rem;
+}
+
+.eval-progress-block {
+  margin-bottom: 0.65rem;
+}
+
+.eval-progress-label {
+  font-size: 0.82rem;
+  color: #475569;
+  margin-bottom: 0.2rem;
+}
+
+.eval-progress-track {
+  width: 100%;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.eval-progress-fill {
+  height: 100%;
+}
+
+.eval-progress-fill.cloud {
+  background: #2563eb;
+}
+
+.eval-progress-fill.local {
+  background: #16a34a;
+}
+
+.eval-manager-summary {
+  margin-top: 0.25rem;
+  font-size: 0.82rem;
+  color: #475569;
+}
+
+.eval-manager-actions {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.db-stats-modal {
+  width: min(620px, calc(100vw - 2rem));
+  max-width: calc(100vw - 2rem);
+}
+
+.db-stats-side {
+  margin-top: 0.65rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid #e5ebf3;
+}
+
+.db-stats-side h4 {
+  margin: 0 0 0.45rem;
+  text-transform: capitalize;
+  font-size: 0.95rem;
+}
+
+.db-stats-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.db-stats-item {
+  border: 1px solid #e5ebf3;
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+}
+
+.db-stats-name {
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.db-stats-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  font-size: 0.82rem;
+  color: #475569;
+}
+
+.db-stats-training {
+  margin-top: 0.3rem;
+  gap: 0.45rem 0.7rem;
+}
+
 .training-stats-menu-actions {
   display: grid;
   gap: 0.4rem;
@@ -1101,9 +1314,31 @@ select {
 .app.theme-dark .current-repertoire,
 .app.theme-dark .training-repertoire-name,
 .app.theme-dark .training-position-stats-row,
+.app.theme-dark .eval-progress-label,
+.app.theme-dark .eval-manager-summary,
 .app.theme-dark .move-inline-prefix,
 .app.theme-dark .tree-option-leaves,
 .app.theme-dark .move-table th {
+  color: #cbd5e1;
+}
+
+.app.theme-dark .training-game-over-row .status {
+  color: #fca5a5;
+}
+
+.app.theme-dark .eval-progress-track {
+  background: #334155;
+}
+
+.app.theme-dark .db-stats-side {
+  border-top-color: #334155;
+}
+
+.app.theme-dark .db-stats-item {
+  border-color: #334155;
+}
+
+.app.theme-dark .db-stats-values {
   color: #cbd5e1;
 }
 
@@ -1124,6 +1359,18 @@ select {
 .app.theme-dark .current-repertoire.active-repertoire,
 .app.theme-dark .training-repertoire-name {
   color: #4ade80;
+}
+
+.app.theme-dark .flashcard-toggle-btn.active {
+  background: #1d4ed8;
+  border-color: #60a5fa;
+  color: #eff6ff;
+}
+
+.app.theme-dark .sudden-death-toggle-btn.active {
+  background: #7f1d1d;
+  border-color: #ef4444;
+  color: #fee2e2;
 }
 
 .app.theme-dark .repertoire-hit-item.active {
@@ -1239,7 +1486,7 @@ select {
   border-top-color: #60a5fa;
 }
 
-@media (max-width: 1200px) {
+@media (max-width: 1080px) and (orientation: portrait) {
   .board-row {
     grid-template-columns: 1fr;
     height: auto;
@@ -1355,7 +1602,7 @@ select {
     min-width: 4.7rem;
     padding: 0.35rem 0.6rem;
     position: absolute;
-    left: 50%;
+    left: 63%;
     transform: translateX(-50%);
   }
 

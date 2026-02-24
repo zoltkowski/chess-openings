@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -77,6 +78,11 @@ type UndoSnapshot = {
 type TrainingSession = {
   side: Side;
   rootNodeId: string;
+  entryNodeId: string;
+  flashcardMode: boolean;
+  suddenDeathMode: boolean;
+  suddenDeathBaseEvalCp: number | null;
+  suddenDeathPromptFen: string | null;
   hintRequested: boolean;
   hintVisible: boolean;
   hintMoveUci: string | null;
@@ -94,6 +100,21 @@ type TrainingPositionStat = {
 
 type TrainingStatsState = Record<Side, Record<string, Record<string, TrainingPositionStat>>>;
 type TrainingLeafLastShownState = Record<Side, Record<string, Record<string, number>>>;
+type EvalPassProgress = { done: number; total: number };
+type TreeEvalProgressState = {
+  running: boolean;
+  phase: 'idle' | 'cloud' | 'local' | 'done';
+  cloud: EvalPassProgress;
+  local: EvalPassProgress;
+};
+
+type SuddenDeathGameOverState = {
+  side: Side;
+  startNodeId: string;
+  baselineEvalCp: number;
+  failedEvalCp: number;
+  thresholdCp: number;
+};
 
 type PersistedAppState = {
   version: 2;
@@ -140,6 +161,11 @@ type PersistedSettingsState = {
   showStockfishArrows: boolean;
   stockfishEvalSeconds: number;
   trainingStatsQueueLength: number;
+  suddenDeathThreshold: number;
+  suddenDeathMinMoves: number;
+  suddenDeathStockfishElo: number;
+  suddenDeathMaxThinkTimeSec: number;
+  nextMissingMoveThreshold: MoveThreshold;
 };
 
 const START_FEN = 'start';
@@ -178,6 +204,20 @@ const APP_TRAINING_LEAF_LAST_SHOWN_KEY = 'training-leaf-last-shown-v1';
 const TRAINING_SCOPE_WHOLE_DB = 'whole-db';
 const TRAINING_STATS_QUEUE_MIN = 1;
 const TRAINING_STATS_QUEUE_MAX = 30;
+const SUDDEN_DEATH_THRESHOLD_MIN = 0;
+const SUDDEN_DEATH_THRESHOLD_MAX = 3;
+const SUDDEN_DEATH_MIN_MOVES_MIN = 0;
+const SUDDEN_DEATH_MIN_MOVES_MAX = 30;
+const SUDDEN_DEATH_STOCKFISH_ELO_MIN = 1200;
+const SUDDEN_DEATH_STOCKFISH_ELO_MAX = 3000;
+const SUDDEN_DEATH_THINK_TIME_MIN = 0.2;
+const SUDDEN_DEATH_THINK_TIME_MAX = 5;
+// Conservative pacing for explorer API requests to avoid 429 and respect public API usage guidance.
+const LICHESS_API_MIN_INTERVAL_MS = 2000;
+const LICHESS_API_COOLDOWN_FALLBACK_MS = 120000;
+const CLOUD_EVAL_MIN_INTERVAL_MS = 1400;
+const CLOUD_EVAL_RETRY_FALLBACK_MS = 4000;
+const CLOUD_EVAL_MAX_RETRIES = 3;
 
 function createRepertoireId(side: Side) {
   const randomPart =
@@ -190,6 +230,23 @@ function createRepertoireId(side: Side) {
 function normalizeRepertoireName(value: string) {
   const trimmed = value.trim().replace(/\s+/g, ' ');
   return trimmed || 'Untitled repertoire';
+}
+
+function waitMs(ms: number) {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function parseRetryAfterMs(retryAfter: string | null) {
+  if (!retryAfter) return null;
+  const seconds = Number.parseInt(retryAfter, 10);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const dateMs = Date.parse(retryAfter);
+  if (Number.isNaN(dateMs)) return null;
+  const delta = dateMs - Date.now();
+  return delta > 0 ? delta : 0;
 }
 
 function repertoireHasMoves(tree: MoveTree) {
@@ -378,6 +435,40 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
       TRAINING_STATS_QUEUE_MIN,
       TRAINING_STATS_QUEUE_MAX,
       5,
+    ),
+    suddenDeathThreshold:
+      typeof (parsed as Partial<PersistedSettingsState>).suddenDeathThreshold === 'number' &&
+      Number.isFinite((parsed as Partial<PersistedSettingsState>).suddenDeathThreshold)
+        ? Math.min(
+            SUDDEN_DEATH_THRESHOLD_MAX,
+            Math.max(SUDDEN_DEATH_THRESHOLD_MIN, (parsed as Partial<PersistedSettingsState>).suddenDeathThreshold as number),
+          )
+        : 1,
+    suddenDeathMinMoves: clampInt(
+      (parsed as Partial<PersistedSettingsState>).suddenDeathMinMoves,
+      SUDDEN_DEATH_MIN_MOVES_MIN,
+      SUDDEN_DEATH_MIN_MOVES_MAX,
+      4,
+    ),
+    suddenDeathStockfishElo: clampInt(
+      (parsed as Partial<PersistedSettingsState>).suddenDeathStockfishElo,
+      SUDDEN_DEATH_STOCKFISH_ELO_MIN,
+      SUDDEN_DEATH_STOCKFISH_ELO_MAX,
+      2000,
+    ),
+    suddenDeathMaxThinkTimeSec:
+      typeof (parsed as Partial<PersistedSettingsState>).suddenDeathMaxThinkTimeSec === 'number' &&
+      Number.isFinite((parsed as Partial<PersistedSettingsState>).suddenDeathMaxThinkTimeSec)
+        ? Math.min(
+            SUDDEN_DEATH_THINK_TIME_MAX,
+            Math.max(
+              SUDDEN_DEATH_THINK_TIME_MIN,
+              (parsed as Partial<PersistedSettingsState>).suddenDeathMaxThinkTimeSec as number,
+            ),
+          )
+        : 1,
+    nextMissingMoveThreshold: normalizeMoveThreshold(
+      (parsed as Partial<PersistedSettingsState>).nextMissingMoveThreshold,
     ),
   };
 }
@@ -622,6 +713,34 @@ function positionFenKey(fen: string) {
   const fullFen = boardFen(fen);
   const parts = fullFen.split(' ');
   return parts.slice(0, 4).join(' ');
+}
+
+function FlashcardIcon() {
+  return (
+    <TabIconBase>
+      <rect x="4.5" y="5.5" width="15" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="1.9" />
+      <path d="M8 9h8M8 12h5" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+    </TabIconBase>
+  );
+}
+
+function SuddenDeathIcon() {
+  return (
+    <TabIconBase>
+      <path d="M12 3.8L5.8 12.1h4.1L8.7 20.2l7.5-10.1h-4.1z" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" />
+    </TabIconBase>
+  );
+}
+
+function weightedPickIndex(weights: number[]) {
+  const total = weights.reduce((acc, value) => acc + Math.max(0, value), 0);
+  if (total <= 0) return -1;
+  let roll = Math.random() * total;
+  for (let i = 0; i < weights.length; i += 1) {
+    roll -= Math.max(0, weights[i]);
+    if (roll <= 0) return i;
+  }
+  return weights.length - 1;
 }
 
 function whitePerspectiveMultiplierFromFen(fen: string) {
@@ -965,6 +1084,69 @@ function formatGamesCount(value: number) {
   return `${Math.floor(value)}`;
 }
 
+function formatSignedCp(cp: number) {
+  const normalized = Number.isFinite(cp) ? cp : 0;
+  const sign = normalized >= 0 ? '+' : '-';
+  return `${sign}${(Math.abs(normalized) / 100).toFixed(2)}`;
+}
+
+function formatSignedMate(mate: number) {
+  if (!Number.isFinite(mate)) return '?';
+  if (mate === 0) return 'M0';
+  const sign = mate > 0 ? '+' : '-';
+  return `${sign}M${Math.abs(mate)}`;
+}
+
+function normalizeEvalSignText(raw: string) {
+  const text = raw.trim();
+  const cpMatch = text.match(/^[+-]?\d+(?:\.\d+)?$/);
+  if (cpMatch) {
+    const value = Number(text);
+    if (!Number.isFinite(value)) return text;
+    const sign = value >= 0 ? '+' : '-';
+    return `${sign}${Math.abs(value).toFixed(2)}`;
+  }
+
+  const mateClassic = text.match(/^M(-?\d+)$/i);
+  if (mateClassic) {
+    const mate = Number(mateClassic[1]);
+    if (!Number.isFinite(mate)) return text;
+    return formatSignedMate(mate);
+  }
+
+  const mateSigned = text.match(/^([+-])M(\d+)$/i);
+  if (mateSigned) {
+    const direction = mateSigned[1] === '-' ? -1 : 1;
+    const distance = Number(mateSigned[2]);
+    if (!Number.isFinite(distance)) return text;
+    return formatSignedMate(direction * distance);
+  }
+
+  return text;
+}
+
+function formatRelativeTimeFromNow(timestamp: number) {
+  const elapsedMs = Date.now() - timestamp;
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return 'just now';
+  const elapsedSec = Math.floor(elapsedMs / 1000);
+  if (elapsedSec < 60) return 'just now';
+  const elapsedMin = Math.floor(elapsedSec / 60);
+  if (elapsedMin < 60) return `${elapsedMin}m ago`;
+  const elapsedHours = Math.floor(elapsedMin / 60);
+  if (elapsedHours < 24) return `${elapsedHours}h ago`;
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  if (elapsedDays < 30) return `${elapsedDays}d ago`;
+  const elapsedMonths = Math.floor(elapsedDays / 30);
+  if (elapsedMonths < 12) return `${elapsedMonths}mo ago`;
+  const elapsedYears = Math.floor(elapsedMonths / 12);
+  return `${elapsedYears}y ago`;
+}
+
+function formatTrainedAt(timestamp: number | null) {
+  if (!timestamp) return 'never';
+  return `${new Date(timestamp).toLocaleString()} (${formatRelativeTimeFromNow(timestamp)})`;
+}
+
 function percentValue(value: number, total: number) {
   if (total <= 0) return 0;
   return (value / total) * 100;
@@ -1288,6 +1470,10 @@ function App() {
   const initialSelectedRatings: number[] = [2000, 2200, 2500];
   const initialSelectedModes: string[] = [...MODES];
   const initialTrainingStatsQueueLength = 5;
+  const initialSuddenDeathThreshold = 1;
+  const initialSuddenDeathMinMoves = 4;
+  const initialSuddenDeathStockfishElo = 2000;
+  const initialSuddenDeathMaxThinkTimeSec = 1;
   const initialWhiteTree = createEmptyTree('white');
   const initialBlackTree = createEmptyTree('black');
 
@@ -1314,6 +1500,10 @@ function App() {
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
   const [stockfishEvalSeconds, setStockfishEvalSeconds] = useState(10);
   const [trainingStatsQueueLength, setTrainingStatsQueueLength] = useState(initialTrainingStatsQueueLength);
+  const [suddenDeathThreshold, setSuddenDeathThreshold] = useState(initialSuddenDeathThreshold);
+  const [suddenDeathMinMoves, setSuddenDeathMinMoves] = useState(initialSuddenDeathMinMoves);
+  const [suddenDeathStockfishElo, setSuddenDeathStockfishElo] = useState(initialSuddenDeathStockfishElo);
+  const [suddenDeathMaxThinkTimeSec, setSuddenDeathMaxThinkTimeSec] = useState(initialSuddenDeathMaxThinkTimeSec);
   const [engineMultiPv, setEngineMultiPv] = useState(3);
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
@@ -1323,6 +1513,7 @@ function App() {
   const [lichessDataFen, setLichessDataFen] = useState<string | null>(null);
   const [openingByFen, setOpeningByFen] = useState<Record<string, { eco: string; name: string }>>({});
   const [lichessStatus, setLichessStatus] = useState('idle');
+  const [lichessRateLimitedUntil, setLichessRateLimitedUntil] = useState<number | null>(null);
   const [showTreeArrows, setShowTreeArrows] = useState(true);
   const [showLichessArrows, setShowLichessArrows] = useState(true);
   const [showLichessOnTreeMoves, setShowLichessOnTreeMoves] = useState(true);
@@ -1366,9 +1557,14 @@ function App() {
   const [trainingLeafLastShownBySide, setTrainingLeafLastShownBySide] = useState<TrainingLeafLastShownState>(
     createEmptyTrainingLeafLastShownState(),
   );
-  const [treeEvalProgress, setTreeEvalProgress] = useState<{ running: boolean; done: number; total: number } | null>(
-    null,
-  );
+  const [suddenDeathGameOver, setSuddenDeathGameOver] = useState<SuddenDeathGameOverState | null>(null);
+  const [suddenDeathStartNodeId, setSuddenDeathStartNodeId] = useState<string | null>(null);
+  const [suddenDeathCurrentFen, setSuddenDeathCurrentFen] = useState<string | null>(null);
+  const [suddenDeathLastMove, setSuddenDeathLastMove] = useState<[Key, Key] | null>(null);
+  const [treeEvalProgress, setTreeEvalProgress] = useState<TreeEvalProgressState | null>(null);
+  const [isEvalManagerOpen, setIsEvalManagerOpen] = useState(false);
+  const [isDbStatsOpen, setIsDbStatsOpen] = useState(false);
+  const [suddenDeathThinking, setSuddenDeathThinking] = useState(false);
 
   const stockfishRef = useRef<Worker | null>(null);
   const engineReadyRef = useRef(false);
@@ -1385,7 +1581,16 @@ function App() {
     null,
   );
   const treeEvalCancelRef = useRef(false);
+  const treeEvalFenCacheRef = useRef<Map<string, string>>(new Map());
   const engineWhitePerspectiveMultiplierRef = useRef(1);
+  const suddenDeathBusyRef = useRef(false);
+  const suddenDeathAwaiterRef = useRef<{
+    perspectiveMultiplier: number;
+    latestEvalCp: number;
+    latestScoreText: string;
+    resolve: (result: { scoreText: string; evalCp: number; bestMove: string | null }) => void;
+    timeoutId: number | null;
+  } | null>(null);
   const treeOptionLongPressTimeoutRef = useRef<number | null>(null);
   const treeOptionLongPressHandledNodeRef = useRef<string | null>(null);
   const inlineMoveLongPressTimeoutRef = useRef<number | null>(null);
@@ -1394,8 +1599,25 @@ function App() {
   const stockfishButtonLongPressHandledRef = useRef(false);
   const [isStockfishQuickOpen, setIsStockfishQuickOpen] = useState(false);
   const [isTrainingStatsMenuOpen, setIsTrainingStatsMenuOpen] = useState(false);
+  const [isSuddenDeathSettingsOpen, setIsSuddenDeathSettingsOpen] = useState(false);
+  const [isMoveToolsOpen, setIsMoveToolsOpen] = useState(false);
   const dbButtonLongPressTimeoutRef = useRef<number | null>(null);
   const dbButtonLongPressHandledRef = useRef(false);
+  const trainButtonLongPressTimeoutRef = useRef<number | null>(null);
+  const trainButtonLongPressHandledRef = useRef(false);
+  const suddenDeathButtonLongPressTimeoutRef = useRef<number | null>(null);
+  const suddenDeathButtonLongPressHandledRef = useRef(false);
+  const movesButtonLongPressTimeoutRef = useRef<number | null>(null);
+  const movesButtonLongPressHandledRef = useRef(false);
+  const [findMissingSearchBaseNodeId, setFindMissingSearchBaseNodeId] = useState<string | null>(null);
+  const [findMissingSearchCursorNodeId, setFindMissingSearchCursorNodeId] = useState<string | null>(null);
+  const findMissingSearchAutoNavigationRef = useRef(false);
+  const [isFindMissingSearchRunning, setIsFindMissingSearchRunning] = useState(false);
+  const lichessNodeLookupCacheRef = useRef<Map<string, LichessResponse | null>>(new Map());
+  const lichessRateLimitedUntilRef = useRef(0);
+  const lichessNextRequestAtRef = useRef(0);
+  const lichessRequestQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const trainingStatsMenuRef = useRef<HTMLDivElement | null>(null);
   const movePaneRef = useRef<HTMLElement | null>(null);
   const backLongPressTimeoutRef = useRef<number | null>(null);
   const backLongPressHandledRef = useRef(false);
@@ -1414,10 +1636,19 @@ function App() {
   const newRepertoireSide: Side = boardOrientation;
   const loadRepertoireSide: Side = boardOrientation;
   const loadableRepertoiresForBoardSide = repertoiresBySide[loadRepertoireSide];
+  const hasSideTrainingContent = useCallback(
+    (side: Side) => {
+      const sideActiveRepertoireId = activeRepertoireIdBySide[side];
+      if (sideActiveRepertoireId) return repertoireHasMoves(trees[side]);
+      return repertoiresBySide[side].some((repertoire) => repertoireHasMoves(repertoire.tree));
+    },
+    [activeRepertoireIdBySide, trees, repertoiresBySide],
+  );
+  const canStartTrainingForActiveSide = hasSideTrainingContent(activeSide);
   const tree = trees[activeSide];
   const selectedNodeId = selectedNodeBySide[activeSide] ?? tree.rootId;
   const selectedNode = tree.nodes[selectedNodeId] ?? tree.nodes[tree.rootId];
-  const trainingForActive = trainingSession?.side === activeSide;
+  const trainingForActive = trainingSession?.side === activeSide && !trainingSession.suddenDeathMode;
   const isTreeEvalRunning = Boolean(treeEvalProgress?.running);
 
   const path = useMemo(() => buildPath(tree, selectedNode.id), [tree, selectedNode.id]);
@@ -1635,6 +1866,10 @@ function App() {
           setShowStockfishArrows(persistedSettings.showStockfishArrows);
           setStockfishEvalSeconds(persistedSettings.stockfishEvalSeconds);
           setTrainingStatsQueueLength(persistedSettings.trainingStatsQueueLength);
+          setSuddenDeathThreshold(persistedSettings.suddenDeathThreshold);
+          setSuddenDeathMinMoves(persistedSettings.suddenDeathMinMoves);
+          setSuddenDeathStockfishElo(persistedSettings.suddenDeathStockfishElo);
+          setSuddenDeathMaxThinkTimeSec(persistedSettings.suddenDeathMaxThinkTimeSec);
         }
 
         if (persisted) {
@@ -1741,6 +1976,11 @@ function App() {
       showStockfishArrows,
       stockfishEvalSeconds,
       trainingStatsQueueLength,
+      suddenDeathThreshold,
+      suddenDeathMinMoves,
+      suddenDeathStockfishElo,
+      suddenDeathMaxThinkTimeSec,
+      nextMissingMoveThreshold: lichessArrowThreshold,
     };
 
     const timeout = window.setTimeout(() => {
@@ -1770,6 +2010,10 @@ function App() {
     showStockfishArrows,
     stockfishEvalSeconds,
     trainingStatsQueueLength,
+    suddenDeathThreshold,
+    suddenDeathMinMoves,
+    suddenDeathStockfishElo,
+    suddenDeathMaxThinkTimeSec,
   ]);
 
   useEffect(() => {
@@ -1864,6 +2108,21 @@ function App() {
       }
 
       if (text.startsWith('info ') && text.includes(' pv ') && text.includes(' multipv ')) {
+        if (suddenDeathAwaiterRef.current && text.includes(' multipv 1')) {
+          const cpMatch = text.match(/ score cp (-?\d+)/);
+          const mateMatch = text.match(/ score mate (-?\d+)/);
+          if (cpMatch) {
+            suddenDeathAwaiterRef.current.latestEvalCp =
+              Number(cpMatch[1]) * suddenDeathAwaiterRef.current.perspectiveMultiplier;
+            suddenDeathAwaiterRef.current.latestScoreText =
+              formatSignedCp(suddenDeathAwaiterRef.current.latestEvalCp);
+          } else if (mateMatch) {
+            const matePly = Number(mateMatch[1]) * suddenDeathAwaiterRef.current.perspectiveMultiplier;
+            suddenDeathAwaiterRef.current.latestEvalCp = matePly > 0 ? 100000 : -100000;
+            suddenDeathAwaiterRef.current.latestScoreText = formatSignedMate(matePly);
+          }
+        }
+
         const multipvMatch = text.match(/ multipv (\d+)/);
         const cpMatch = text.match(/ score cp (-?\d+)/);
         const mateMatch = text.match(/ score mate (-?\d+)/);
@@ -1878,9 +2137,9 @@ function App() {
         const normalizedCp = cpMatch ? Number(cpMatch[1]) * perspective : null;
         const normalizedMate = mateMatch ? Number(mateMatch[1]) * perspective : null;
         const scoreText = cpMatch
-          ? `${(normalizedCp! / 100).toFixed(2)}`
+          ? formatSignedCp(normalizedCp!)
           : mateMatch
-            ? `M${normalizedMate}`
+            ? formatSignedMate(normalizedMate!)
             : '?';
         const evalValue = cpMatch
           ? Number(cpMatch[1])
@@ -1897,6 +2156,18 @@ function App() {
       }
 
       if (text.startsWith('bestmove')) {
+        if (suddenDeathAwaiterRef.current) {
+          const awaiter = suddenDeathAwaiterRef.current;
+          suddenDeathAwaiterRef.current = null;
+          if (awaiter.timeoutId !== null) window.clearTimeout(awaiter.timeoutId);
+          const bestMove = text.split(' ')[1] || null;
+          awaiter.resolve({
+            scoreText: awaiter.latestScoreText,
+            evalCp: awaiter.latestEvalCp,
+            bestMove,
+          });
+          return;
+        }
         isSearchingRef.current = false;
         if (treeEvalAwaiterRef.current) {
           const { latestScore, resolve } = treeEvalAwaiterRef.current;
@@ -1912,6 +2183,11 @@ function App() {
 
     return () => {
       tryStartPendingRef.current = null;
+      const suddenDeathAwaiter = suddenDeathAwaiterRef.current;
+      if (suddenDeathAwaiter?.timeoutId !== null && suddenDeathAwaiter?.timeoutId !== undefined) {
+        window.clearTimeout(suddenDeathAwaiter.timeoutId);
+      }
+      suddenDeathAwaiterRef.current = null;
       worker.terminate();
       stockfishRef.current = null;
       engineReadyRef.current = false;
@@ -1947,13 +2223,81 @@ function App() {
   }, [selectedNode.fen, engineRunning]);
 
   useEffect(() => {
+    lichessRateLimitedUntilRef.current = lichessRateLimitedUntil ?? 0;
+  }, [lichessRateLimitedUntil]);
+
+  useEffect(() => {
+    if (!lichessRateLimitedUntil) return;
+    const remainingMs = lichessRateLimitedUntil - Date.now();
+    if (remainingMs <= 0) {
+      setLichessRateLimitedUntil(null);
+      if (lichessStatus === 'limited') setLichessStatus('idle');
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      setLichessRateLimitedUntil(null);
+      setLichessStatus((prev) => (prev === 'limited' ? 'idle' : prev));
+    }, remainingMs + 50);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [lichessRateLimitedUntil, lichessStatus]);
+
+  const registerLichessRateLimit = useCallback((retryAfterHeader: string | null) => {
+    const retryAfterMs = parseRetryAfterMs(retryAfterHeader) ?? LICHESS_API_COOLDOWN_FALLBACK_MS;
+    const nextUntil = Date.now() + Math.max(1000, retryAfterMs);
+    lichessRateLimitedUntilRef.current = Math.max(lichessRateLimitedUntilRef.current, nextUntil);
+    setLichessRateLimitedUntil((prev) => Math.max(prev ?? 0, nextUntil));
+    setLichessData(null);
+    setLichessDataFen(null);
+    setLichessStatus('limited');
+  }, []);
+
+  const waitForLichessRateSlot = useCallback(async () => {
+    let release!: () => void;
+    const previous = lichessRequestQueueRef.current;
+    lichessRequestQueueRef.current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      const now = Date.now();
+      if (now < lichessRateLimitedUntilRef.current) return false;
+      const wait = Math.max(0, lichessNextRequestAtRef.current - now);
+      if (wait > 0) await waitMs(wait);
+      lichessNextRequestAtRef.current = Date.now() + LICHESS_API_MIN_INTERVAL_MS;
+      return true;
+    } finally {
+      release();
+    }
+  }, []);
+
+  useEffect(() => {
     const controller = new AbortController();
     const isPlayerWithoutHandle = lichessSource === 'player' && playerHandle.trim().length === 0;
+    const isTrainingLocalPlay = Boolean(trainingSession?.side === activeSide);
+    const isRateLimited = Date.now() < lichessRateLimitedUntilRef.current;
 
     if (isPlayerWithoutHandle) {
       setLichessData(null);
       setLichessDataFen(null);
       setLichessStatus('idle');
+      return () => {
+        controller.abort();
+      };
+    }
+
+    if (isTrainingLocalPlay) {
+      setLichessStatus('idle');
+      return () => {
+        controller.abort();
+      };
+    }
+
+    if (isRateLimited) {
+      setLichessData(null);
+      setLichessDataFen(null);
+      setLichessStatus('limited');
       return () => {
         controller.abort();
       };
@@ -2072,9 +2416,15 @@ function App() {
 
       let latestData: LichessResponse | null = null;
       try {
+        const allowed = await waitForLichessRateSlot();
+        if (!allowed || controller.signal.aborted) return;
         const res = await fetch(url, {
           signal: controller.signal,
         });
+        if (res.status === 429) {
+          registerLichessRateLimit(res.headers.get('Retry-After'));
+          return;
+        }
         if (!res.ok) throw new Error('Lichess request failed');
         const body = res.body;
         if (body) {
@@ -2146,7 +2496,182 @@ function App() {
     lichessSource,
     playerHandle,
     activeSide,
+    trainingSession?.side,
+    lichessRateLimitedUntil,
+    registerLichessRateLimit,
+    waitForLichessRateSlot,
   ]);
+
+  useEffect(() => {
+    if (findMissingSearchAutoNavigationRef.current) {
+      findMissingSearchAutoNavigationRef.current = false;
+      return;
+    }
+    setFindMissingSearchBaseNodeId(selectedNode.id);
+    setFindMissingSearchCursorNodeId(null);
+  }, [selectedNode.id, activeSide]);
+
+  useEffect(() => {
+    if (!isTrainingStatsMenuOpen) return;
+    const onPointerDown = (event: Event) => {
+      const target = event.target as Node | null;
+      const menu = trainingStatsMenuRef.current;
+      if (!target || !menu) return;
+      if (menu.contains(target)) return;
+      setIsTrainingStatsMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+    };
+  }, [isTrainingStatsMenuOpen]);
+
+  const fetchLichessNodeData = useCallback(
+    async (fenKey: string): Promise<LichessResponse | null> => {
+      const normalizedFenKey = positionFenKey(fenKey);
+      const cacheKey = JSON.stringify({
+        fen: normalizedFenKey,
+        side: activeSide,
+        source: lichessSource,
+        player: playerHandle.trim(),
+        dateRange,
+        speeds: [...selectedSpeeds].sort().join(','),
+        ratings: [...selectedRatings].sort((a, b) => a - b).join(','),
+        modes: [...selectedModes].sort().join(','),
+      });
+      const cached = lichessNodeLookupCacheRef.current.get(cacheKey);
+      if (cached !== undefined) return cached;
+
+      if (Date.now() < lichessRateLimitedUntilRef.current) {
+        lichessNodeLookupCacheRef.current.set(cacheKey, null);
+        return null;
+      }
+
+      if (lichessSource === 'player' && playerHandle.trim().length === 0) {
+        lichessNodeLookupCacheRef.current.set(cacheKey, null);
+        return null;
+      }
+
+      const fen = fenKey === START_FEN ? new Chess().fen() : fenKey;
+      const params = new URLSearchParams({
+        fen,
+        variant: FIXED_VARIANT,
+      });
+      params.set('color', activeSide);
+      if (lichessSource === 'lichess' || lichessSource === 'player') {
+        if (selectedSpeeds.length) params.set('speeds', selectedSpeeds.join(','));
+      }
+      if (lichessSource === 'lichess') {
+        if (selectedRatings.length) params.set('ratings', selectedRatings.join(','));
+      }
+      if (lichessSource === 'player') {
+        params.set('player', playerHandle.trim());
+        params.set('play', '');
+        params.set('modes', (selectedModes.length > 0 ? selectedModes : [...MODES]).join(','));
+        params.set('source', FIXED_SOURCE);
+      }
+
+      const normalizedDateRange: DateRange =
+        lichessSource === 'player'
+          ? dateRange === '5y' ||
+            dateRange === '10y' ||
+            dateRange === '20y' ||
+            dateRange === '30y' ||
+            dateRange === '50y'
+            ? null
+            : dateRange
+          : lichessSource === 'masters'
+            ? dateRange === '1m' ||
+              dateRange === '2m' ||
+              dateRange === '3m' ||
+              dateRange === '6m' ||
+              dateRange === '20y' ||
+              dateRange === '30y' ||
+              dateRange === '50y'
+              ? null
+              : dateRange
+            : dateRange === '1m' ||
+                dateRange === '2m' ||
+                dateRange === '3m' ||
+                dateRange === '6m' ||
+                dateRange === '20y' ||
+                dateRange === '30y' ||
+                dateRange === '50y'
+              ? null
+              : dateRange;
+
+      if (normalizedDateRange) {
+        const now = new Date();
+        const sinceDate = new Date(now);
+        if (normalizedDateRange === '1m') {
+          sinceDate.setMonth(now.getMonth());
+        } else if (normalizedDateRange === '2m') {
+          sinceDate.setMonth(now.getMonth() - 1);
+        } else if (normalizedDateRange === '3m') {
+          sinceDate.setMonth(now.getMonth() - 2);
+        } else if (normalizedDateRange === '6m') {
+          sinceDate.setMonth(now.getMonth() - 5);
+        } else if (normalizedDateRange === '1y') {
+          sinceDate.setFullYear(now.getFullYear() - 1);
+        } else if (normalizedDateRange === '5y') {
+          sinceDate.setFullYear(now.getFullYear() - 5);
+        } else if (normalizedDateRange === '10y') {
+          sinceDate.setFullYear(now.getFullYear() - 10);
+        } else {
+          sinceDate.setFullYear(now.getFullYear() - 3);
+        }
+        const since =
+          lichessSource === 'masters'
+            ? `${sinceDate.getFullYear()}`
+            : `${sinceDate.getFullYear()}-${String(sinceDate.getMonth() + 1).padStart(2, '0')}`;
+        const until =
+          lichessSource === 'masters'
+            ? `${now.getFullYear()}`
+            : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+        params.set('since', since);
+        params.set('until', until);
+      }
+
+      const endpoint = lichessSource === 'player' ? 'player' : lichessSource;
+      const url = `https://explorer.lichess.ovh/${endpoint}?${params.toString()}`;
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 20000);
+      try {
+        const allowed = await waitForLichessRateSlot();
+        if (!allowed || controller.signal.aborted) {
+          lichessNodeLookupCacheRef.current.set(cacheKey, null);
+          return null;
+        }
+        const response = await fetch(url, { signal: controller.signal });
+        if (response.status === 429) {
+          registerLichessRateLimit(response.headers.get('Retry-After'));
+          lichessNodeLookupCacheRef.current.set(cacheKey, null);
+          return null;
+        }
+        if (!response.ok) throw new Error('Lichess request failed');
+        const rawBody = await response.text();
+        const data = parseLastJsonObject<LichessResponse>(rawBody);
+        lichessNodeLookupCacheRef.current.set(cacheKey, data ?? null);
+        return data ?? null;
+      } catch {
+        lichessNodeLookupCacheRef.current.set(cacheKey, null);
+        return null;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [
+      activeSide,
+      lichessSource,
+      playerHandle,
+      dateRange,
+      selectedSpeeds,
+      selectedRatings,
+      selectedModes,
+      registerLichessRateLimit,
+      waitForLichessRateSlot,
+    ],
+  );
 
   const clearTrainingHint = () => {
     setTrainingSession((prev) =>
@@ -2202,6 +2727,307 @@ function App() {
         [side]: nextSideStats,
       };
     });
+  };
+
+  const runStockfishSingleQuery = async (params: {
+    fen: string;
+    depth: number;
+    perspectiveSide: Side;
+    multipv?: number;
+    movetimeMs?: number;
+    limitStrengthElo?: number | null;
+  }): Promise<{ scoreText: string; evalCp: number; bestMove: string | null }> => {
+    const { fen, depth, perspectiveSide, multipv = 1, movetimeMs, limitStrengthElo = null } = params;
+    while (suddenDeathBusyRef.current) {
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+    }
+    suddenDeathBusyRef.current = true;
+
+    try {
+      const worker = stockfishRef.current;
+      if (!worker || !engineReadyRef.current) {
+        return { scoreText: '+0.00', evalCp: 0, bestMove: null };
+      }
+
+      pendingAnalysisRef.current = null;
+      worker.postMessage('stop');
+      isSearchingRef.current = false;
+      lineCacheRef.current = new Map();
+      setEngineLines([]);
+
+      const whitePerspectiveMultiplier = whitePerspectiveMultiplierFromFen(fen);
+      const sidePerspectiveMultiplier = perspectiveSide === 'white' ? 1 : -1;
+      const perspectiveMultiplier = whitePerspectiveMultiplier * sidePerspectiveMultiplier;
+      engineWhitePerspectiveMultiplierRef.current = perspectiveMultiplier;
+
+      const result = await new Promise<{ scoreText: string; evalCp: number; bestMove: string | null }>((resolve) => {
+        const timeoutId = window.setTimeout(() => {
+          const awaiter = suddenDeathAwaiterRef.current;
+          if (!awaiter) {
+            resolve({ scoreText: '+0.00', evalCp: 0, bestMove: null });
+            return;
+          }
+          suddenDeathAwaiterRef.current = null;
+          resolve({
+            scoreText: awaiter.latestScoreText,
+            evalCp: awaiter.latestEvalCp,
+            bestMove: null,
+          });
+        }, 12000);
+
+        suddenDeathAwaiterRef.current = {
+          perspectiveMultiplier,
+          latestEvalCp: 0,
+          latestScoreText: '+0.00',
+          timeoutId,
+          resolve,
+        };
+
+        worker.postMessage(`setoption name MultiPV value ${Math.max(1, multipv)}`);
+        if (limitStrengthElo !== null) {
+          worker.postMessage('setoption name UCI_LimitStrength value true');
+          worker.postMessage(`setoption name UCI_Elo value ${limitStrengthElo}`);
+        } else {
+          worker.postMessage('setoption name UCI_LimitStrength value false');
+        }
+        worker.postMessage(`position fen ${fen}`);
+        if (typeof movetimeMs === 'number' && Number.isFinite(movetimeMs) && movetimeMs > 0) {
+          worker.postMessage(`go movetime ${Math.floor(movetimeMs)}`);
+        } else {
+          worker.postMessage(`go depth ${Math.max(8, depth)}`);
+        }
+      });
+
+      return result;
+    } finally {
+      suddenDeathBusyRef.current = false;
+    }
+  };
+
+  const getScopeSuccessRate = (side: Side, scopeId: string, fen: string) => {
+    const recentAnswers = trainingStatsBySide[side]?.[scopeId]?.[positionFenKey(fen)]?.recentAnswers ?? [];
+    if (recentAnswers.length === 0) return 0;
+    const correct = recentAnswers.reduce((acc, value) => acc + (value ? 1 : 0), 0);
+    return (correct / recentAnswers.length) * 100;
+  };
+
+  const collectBrowseChildFenKeys = (side: Side, fen: string) => {
+    const targetFenKey = positionFenKey(fen);
+    const childFenKeys = new Set<string>();
+    for (const repertoire of repertoiresBySide[side]) {
+      const matchingNodes = Object.values(repertoire.tree.nodes).filter((node) => positionFenKey(node.fen) === targetFenKey);
+      for (const node of matchingNodes) {
+        for (const childId of node.children) {
+          const child = repertoire.tree.nodes[childId];
+          if (child) childFenKeys.add(positionFenKey(child.fen));
+        }
+      }
+    }
+    return childFenKeys;
+  };
+
+  const ensureBrowsePromptNode = (fen: string, baseTree: MoveTree) => {
+    const fenKey = positionFenKey(fen);
+    const existingNode = Object.values(baseTree.nodes).find((node) => positionFenKey(node.fen) === fenKey);
+    if (existingNode) {
+      return { tree: baseTree, nodeId: existingNode.id };
+    }
+    const root = baseTree.nodes[baseTree.rootId];
+    if (!root) return { tree: baseTree, nodeId: baseTree.rootId };
+    const nodeId = createNodeId(baseTree);
+    const nextTree: MoveTree = {
+      ...baseTree,
+      nextId: baseTree.nextId + 1,
+      nodes: {
+        ...baseTree.nodes,
+        [nodeId]: {
+          id: nodeId,
+          parentId: root.id,
+          fen,
+          moveSan: null,
+          moveUci: null,
+          children: [],
+        },
+        [root.id]: {
+          ...root,
+          children: [...root.children, nodeId],
+        },
+      },
+    };
+    return { tree: nextTree, nodeId };
+  };
+
+  const advanceFlashcardPosition = (side: Side, rootNodeId: string, sourceTreeOverride?: MoveTree) => {
+    const baseTree = sourceTreeOverride ?? trees[side];
+    const rootNode = baseTree.nodes[rootNodeId];
+    if (!rootNode) return;
+    const scopeId = getActiveTrainingStatsScopeId(side);
+
+    if (!isBrowseMode) {
+      const candidateNodes: MoveNode[] = [];
+      const stack = [rootNode.id];
+      const visited = new Set<string>();
+      while (stack.length > 0) {
+        const nodeId = stack.pop() as string;
+        if (visited.has(nodeId)) continue;
+        visited.add(nodeId);
+        const node = baseTree.nodes[nodeId];
+        if (!node) continue;
+        if (toTurnColor(node.fen) === side && node.children.length > 0) {
+          candidateNodes.push(node);
+        }
+        for (const childId of node.children) stack.push(childId);
+      }
+      if (candidateNodes.length === 0) return;
+      const preferred = candidateNodes.filter((node) => node.parentId !== selectedNode.id);
+      const pool = preferred.length > 0 ? preferred : candidateNodes;
+      const weights = pool.map((node) => {
+        const successRate = getScopeSuccessRate(side, scopeId, node.fen);
+        return Math.max(1, 101 - successRate);
+      });
+      const pickedIndex = weightedPickIndex(weights);
+      if (pickedIndex < 0) return;
+      const pickedNode = pool[pickedIndex];
+      setSelectedNodeBySide((prev) => ({ ...prev, [side]: pickedNode.id }));
+      clearTrainingHint();
+      setTrainingSession((prev) =>
+        prev && prev.side === side && prev.rootNodeId === rootNodeId
+          ? {
+              ...prev,
+              currentPromptFen: pickedNode.fen,
+              currentPromptHadError: false,
+              currentPromptScopeIds: getScopeIdsForTrainingPosition(side, pickedNode.fen),
+            }
+          : prev,
+      );
+      return;
+    }
+
+    const rootFenKey = positionFenKey(rootNode.fen);
+    const candidateByFen = new Map<string, string>();
+    for (const repertoire of repertoiresBySide[side]) {
+      const matchingRoots = Object.values(repertoire.tree.nodes).filter((node) => positionFenKey(node.fen) === rootFenKey);
+      for (const repoRoot of matchingRoots) {
+        const stack = [repoRoot.id];
+        const visited = new Set<string>();
+        while (stack.length > 0) {
+          const nodeId = stack.pop() as string;
+          if (visited.has(nodeId)) continue;
+          visited.add(nodeId);
+          const node = repertoire.tree.nodes[nodeId];
+          if (!node) continue;
+          if (toTurnColor(node.fen) === side && node.children.length > 0) {
+            const fenKey = positionFenKey(node.fen);
+            if (!candidateByFen.has(fenKey)) candidateByFen.set(fenKey, node.fen);
+          }
+          for (const childId of node.children) stack.push(childId);
+        }
+      }
+    }
+    if (candidateByFen.size === 0) return;
+    const childFenKeys = collectBrowseChildFenKeys(side, selectedNode.fen);
+    const candidateFens = [...candidateByFen.values()];
+    const preferred = candidateFens.filter((fen) => !childFenKeys.has(positionFenKey(fen)));
+    const pool = preferred.length > 0 ? preferred : candidateFens;
+    const weights = pool.map((fen) => {
+      const successRate = getScopeSuccessRate(side, scopeId, fen);
+      return Math.max(1, 101 - successRate);
+    });
+    const pickedIndex = weightedPickIndex(weights);
+    if (pickedIndex < 0) return;
+    const pickedFen = pool[pickedIndex];
+    const ensured = ensureBrowsePromptNode(pickedFen, baseTree);
+    if (ensured.tree !== baseTree) {
+      setTrees((prev) => ({ ...prev, [side]: ensured.tree }));
+    }
+    setSelectedNodeBySide((prev) => ({ ...prev, [side]: ensured.nodeId }));
+    clearTrainingHint();
+    setTrainingSession((prev) =>
+      prev && prev.side === side && prev.rootNodeId === rootNodeId
+        ? {
+            ...prev,
+            currentPromptFen: pickedFen,
+            currentPromptHadError: false,
+            currentPromptScopeIds: getScopeIdsForTrainingPosition(side, pickedFen),
+          }
+        : prev,
+    );
+  };
+
+  const startSuddenDeathRound = async (session: TrainingSession, sourceTreeOverride?: MoveTree) => {
+    const side = session.side;
+    const sideTree = sourceTreeOverride ?? trees[side];
+    const fixedStartNodeId = sideTree.nodes[session.entryNodeId]
+      ? session.entryNodeId
+      : sideTree.nodes[session.rootNodeId]
+        ? session.rootNodeId
+        : sideTree.rootId;
+    const fixedStartNode = sideTree.nodes[fixedStartNodeId];
+    if (!fixedStartNode) return;
+    const fixedStartFen = fixedStartNode.fen === START_FEN ? new Chess().fen() : fixedStartNode.fen;
+    setSuddenDeathStartNodeId(fixedStartNodeId);
+    setSuddenDeathCurrentFen(fixedStartFen);
+    setSuddenDeathLastMove(null);
+    setSelectedNodeBySide((prev) => ({ ...prev, [side]: fixedStartNodeId }));
+
+    setSuddenDeathThinking(true);
+    try {
+      const openingReply = await runStockfishSingleQuery({
+        fen: fixedStartFen,
+        depth: Math.max(10, Math.min(18, engineDepth)),
+        perspectiveSide: 'white',
+        multipv: 1,
+        movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
+        limitStrengthElo: suddenDeathStockfishElo,
+      });
+
+      let promptFen = fixedStartFen;
+      let promptLastMove: [Key, Key] | null = null;
+      if (openingReply.bestMove) {
+        const promptChess = fenToChess(fixedStartFen);
+        const promotionChar = (openingReply.bestMove[4] ?? 'q').toLowerCase();
+        const promotion: 'q' | 'r' | 'b' | 'n' = ['q', 'r', 'b', 'n'].includes(promotionChar)
+          ? (promotionChar as 'q' | 'r' | 'b' | 'n')
+          : 'q';
+        const openingMove = promptChess.move({
+          from: openingReply.bestMove.slice(0, 2),
+          to: openingReply.bestMove.slice(2, 4),
+          promotion,
+        });
+        if (openingMove) {
+          promptFen = promptChess.fen();
+          promptLastMove = parseUciMove(openingReply.bestMove) ?? null;
+        }
+      }
+      setSuddenDeathCurrentFen(promptFen);
+      setSuddenDeathLastMove(promptLastMove);
+
+      const baseEval = await runStockfishSingleQuery({
+        fen: promptFen,
+        depth: engineDepth,
+        perspectiveSide: 'white',
+        multipv: 1,
+        movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
+      });
+      const userPerspectiveMultiplier = side === 'white' ? 1 : -1;
+      setTrainingSession((prev) =>
+        prev && prev.side === side && prev.suddenDeathMode
+          ? {
+              ...prev,
+              currentPromptFen: promptFen,
+              suddenDeathPromptFen: promptFen,
+              suddenDeathBaseEvalCp: baseEval.evalCp * userPerspectiveMultiplier,
+              currentPromptHadError: false,
+              currentPromptScopeIds: getScopeIdsForTrainingPosition(side, promptFen),
+              hintRequested: false,
+              hintVisible: false,
+              hintMoveUci: null,
+            }
+          : prev,
+      );
+    } finally {
+      setSuddenDeathThinking(false);
+    }
   };
 
   const advanceTrainingPosition = (
@@ -2307,12 +3133,61 @@ function App() {
     clearTrainingHint();
   };
 
+  const restoreSuddenDeathStartPosition = (side: Side, startNodeId: string | null) => {
+    const sideTree = trees[side];
+    const restoreNodeId = startNodeId && sideTree.nodes[startNodeId] ? startNodeId : sideTree.rootId;
+    setSelectedNodeBySide((prev) => ({ ...prev, [side]: restoreNodeId }));
+  };
+
+  const clearSuddenDeathRuntime = () => {
+    setSuddenDeathThinking(false);
+    setSuddenDeathStartNodeId(null);
+    setSuddenDeathCurrentFen(null);
+    setSuddenDeathLastMove(null);
+  };
+
+  const closeSuddenDeathGameOverPopup = () => {
+    if (!suddenDeathGameOver) return;
+    const { side, startNodeId } = suddenDeathGameOver;
+    restoreSuddenDeathStartPosition(side, startNodeId);
+    setSuddenDeathGameOver(null);
+    clearSuddenDeathRuntime();
+    if (trainingSession && trainingSession.side === side && trainingSession.suddenDeathMode) {
+      const nextSession: TrainingSession = {
+        ...trainingSession,
+        rootNodeId: startNodeId,
+        entryNodeId: startNodeId,
+        suddenDeathBaseEvalCp: null,
+        suddenDeathPromptFen: null,
+        currentPromptFen: null,
+        currentPromptHadError: false,
+        currentPromptScopeIds: [],
+        hintRequested: false,
+        hintVisible: false,
+        hintMoveUci: null,
+      };
+      setTrainingSession(nextSession);
+      void startSuddenDeathRound(nextSession);
+    }
+  };
+
   const startTraining = () => {
     const side = activeSide;
+    if (!hasSideTrainingContent(side)) {
+      setStatus('No lines to train on this side.');
+      return;
+    }
     const rootNodeId = selectedNode.id;
+    clearSuddenDeathRuntime();
+    setSuddenDeathGameOver(null);
     setTrainingSession({
       side,
       rootNodeId,
+      entryNodeId: rootNodeId,
+      flashcardMode: false,
+      suddenDeathMode: false,
+      suddenDeathBaseEvalCp: null,
+      suddenDeathPromptFen: null,
       hintRequested: false,
       hintVisible: false,
       hintMoveUci: null,
@@ -2327,14 +3202,125 @@ function App() {
     setPortraitTab('moves');
   };
 
+  const startSuddenDeathTraining = () => {
+    const side = activeSide;
+    if (!hasSideTrainingContent(side)) {
+      setStatus('No lines to train on this side.');
+      return;
+    }
+    const rootNodeId = selectedNode.id;
+    clearSuddenDeathRuntime();
+    setSuddenDeathGameOver(null);
+    const nextSession: TrainingSession = {
+      side,
+      rootNodeId,
+      entryNodeId: rootNodeId,
+      flashcardMode: false,
+      suddenDeathMode: true,
+      suddenDeathBaseEvalCp: null,
+      suddenDeathPromptFen: null,
+      hintRequested: false,
+      hintVisible: false,
+      hintMoveUci: null,
+      completedLeafNodeIds: [],
+      errorCount: 0,
+      correctCount: 0,
+      currentPromptFen: null,
+      currentPromptHadError: false,
+      currentPromptScopeIds: [],
+    };
+    setTrainingSession(nextSession);
+    void startSuddenDeathRound(nextSession);
+    setPortraitTab('moves');
+  };
+
+  const toggleSuddenDeathMode = () => {
+    if (!trainingSession) {
+      startSuddenDeathTraining();
+      return;
+    }
+    if (trainingSession.suddenDeathMode) {
+      stopTraining();
+      return;
+    }
+    const side = trainingSession.side;
+    const startNodeId = selectedNode.id;
+    clearSuddenDeathRuntime();
+    setSuddenDeathGameOver(null);
+    setTrainingSession((prev) =>
+      prev && prev.side === side
+        ? {
+            ...prev,
+            rootNodeId: startNodeId,
+            entryNodeId: startNodeId,
+            suddenDeathMode: true,
+            flashcardMode: false,
+            suddenDeathBaseEvalCp: null,
+            suddenDeathPromptFen: null,
+            hintRequested: false,
+            hintVisible: false,
+            hintMoveUci: null,
+            currentPromptHadError: false,
+          }
+        : prev,
+    );
+    void startSuddenDeathRound({
+      ...trainingSession,
+      rootNodeId: startNodeId,
+      entryNodeId: startNodeId,
+      suddenDeathMode: true,
+      flashcardMode: false,
+      suddenDeathBaseEvalCp: null,
+      suddenDeathPromptFen: null,
+    });
+  };
+
   const stopTraining = () => {
+    if (trainingSession) {
+      if (trainingSession.suddenDeathMode) {
+        restoreSuddenDeathStartPosition(trainingSession.side, suddenDeathStartNodeId ?? trainingSession.entryNodeId);
+      } else {
+        const sideTree = trees[trainingSession.side];
+        const restoreNodeId = sideTree.nodes[trainingSession.entryNodeId] ? trainingSession.entryNodeId : sideTree.rootId;
+        setSelectedNodeBySide((prev) => ({ ...prev, [trainingSession.side]: restoreNodeId }));
+      }
+    }
     setTrainingSession(null);
+    clearSuddenDeathRuntime();
+    setSuddenDeathGameOver(null);
   };
 
   const restartTrainingLine = () => {
     if (!trainingSession) return;
     clearTrainingHint();
     advanceTrainingPosition(trainingSession.side, trainingSession.rootNodeId, trainingSession.rootNodeId);
+  };
+
+  const toggleFlashcardMode = () => {
+    if (!trainingSession) return;
+    const nextFlashcardMode = !trainingSession.flashcardMode;
+    const side = trainingSession.side;
+    const rootNodeId = trainingSession.rootNodeId;
+    setTrainingSession((prev) =>
+      prev && prev.side === side
+        ? {
+            ...prev,
+            flashcardMode: nextFlashcardMode,
+            suddenDeathMode: false,
+            suddenDeathBaseEvalCp: null,
+            suddenDeathPromptFen: null,
+            hintRequested: false,
+            hintVisible: false,
+            hintMoveUci: null,
+            currentPromptHadError: false,
+          }
+        : prev,
+    );
+    if (nextFlashcardMode) {
+      advanceFlashcardPosition(side, rootNodeId);
+    } else {
+      advanceTrainingPosition(side, rootNodeId, rootNodeId);
+    }
   };
 
   const getActiveTrainingStatsScopeId = (side: Side) =>
@@ -2381,19 +3367,34 @@ function App() {
   useEffect(() => {
     if (!trainingSession) return;
     if (repertoireSide !== trainingSession.side) {
+      if (trainingSession.suddenDeathMode) clearSuddenDeathRuntime();
       setTrainingSession(null);
       return;
     }
+    if (!hasSideTrainingContent(trainingSession.side)) {
+      if (trainingSession.suddenDeathMode) clearSuddenDeathRuntime();
+      setTrainingSession(null);
+      setSuddenDeathGameOver(null);
+      return;
+    }
     if (!trees[trainingSession.side].nodes[trainingSession.rootNodeId]) {
+      if (trainingSession.suddenDeathMode) clearSuddenDeathRuntime();
       setTrainingSession(null);
     }
-  }, [repertoireSide, trainingSession, trees]);
+  }, [repertoireSide, trainingSession, trees, hasSideTrainingContent]);
 
   const makeMove = (orig: Key, dest: Key, promotion: 'q' | 'r' | 'b' | 'n' = 'q') => {
     const currentTree = trees[activeSide];
     const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
     const currentNode = currentTree.nodes[currentSelectedId] ?? currentTree.nodes[currentTree.rootId];
-    const chess = fenToChess(currentNode.fen);
+    const moveSourceFen =
+      trainingSession &&
+      trainingSession.side === activeSide &&
+      trainingSession.suddenDeathMode &&
+      suddenDeathCurrentFen
+        ? suddenDeathCurrentFen
+        : currentNode.fen;
+    const chess = fenToChess(moveSourceFen);
     const move = chess.move({ from: orig, to: dest, promotion });
 
     if (!move) return;
@@ -2402,6 +3403,117 @@ function App() {
     const existingChildId = currentNode.children.find((id) => currentTree.nodes[id].moveUci === uci);
 
     if (trainingSession && trainingSession.side === activeSide) {
+      if (trainingSession.suddenDeathMode) {
+        if (suddenDeathThinking || !suddenDeathCurrentFen) return;
+        const userFen = chess.fen();
+        setSuddenDeathCurrentFen(userFen);
+        setSuddenDeathLastMove(parseUciMove(uci) ?? null);
+
+        const promptFen = trainingSession.suddenDeathPromptFen ?? trainingSession.currentPromptFen ?? suddenDeathCurrentFen;
+        const baseEvalCp = trainingSession.suddenDeathBaseEvalCp ?? 0;
+        const promptScopeIds =
+          trainingSession.currentPromptScopeIds.length > 0
+            ? trainingSession.currentPromptScopeIds
+            : getScopeIdsForTrainingPosition(activeSide, promptFen);
+
+        void (async () => {
+          setSuddenDeathThinking(true);
+          try {
+            const postUserEval = await runStockfishSingleQuery({
+              fen: userFen,
+              depth: engineDepth,
+              perspectiveSide: 'white',
+              multipv: 1,
+              movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
+            });
+            const thresholdCp = Math.round(suddenDeathThreshold * 100);
+            const userPerspectiveMultiplier = activeSide === 'white' ? 1 : -1;
+            const postUserEvalCp = postUserEval.evalCp * userPerspectiveMultiplier;
+            const failedAfterUserMove = postUserEvalCp <= baseEvalCp - thresholdCp;
+            if (failedAfterUserMove) {
+              setSuddenDeathGameOver({
+                side: activeSide,
+                startNodeId: suddenDeathStartNodeId ?? trainingSession.entryNodeId,
+                baselineEvalCp: baseEvalCp,
+                failedEvalCp: postUserEvalCp,
+                thresholdCp,
+              });
+              appendTrainingAnswer(activeSide, promptFen, promptScopeIds, 0);
+              return;
+            }
+
+            const engineReply = await runStockfishSingleQuery({
+              fen: userFen,
+              depth: Math.max(10, Math.min(18, engineDepth)),
+              perspectiveSide: 'white',
+              multipv: 1,
+              movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
+              limitStrengthElo: suddenDeathStockfishElo,
+            });
+
+            let evalFen = userFen;
+            let evalLastMove: [Key, Key] | null = parseUciMove(uci) ?? null;
+            if (engineReply.bestMove) {
+              const engineChess = fenToChess(userFen);
+              const promotionChar = (engineReply.bestMove[4] ?? 'q').toLowerCase();
+              const promotion: 'q' | 'r' | 'b' | 'n' = ['q', 'r', 'b', 'n'].includes(promotionChar)
+                ? (promotionChar as 'q' | 'r' | 'b' | 'n')
+                : 'q';
+              const engineMove = engineChess.move({
+                from: engineReply.bestMove.slice(0, 2),
+                to: engineReply.bestMove.slice(2, 4),
+                promotion,
+              });
+              if (engineMove) {
+                evalFen = engineChess.fen();
+                evalLastMove = parseUciMove(engineReply.bestMove) ?? null;
+              }
+            }
+            setSuddenDeathCurrentFen(evalFen);
+            setSuddenDeathLastMove(evalLastMove);
+
+            const evalResult = await runStockfishSingleQuery({
+              fen: evalFen,
+              depth: engineDepth,
+              perspectiveSide: 'white',
+              multipv: 1,
+              movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
+            });
+
+            const evalResultUserCp = evalResult.evalCp * userPerspectiveMultiplier;
+            const failed = evalResultUserCp <= baseEvalCp - thresholdCp;
+
+            if (failed) {
+              setSuddenDeathGameOver({
+                side: activeSide,
+                startNodeId: suddenDeathStartNodeId ?? trainingSession.entryNodeId,
+                baselineEvalCp: baseEvalCp,
+                failedEvalCp: evalResultUserCp,
+                thresholdCp,
+              });
+              appendTrainingAnswer(activeSide, promptFen, promptScopeIds, 0);
+            } else {
+              appendTrainingAnswer(activeSide, promptFen, promptScopeIds, 1);
+              setTrainingSession((prev) =>
+                prev && prev.side === activeSide
+                  ? {
+                      ...prev,
+                      correctCount: prev.correctCount + 1,
+                      currentPromptFen: evalFen,
+                      suddenDeathPromptFen: evalFen,
+                      currentPromptScopeIds: getScopeIdsForTrainingPosition(activeSide, evalFen),
+                      currentPromptHadError: false,
+                    }
+                  : prev,
+              );
+            }
+          } finally {
+            setSuddenDeathThinking(false);
+          }
+        })();
+        return;
+      }
+
       if (toTurnColor(currentNode.fen) !== activeSide) return;
       const trainingOptions = isBrowseMode
         ? collectBrowseMoveOptionsAtFen(activeSide, currentNode.fen).map((option) => option.moveUci)
@@ -2411,6 +3523,50 @@ function App() {
       if (trainingOptions.length === 0) return;
 
       const isAllowedMove = trainingOptions.includes(uci);
+      if (trainingSession.flashcardMode) {
+        const scoredFen = trainingSession.currentPromptFen ?? currentNode.fen;
+        const scoredScopeIds =
+          trainingSession.currentPromptScopeIds.length > 0
+            ? trainingSession.currentPromptScopeIds
+            : getScopeIdsForTrainingPosition(activeSide, scoredFen);
+        if (!isAllowedMove) {
+          if (!trainingSession.currentPromptHadError) {
+            appendTrainingAnswer(activeSide, scoredFen, scoredScopeIds, 0);
+          }
+          const hintMoveUci = trainingOptions[Math.floor(Math.random() * trainingOptions.length)] ?? null;
+          setTrainingSession((prev) =>
+            prev && prev.side === activeSide
+              ? {
+                  ...prev,
+                  hintRequested: true,
+                  hintVisible: prev.hintVisible,
+                  hintMoveUci,
+                  errorCount: prev.errorCount + 1,
+                  currentPromptHadError: true,
+                }
+              : prev,
+          );
+          return;
+        }
+        if (!trainingSession.currentPromptHadError) {
+          appendTrainingAnswer(activeSide, scoredFen, scoredScopeIds, 1);
+        }
+        setTrainingSession((prev) =>
+          prev && prev.side === activeSide
+            ? {
+                ...prev,
+                hintRequested: false,
+                hintVisible: false,
+                hintMoveUci: null,
+                correctCount: prev.correctCount + 1,
+                currentPromptHadError: false,
+              }
+            : prev,
+        );
+        advanceFlashcardPosition(activeSide, trainingSession.rootNodeId, currentTree);
+        return;
+      }
+
       if (!isAllowedMove) {
         if (!trainingSession.currentPromptHadError) {
           const scoredFen = trainingSession.currentPromptFen ?? currentNode.fen;
@@ -2552,6 +3708,82 @@ function App() {
     playLichessMove(uci);
   };
 
+  const jumpToNextMissingLichessMove = async () => {
+    if (isTrainingActive || isSuddenDeathActive || isFindMissingSearchRunning) return;
+
+    const sideTree = tree;
+    const baseNodeId =
+      findMissingSearchBaseNodeId && sideTree.nodes[findMissingSearchBaseNodeId]
+        ? findMissingSearchBaseNodeId
+        : selectedNode.id;
+    const baseNode = sideTree.nodes[baseNodeId];
+    if (!baseNode || baseNode.children.length === 0) return;
+
+    const traversal: string[] = [];
+    const stack = [baseNodeId];
+    const visited = new Set<string>();
+    while (stack.length > 0) {
+      const nodeId = stack.pop() as string;
+      if (visited.has(nodeId)) continue;
+      visited.add(nodeId);
+      traversal.push(nodeId);
+      const node = sideTree.nodes[nodeId];
+      if (!node) continue;
+      for (let i = node.children.length - 1; i >= 0; i -= 1) {
+        stack.push(node.children[i]);
+      }
+    }
+
+    let startIndex = 0;
+    if (findMissingSearchCursorNodeId) {
+      const cursorIdx = traversal.indexOf(findMissingSearchCursorNodeId);
+      if (cursorIdx >= 0) startIndex = cursorIdx + 1;
+    }
+    if (startIndex >= traversal.length) return;
+
+    setIsFindMissingSearchRunning(true);
+    try {
+      let foundNodeId: string | null = null;
+      const thresholdShare = lichessArrowThreshold / 100;
+      for (let index = startIndex; index < traversal.length; index += 1) {
+        const nodeId = traversal[index];
+        const node = sideTree.nodes[nodeId];
+        if (!node) continue;
+        if (toTurnColor(node.fen) === activeSide) continue;
+
+        const data = await fetchLichessNodeData(node.fen);
+        if (!data?.moves || data.moves.length === 0) continue;
+        const total = (data.white ?? 0) + (data.draws ?? 0) + (data.black ?? 0);
+        if (total <= 0) continue;
+
+        const existingMoves = new Set(
+          node.children
+            .map((childId) => sideTree.nodes[childId]?.moveUci)
+            .filter((uci): uci is string => Boolean(uci)),
+        );
+        const hasMissingCandidate = data.moves.some((move) => {
+          const moveTotal = move.white + move.draws + move.black;
+          return moveTotal / total >= thresholdShare && !existingMoves.has(move.uci);
+        });
+        if (hasMissingCandidate) {
+          foundNodeId = node.id;
+          break;
+        }
+      }
+
+      setFindMissingSearchBaseNodeId(baseNodeId);
+      if (foundNodeId) {
+        setFindMissingSearchCursorNodeId(foundNodeId);
+        findMissingSearchAutoNavigationRef.current = true;
+        navigateToNode(activeSide, foundNodeId);
+      } else {
+        setFindMissingSearchCursorNodeId(traversal[traversal.length - 1] ?? baseNodeId);
+      }
+    } finally {
+      setIsFindMissingSearchRunning(false);
+    }
+  };
+
   const downloadPgn = (pgn: string, filename: string) => {
     const blob = new Blob([pgn], { type: 'application/x-chess-pgn;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -2636,9 +3868,18 @@ function App() {
     setStatus(`Created repertoire "${next.name}" (${side})`);
   };
 
-  const loadRepertoire = (repertoireId: string, side: Side = activeSide) => {
+  const loadRepertoire = (repertoireId: string, side: Side = activeSide, preservePosition = false) => {
     const entry = repertoiresBySide[side].find((item) => item.id === repertoireId);
     if (!entry) return;
+    const currentSideTree = trees[side];
+    const currentSelectedId = selectedNodeBySide[side] ?? currentSideTree.rootId;
+    const currentSelectedNode = currentSideTree.nodes[currentSelectedId] ?? currentSideTree.nodes[currentSideTree.rootId];
+    const currentFenKey = positionFenKey(currentSelectedNode.fen);
+    const preservedNodeId =
+      preservePosition
+        ? Object.values(entry.tree.nodes).find((node) => positionFenKey(node.fen) === currentFenKey)?.id ?? null
+        : null;
+    const nextSelectedId = preservedNodeId ?? (entry.tree.nodes[entry.selectedNodeId] ? entry.selectedNodeId : entry.tree.rootId);
     setActiveRepertoireIdBySide((prev) => ({
       ...prev,
       [side]: entry.id,
@@ -2649,7 +3890,7 @@ function App() {
     }));
     setSelectedNodeBySide((prev) => ({
       ...prev,
-      [side]: entry.tree.nodes[entry.selectedNodeId] ? entry.selectedNodeId : entry.tree.rootId,
+      [side]: nextSelectedId,
     }));
     setUndoStackBySide((prev) => ({ ...prev, [side]: [] }));
     setTrainingSession((prev) => (prev?.side === side ? null : prev));
@@ -2891,7 +4132,19 @@ function App() {
   };
 
   const lichessTotal = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
-  const isTrainingActive = Boolean(trainingSession && trainingSession.side === activeSide);
+  const isSuddenDeathActive = Boolean(
+    trainingSession && trainingSession.side === activeSide && trainingSession.suddenDeathMode,
+  );
+  const isTrainingActive = Boolean(
+    trainingSession && trainingSession.side === activeSide && !trainingSession.suddenDeathMode,
+  );
+  const hasSuddenDeathBoardOverride = Boolean(
+    suddenDeathCurrentFen &&
+      ((trainingSession && trainingSession.side === activeSide && trainingSession.suddenDeathMode) ||
+        (suddenDeathGameOver && suddenDeathGameOver.side === activeSide)),
+  );
+  const boardFen = hasSuddenDeathBoardOverride ? (suddenDeathCurrentFen as string) : selectedNode.fen;
+  const boardLastMove = hasSuddenDeathBoardOverride ? suddenDeathLastMove ?? undefined : lastMove;
   useEffect(() => {
     if (isTrainingActive) return;
     setIsTrainingStatsMenuOpen(false);
@@ -2904,7 +4157,6 @@ function App() {
     [repertoiresBySide],
   );
   const showHintButton = Boolean(isTrainingActive && trainingSession?.hintRequested);
-  const canStartTraining = displayedChildNodes.length > 0;
   const isTrainingLineEnd = Boolean(isTrainingActive && displayedChildNodes.length === 0);
   const isMobileClient = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   useEffect(() => {
@@ -2943,9 +4195,14 @@ function App() {
   const canGoBack = Boolean(selectedNode.parentId);
   const visibleEngineStatus =
     engineStatus === 'done' || engineStatus === 'stopped' || engineStatus === 'analyzing' ? '' : engineStatus;
-  const currentEngineEval = engineLines[0]?.scoreText ?? selectedNode.stockfishEval ?? null;
+  const currentEngineEvalRaw = engineLines[0]?.scoreText ?? selectedNode.stockfishEval ?? null;
+  const currentEngineEval = currentEngineEvalRaw ? normalizeEvalSignText(currentEngineEvalRaw) : null;
   const visibleEngineEval = currentEngineEval ? `(${currentEngineEval})` : '';
-  const visibleLichessStatus = lichessStatus === 'done' || lichessStatus === 'idle' ? '' : lichessStatus;
+  const visibleLichessStatus = (() => {
+    if (lichessStatus === 'limited') return 'Rate limited';
+    if (lichessStatus === 'done' || lichessStatus === 'idle') return '';
+    return lichessStatus;
+  })();
   const openingFullTitle = resolvedOpening ? `${resolvedOpening.eco} ${resolvedOpening.name}` : '';
   const openingTitleContent = useMemo(() => {
     if (!resolvedOpening) return '';
@@ -2971,6 +4228,10 @@ function App() {
       return total / lichessTotal >= thresholdShare;
     });
   }, [lichessData, lichessTotal, lichessArrowThreshold]);
+  const activeFindMissingBaseNode =
+    (findMissingSearchBaseNodeId ? tree.nodes[findMissingSearchBaseNodeId] : null) ?? selectedNode;
+  const canRunFindMissingSearch =
+    activeFindMissingBaseNode.children.length > 0 && !isFindMissingSearchRunning && !isSuddenDeathActive;
   const inlineMoves = useMemo(
     () =>
       path.slice(1).map((node, index) => ({
@@ -3262,6 +4523,10 @@ function App() {
     if (!trainingSession || trainingSession.side !== activeSide) return 0;
     return new Set(trainingSession.completedLeafNodeIds).size;
   }, [trainingSession, activeSide]);
+  const hasTrainingContent = useMemo(() => {
+    if (!trainingSession || trainingSession.side !== activeSide) return false;
+    return hasSideTrainingContent(trainingSession.side);
+  }, [trainingSession, activeSide, hasSideTrainingContent]);
   const trainingCorrectCount = trainingSession?.side === activeSide ? trainingSession.correctCount : 0;
   const trainingErrorCount = trainingSession?.side === activeSide ? trainingSession.errorCount : 0;
   const trainingAttemptCount = trainingCorrectCount + trainingErrorCount;
@@ -3293,6 +4558,10 @@ function App() {
       }, 0) / nodes.length;
     return Math.round(avgRate * 100);
   }, [isTrainingActive, activeRepertoireId, activeRepertoire, trainingStatsBySide, activeSide]);
+  const trainingHintMoveText = useMemo(() => {
+    if (!isTrainingActive || !trainingSession?.hintMoveUci) return '';
+    return uciToFigurineSan(selectedNode.fen, trainingSession.hintMoveUci) || trainingSession.hintMoveUci;
+  }, [isTrainingActive, trainingSession?.hintMoveUci, selectedNode.fen]);
 
   useEffect(() => {
     if (!trainingSession || trainingSession.side !== activeSide) return;
@@ -3328,36 +4597,209 @@ function App() {
     });
   }, [trainingSession, activeSide, isTrainingLineEnd, selectedNode.id, trees, isBrowseMode, activeRepertoireIdBySide]);
 
-  const runTreeStockfishEval = async () => {
-    if (isBrowseMode || isTreeEvalRunning) return;
+  const collectTreeEvalTargets = (onlyMissing: boolean): Array<{ repoId: string | null; nodeId: string; fen: string }> => {
+    const hasEval = (node: MoveNode) => typeof node.stockfishEval === 'string' && node.stockfishEval.trim().length > 0;
+    if (isBrowseMode) {
+      return repertoiresBySide[activeSide].flatMap((repertoire) =>
+        Object.values(repertoire.tree.nodes)
+          .filter((node) => !onlyMissing || !hasEval(node))
+          .map((node) => ({ repoId: repertoire.id, nodeId: node.id, fen: node.fen })),
+      );
+    }
+    return Object.values(trees[activeSide].nodes)
+      .filter((node) => !onlyMissing || !hasEval(node))
+      .map((node) => ({ repoId: null, nodeId: node.id, fen: node.fen }));
+  };
+
+  const applyTreeEvalToTargets = (targets: Array<{ repoId: string | null; nodeId: string }>, scoreText: string) => {
     const side = activeSide;
-    const worker = stockfishRef.current;
-    const sourceTree = trees[side];
-    if (!worker || !sourceTree) return;
+    const directNodeIds = targets.filter((target) => target.repoId === null).map((target) => target.nodeId);
+    if (directNodeIds.length > 0) {
+      const nodeIdSet = new Set(directNodeIds);
+      setTrees((prev) => {
+        const currentTree = prev[side];
+        const nextNodes = { ...currentTree.nodes };
+        let changed = false;
+        nodeIdSet.forEach((nodeId) => {
+          const node = nextNodes[nodeId];
+          if (!node) return;
+          if (node.stockfishEval === scoreText) return;
+          nextNodes[nodeId] = { ...node, stockfishEval: scoreText };
+          changed = true;
+        });
+        if (!changed) return prev;
+        return {
+          ...prev,
+          [side]: {
+            ...currentTree,
+            nodes: nextNodes,
+          },
+        };
+      });
+    }
 
-    const getPlyDepth = (nodeId: string) => {
-      let depth = 0;
-      let cursor: string | null = nodeId;
-      while (cursor) {
-        const current: MoveNode | undefined = sourceTree.nodes[cursor];
-        if (!current?.parentId) break;
-        depth += 1;
-        cursor = current.parentId;
+    const byRepo = new Map<string, string[]>();
+    targets.forEach((target) => {
+      if (!target.repoId) return;
+      const existing = byRepo.get(target.repoId) ?? [];
+      existing.push(target.nodeId);
+      byRepo.set(target.repoId, existing);
+    });
+    if (byRepo.size > 0) {
+      setRepertoiresBySide((prev) => {
+        const list = prev[side];
+        let changedAny = false;
+        const nextList = list.map((entry) => {
+          const targetNodeIds = byRepo.get(entry.id);
+          if (!targetNodeIds || targetNodeIds.length === 0) return entry;
+          const targetSet = new Set(targetNodeIds);
+          const nextNodes = { ...entry.tree.nodes };
+          let changed = false;
+          targetSet.forEach((nodeId) => {
+            const node = nextNodes[nodeId];
+            if (!node) return;
+            if (node.stockfishEval === scoreText) return;
+            nextNodes[nodeId] = { ...node, stockfishEval: scoreText };
+            changed = true;
+          });
+          if (!changed) return entry;
+          changedAny = true;
+          return {
+            ...entry,
+            tree: {
+              ...entry.tree,
+              nodes: nextNodes,
+            },
+          };
+        });
+        if (!changedAny) return prev;
+        return {
+          ...prev,
+          [side]: nextList,
+        };
+      });
+    }
+  };
+
+  const fetchLichessCloudEval = async (fen: string): Promise<string | null> => {
+    const normalizedFen = fen === START_FEN ? new Chess().fen() : fen;
+    const url = `https://lichess.org/api/cloud-eval?fen=${encodeURIComponent(normalizedFen)}&multiPv=1`;
+
+    for (let attempt = 0; attempt <= CLOUD_EVAL_MAX_RETRIES; attempt += 1) {
+      if (treeEvalCancelRef.current) return null;
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 12000);
+      try {
+        const response = await fetch(url, { signal: controller.signal });
+        if (response.status === 429) {
+          const retryAfterMs =
+            parseRetryAfterMs(response.headers.get('Retry-After')) ??
+            CLOUD_EVAL_RETRY_FALLBACK_MS * Math.max(1, attempt + 1);
+          if (attempt < CLOUD_EVAL_MAX_RETRIES) {
+            await waitMs(retryAfterMs);
+            continue;
+          }
+          return null;
+        }
+        if (!response.ok) return null;
+        const data = (await response.json()) as {
+          pvs?: Array<{ cp?: number; mate?: number }>;
+          error?: string;
+        };
+        if (data?.error) return null;
+        const first = data?.pvs?.[0];
+        if (!first) return null;
+        const perspective = whitePerspectiveMultiplierFromFen(normalizedFen);
+        if (typeof first.cp === 'number' && Number.isFinite(first.cp)) return formatSignedCp(first.cp * perspective);
+        if (typeof first.mate === 'number' && Number.isFinite(first.mate)) return formatSignedMate(first.mate * perspective);
+        return null;
+      } catch {
+        if (attempt < CLOUD_EVAL_MAX_RETRIES) {
+          await waitMs(CLOUD_EVAL_RETRY_FALLBACK_MS);
+          continue;
+        }
+        return null;
+      } finally {
+        window.clearTimeout(timeout);
       }
-      return depth;
-    };
+    }
+    return null;
+  };
 
-    const nodesToAnalyze = Object.values(sourceTree.nodes).filter(
-      (node) => node.children.length === 0 && getPlyDepth(node.id) >= 8,
-    );
-    if (nodesToAnalyze.length === 0) return;
+  const runTreeStockfishEval = async () => {
+    if (isTreeEvalRunning) return;
+    const worker = stockfishRef.current;
+    if (!worker) return;
+    const missingTargets = collectTreeEvalTargets(true);
+    if (missingTargets.length === 0) {
+      setTreeEvalProgress({
+        running: false,
+        phase: 'done',
+        cloud: { done: 0, total: 0 },
+        local: { done: 0, total: 0 },
+      });
+      return;
+    }
 
     setEngineRunning(false);
     treeEvalCancelRef.current = false;
     pendingAnalysisRef.current = null;
     worker.postMessage('stop');
     setEngineStatus('analyzing');
-    setTreeEvalProgress({ running: true, done: 0, total: nodesToAnalyze.length });
+    setTreeEvalProgress({
+      running: true,
+      phase: 'cloud',
+      cloud: { done: 0, total: missingTargets.length },
+      local: { done: 0, total: 0 },
+    });
+
+    const byFen = new Map<string, Array<{ repoId: string | null; nodeId: string; fen: string }>>();
+    missingTargets.forEach((target) => {
+      const fenKey = positionFenKey(target.fen);
+      const existing = byFen.get(fenKey) ?? [];
+      existing.push(target);
+      byFen.set(fenKey, existing);
+    });
+
+    const unresolvedFenGroups: Array<Array<{ repoId: string | null; nodeId: string; fen: string }>> = [];
+    for (const [fenKey, group] of byFen.entries()) {
+      if (treeEvalCancelRef.current) break;
+      let scoreText = treeEvalFenCacheRef.current.get(fenKey) ?? null;
+      if (!scoreText) {
+        scoreText = await fetchLichessCloudEval(group[0].fen);
+        if (!treeEvalCancelRef.current) {
+          await waitMs(CLOUD_EVAL_MIN_INTERVAL_MS);
+        }
+      }
+      if (scoreText) {
+        treeEvalFenCacheRef.current.set(fenKey, scoreText);
+        applyTreeEvalToTargets(group, scoreText);
+      } else {
+        unresolvedFenGroups.push(group);
+      }
+      setTreeEvalProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              cloud: {
+                ...prev.cloud,
+                done: Math.min(prev.cloud.total, prev.cloud.done + group.length),
+              },
+            }
+          : prev,
+      );
+    }
+
+    const localTotal = unresolvedFenGroups.reduce((acc, group) => acc + group.length, 0);
+    setTreeEvalProgress((prev) =>
+      prev
+        ? {
+            ...prev,
+            phase: 'local',
+            local: { done: 0, total: localTotal },
+          }
+        : prev,
+    );
 
     const waitForReady = async () => {
       if (engineReadyRef.current) return true;
@@ -3368,50 +4810,104 @@ function App() {
       return false;
     };
 
-    const ready = await waitForReady();
-    if (!ready) {
-      setTreeEvalProgress(null);
-      setEngineStatus('stopped');
-      return;
+    if (!treeEvalCancelRef.current && localTotal > 0) {
+      const ready = await waitForReady();
+      if (!ready) {
+        setTreeEvalProgress((prev) => (prev ? { ...prev, running: false, phase: 'done' } : prev));
+        setEngineStatus('stopped');
+        return;
+      }
     }
 
-    for (let i = 0; i < nodesToAnalyze.length; i += 1) {
+    for (const group of unresolvedFenGroups) {
       if (treeEvalCancelRef.current) break;
-      const node = nodesToAnalyze[i];
-      const fen = node.fen === START_FEN ? new Chess().fen() : node.fen;
-
-      const scoreText = await new Promise<string | null>((resolve) => {
-        treeEvalAwaiterRef.current = { latestScore: null, resolve };
-        engineWhitePerspectiveMultiplierRef.current = whitePerspectiveMultiplierFromFen(fen);
-        worker.postMessage('setoption name MultiPV value 1');
-        worker.postMessage(`position fen ${fen}`);
-        worker.postMessage(`go movetime ${stockfishEvalSeconds * 1000}`);
-      });
+      const fenKey = positionFenKey(group[0].fen);
+      let scoreText = treeEvalFenCacheRef.current.get(fenKey) ?? null;
+      if (!scoreText) {
+        const normalizedFen = group[0].fen === START_FEN ? new Chess().fen() : group[0].fen;
+        scoreText = await new Promise<string | null>((resolve) => {
+          treeEvalAwaiterRef.current = { latestScore: null, resolve };
+          engineWhitePerspectiveMultiplierRef.current = whitePerspectiveMultiplierFromFen(normalizedFen);
+          worker.postMessage('setoption name MultiPV value 1');
+          worker.postMessage(`position fen ${normalizedFen}`);
+          worker.postMessage(`go movetime ${stockfishEvalSeconds * 1000}`);
+        });
+      }
       if (treeEvalCancelRef.current) break;
+      if (scoreText) {
+        treeEvalFenCacheRef.current.set(fenKey, scoreText);
+        applyTreeEvalToTargets(group, scoreText);
+      }
+      setTreeEvalProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              local: {
+                ...prev.local,
+                done: Math.min(prev.local.total, prev.local.done + group.length),
+              },
+            }
+          : prev,
+      );
+    }
 
-      setTrees((prev) => {
-        const currentTree = prev[side];
-        const currentNode = currentTree.nodes[node.id];
-        if (!currentNode) return prev;
+    setTreeEvalProgress((prev) => (prev ? { ...prev, running: false, phase: 'done' } : prev));
+    setEngineStatus('stopped');
+  };
+
+  const clearAllTreeStockfishEvals = () => {
+    const side = activeSide;
+    treeEvalFenCacheRef.current.clear();
+    if (isBrowseMode) {
+      setRepertoiresBySide((prev) => {
+        const next = prev[side].map((entry) => {
+          const nextNodes: Record<string, MoveNode> = {};
+          let changed = false;
+          Object.entries(entry.tree.nodes).forEach(([nodeId, node]) => {
+            if (node.stockfishEval) {
+              nextNodes[nodeId] = { ...node, stockfishEval: null };
+              changed = true;
+            } else {
+              nextNodes[nodeId] = node;
+            }
+          });
+          if (!changed) return entry;
+          return {
+            ...entry,
+            tree: {
+              ...entry.tree,
+              nodes: nextNodes,
+            },
+          };
+        });
         return {
           ...prev,
-          [side]: {
-            ...currentTree,
-            nodes: {
-              ...currentTree.nodes,
-              [node.id]: {
-                ...currentNode,
-                stockfishEval: scoreText ?? null,
-              },
-            },
-          },
+          [side]: next,
         };
       });
-      setTreeEvalProgress({ running: true, done: i + 1, total: nodesToAnalyze.length });
+      return;
     }
-
-    setTreeEvalProgress((prev) => (prev ? { ...prev, running: false } : null));
-    setEngineStatus('stopped');
+    setTrees((prev) => {
+      const currentTree = prev[side];
+      const nextNodes: Record<string, MoveNode> = {};
+      let changed = false;
+      Object.entries(currentTree.nodes).forEach(([nodeId, node]) => {
+        if (node.stockfishEval) {
+          nextNodes[nodeId] = { ...node, stockfishEval: null };
+          changed = true;
+        } else {
+          nextNodes[nodeId] = node;
+        }
+      });
+      if (!changed) return prev;
+      return {
+        ...prev,
+        [side]: {
+          ...currentTree,
+          nodes: nextNodes,
+        },
+      };
+    });
   };
 
   const stopTreeStockfishEval = () => {
@@ -3420,6 +4916,69 @@ function App() {
     pendingAnalysisRef.current = null;
     stockfishRef.current?.postMessage('stop');
   };
+
+  const treeEvalScopeStats = useMemo(() => {
+    const hasEval = (node: MoveNode) => typeof node.stockfishEval === 'string' && node.stockfishEval.trim().length > 0;
+    if (isBrowseMode) {
+      const nodes = repertoiresBySide[activeSide].flatMap((entry) => Object.values(entry.tree.nodes));
+      const missing = nodes.reduce((acc, node) => acc + (hasEval(node) ? 0 : 1), 0);
+      return { total: nodes.length, missing };
+    }
+    const nodes = Object.values(trees[activeSide].nodes);
+    const missing = nodes.reduce((acc, node) => acc + (hasEval(node) ? 0 : 1), 0);
+    return { total: nodes.length, missing };
+  }, [isBrowseMode, repertoiresBySide, trees, activeSide]);
+
+  const dbStatsBySide = useMemo(() => {
+    const hasEval = (node: MoveNode) => typeof node.stockfishEval === 'string' && node.stockfishEval.trim().length > 0;
+    const summarize = (entry: RepertoireEntry, side: Side) => {
+      const nodes = Object.values(entry.tree.nodes);
+      const nodeCount = nodes.length;
+      const leafCount = nodes.reduce((acc, node) => acc + (node.children.length === 0 ? 1 : 0), 0);
+      const missingEvalCount = nodes.reduce((acc, node) => acc + (hasEval(node) ? 0 : 1), 0);
+      const scopeId = `repo:${entry.id}`;
+      const scopeStats = trainingStatsBySide[side][scopeId] ?? {};
+      const scopeLeafLastShown = trainingLeafLastShownBySide[side][scopeId] ?? {};
+      const repoFenKeys = new Set(nodes.map((node) => positionFenKey(node.fen)));
+      let trainedPositionCount = 0;
+      let recentAttemptCount = 0;
+      let recentCorrectCount = 0;
+      let summedPositionSuccess = 0;
+      Object.entries(scopeStats).forEach(([fenKey, stat]) => {
+        if (!repoFenKeys.has(fenKey)) return;
+        if (stat.recentAnswers.length === 0) return;
+        const positionCorrectCount = stat.recentAnswers.reduce((acc, answer) => acc + (answer ? 1 : 0), 0);
+        trainedPositionCount += 1;
+        recentAttemptCount += stat.recentAnswers.length;
+        recentCorrectCount += positionCorrectCount;
+        summedPositionSuccess += positionCorrectCount / stat.recentAnswers.length;
+      });
+      const trainedLineCount = Object.keys(scopeLeafLastShown).length;
+      const trainedCoveragePct = leafCount > 0 ? Math.round((trainedLineCount / leafCount) * 100) : 0;
+      const recentSuccessPct = recentAttemptCount > 0 ? Math.round((recentCorrectCount / recentAttemptCount) * 100) : null;
+      const avgPositionSuccessPct = trainedPositionCount > 0 ? Math.round((summedPositionSuccess / trainedPositionCount) * 100) : null;
+      const lastTrainedAt =
+        Object.values(scopeLeafLastShown).reduce((latest, value) => (value > latest ? value : latest), 0) || null;
+      return {
+        id: entry.id,
+        name: entry.name,
+        nodeCount,
+        leafCount,
+        missingEvalCount,
+        trainedLineCount,
+        trainedCoveragePct,
+        trainedPositionCount,
+        recentAttemptCount,
+        recentSuccessPct,
+        avgPositionSuccessPct,
+        lastTrainedAt,
+      };
+    };
+    return {
+      white: repertoiresBySide.white.map((entry) => summarize(entry, 'white')),
+      black: repertoiresBySide.black.map((entry) => summarize(entry, 'black')),
+    };
+  }, [repertoiresBySide, trainingStatsBySide, trainingLeafLastShownBySide]);
 
   useEffect(() => {
     if (isBrowseMode) return;
@@ -3467,14 +5026,14 @@ function App() {
   }, [activeSide, isBrowseMode, lichessData, lichessStatus, selectedNodeBySide]);
 
   const goBackOneMove = () => {
-    if (isTrainingActive) return;
+    if (isTrainingActive || isSuddenDeathActive) return;
     const parentId = selectedNode.parentId;
     if (!parentId) return;
     navigateToNode(activeSide, parentId);
   };
 
   const goBackToPreviousBranchMove = () => {
-    if (isTrainingActive) return;
+    if (isTrainingActive || isSuddenDeathActive) return;
     let cursorId = selectedNode.parentId;
     while (cursorId) {
       const node = tree.nodes[cursorId];
@@ -3545,13 +5104,106 @@ function App() {
     goBackOneMove();
   };
 
-  const handleTrainButtonClick: MouseEventHandler<HTMLButtonElement> = () => {
+  const clearTrainButtonLongPress = () => {
+    if (trainButtonLongPressTimeoutRef.current !== null) {
+      window.clearTimeout(trainButtonLongPressTimeoutRef.current);
+      trainButtonLongPressTimeoutRef.current = null;
+    }
+  };
+
+  const handleTrainButtonPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
+    if (isTrainingActive) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    clearTrainButtonLongPress();
+    trainButtonLongPressHandledRef.current = false;
+    trainButtonLongPressTimeoutRef.current = window.setTimeout(() => {
+      trainButtonLongPressHandledRef.current = true;
+      setPortraitTab('moves');
+      setIsTrainingStatsMenuOpen(true);
+      setIsMoveToolsOpen(false);
+    }, 420);
+  };
+
+  const handleTrainButtonPointerEnd = () => {
+    clearTrainButtonLongPress();
+  };
+
+  const handleTrainButtonClick: MouseEventHandler<HTMLButtonElement> = (event) => {
+    if (trainButtonLongPressHandledRef.current) {
+      event.preventDefault();
+      trainButtonLongPressHandledRef.current = false;
+      return;
+    }
     if (isTrainingActive) {
       stopTraining();
       return;
     }
-    if (!canStartTraining) return;
     startTraining();
+  };
+
+  const clearSuddenDeathButtonLongPress = () => {
+    if (suddenDeathButtonLongPressTimeoutRef.current !== null) {
+      window.clearTimeout(suddenDeathButtonLongPressTimeoutRef.current);
+      suddenDeathButtonLongPressTimeoutRef.current = null;
+    }
+  };
+
+  const handleSuddenDeathButtonPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    clearSuddenDeathButtonLongPress();
+    suddenDeathButtonLongPressHandledRef.current = false;
+    suddenDeathButtonLongPressTimeoutRef.current = window.setTimeout(() => {
+      suddenDeathButtonLongPressHandledRef.current = true;
+      setPortraitTab('moves');
+      setIsSuddenDeathSettingsOpen(true);
+      setIsTrainingStatsMenuOpen(false);
+      setIsMoveToolsOpen(false);
+    }, 420);
+  };
+
+  const handleSuddenDeathButtonPointerEnd = () => {
+    clearSuddenDeathButtonLongPress();
+  };
+
+  const handleSuddenDeathButtonClick: MouseEventHandler<HTMLButtonElement> = (event) => {
+    if (suddenDeathButtonLongPressHandledRef.current) {
+      event.preventDefault();
+      suddenDeathButtonLongPressHandledRef.current = false;
+      return;
+    }
+    toggleSuddenDeathMode();
+  };
+
+  const clearMovesButtonLongPress = () => {
+    if (movesButtonLongPressTimeoutRef.current !== null) {
+      window.clearTimeout(movesButtonLongPressTimeoutRef.current);
+      movesButtonLongPressTimeoutRef.current = null;
+    }
+  };
+
+  const handlePortraitMovesPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    clearMovesButtonLongPress();
+    movesButtonLongPressHandledRef.current = false;
+    movesButtonLongPressTimeoutRef.current = window.setTimeout(() => {
+      movesButtonLongPressHandledRef.current = true;
+      setPortraitTab('moves');
+      setIsMoveToolsOpen(true);
+      setIsTrainingStatsMenuOpen(false);
+    }, 420);
+  };
+
+  const handlePortraitMovesPointerEnd = () => {
+    clearMovesButtonLongPress();
+  };
+
+  const handlePortraitMovesClick: MouseEventHandler<HTMLButtonElement> = (event) => {
+    if (movesButtonLongPressHandledRef.current) {
+      event.preventDefault();
+      movesButtonLongPressHandledRef.current = false;
+      return;
+    }
+    setPortraitTab('moves');
   };
 
   const clearDbButtonLongPress = () => {
@@ -3621,12 +5273,15 @@ function App() {
       clearInlineMoveLongPress();
       clearDbButtonLongPress();
       clearStockfishButtonLongPress();
+      clearTrainButtonLongPress();
+      clearSuddenDeathButtonLongPress();
+      clearMovesButtonLongPress();
     },
     [],
   );
 
   const deleteLastMove = () => {
-    if (isTrainingActive) return;
+    if (isTrainingActive || isSuddenDeathActive) return;
     const branchRootId = selectedNode.id;
     const parentId = selectedNode.parentId;
     if (!parentId) return;
@@ -3656,7 +5311,7 @@ function App() {
   };
 
   const undoNavigation = () => {
-    if (isTrainingActive) return;
+    if (isTrainingActive || isSuddenDeathActive) return;
     const stack = undoStackBySide[activeSide];
     if (stack.length === 0) return;
 
@@ -3690,6 +5345,11 @@ function App() {
                 <div className="status lichess-status-row">
                   {lichessStatus === 'loading' && <span className="spinner" aria-hidden="true" />}
                   <span>{visibleLichessStatus || 'loading'}</span>
+                </div>
+              )}
+              {lichessStatus === 'limited' && (
+                <div className="status lichess-rate-limit-note">
+                  Too many API calls. Lichess moves and arrows are temporarily paused to respect API limits.
                 </div>
               )}
               {lichessData && (
@@ -3835,9 +5495,9 @@ function App() {
                 </div>
               </div>
               <Board
-                fen={selectedNode.fen}
+                fen={boardFen}
                 orientation={boardOrientation}
-                lastMove={lastMove}
+                lastMove={boardLastMove}
                 arrows={trainingForActive ? trainingHintArrow : autoArrows}
                 onMove={makeMove}
               />
@@ -3872,10 +5532,14 @@ function App() {
                     </button>
                     <button
                       type="button"
-                      className={portraitTab === 'moves' ? 'active' : ''}
-                      onClick={() => setPortraitTab('moves')}
+                      className={`long-pressable-btn ${portraitTab === 'moves' ? 'active' : ''}`}
+                      onClick={handlePortraitMovesClick}
+                      onPointerDown={handlePortraitMovesPointerDown}
+                      onPointerUp={handlePortraitMovesPointerEnd}
+                      onPointerCancel={handlePortraitMovesPointerEnd}
+                      onPointerLeave={handlePortraitMovesPointerEnd}
                       aria-label="Moves"
-                      title="Moves"
+                      title="Moves (long press: options)"
                     >
                       <MoveIcon />
                     </button>
@@ -3883,14 +5547,55 @@ function App() {
                 )}
                 <button
                   type="button"
-                  className={`${isTrainingActive ? 'active training-stop-btn' : ''}`}
+                  className={`${isTrainingActive ? 'active training-stop-btn' : ''} long-pressable-btn`}
                   onClick={handleTrainButtonClick}
+                  onPointerDown={handleTrainButtonPointerDown}
+                  onPointerUp={handleTrainButtonPointerEnd}
+                  onPointerCancel={handleTrainButtonPointerEnd}
+                  onPointerLeave={handleTrainButtonPointerEnd}
                   aria-label={isTrainingActive ? 'Stop training' : 'Train'}
-                  title={isTrainingActive ? 'Stop training' : 'Train'}
+                  title={isTrainingActive ? 'Stop training' : 'Train (long press: options)'}
+                  disabled={!isTrainingActive && !canStartTrainingForActiveSide}
                 >
                   {isTrainingActive ? 'Stop training' : <TrainIcon />}
                 </button>
-                {isTrainingActive && isTrainingLineEnd && (
+                {!isTrainingActive && (
+                  <button
+                    type="button"
+                    className={
+                      trainingSession?.suddenDeathMode
+                        ? 'active sudden-death-toggle-btn mode-icon-btn has-submenu-dot'
+                        : 'sudden-death-toggle-btn mode-icon-btn has-submenu-dot'
+                    }
+                    onClick={handleSuddenDeathButtonClick}
+                    onPointerDown={handleSuddenDeathButtonPointerDown}
+                    onPointerUp={handleSuddenDeathButtonPointerEnd}
+                    onPointerCancel={handleSuddenDeathButtonPointerEnd}
+                    onPointerLeave={handleSuddenDeathButtonPointerEnd}
+                    aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
+                    title={isSuddenDeathActive ? 'Restart sudden death round (long press: options)' : 'Start sudden death training (long press: options)'}
+                    disabled={suddenDeathThinking}
+                  >
+                    <SuddenDeathIcon />
+                  </button>
+                )}
+                {isTrainingActive && (
+                  <button
+                    type="button"
+                    className={trainingSession?.flashcardMode ? 'active flashcard-toggle-btn mode-icon-btn' : 'flashcard-toggle-btn mode-icon-btn'}
+                    onClick={toggleFlashcardMode}
+                    aria-label="Toggle flashcard mode"
+                    title="Toggle flashcard mode"
+                  >
+                    <FlashcardIcon />
+                  </button>
+                )}
+                {isTrainingActive &&
+                  isTrainingLineEnd &&
+                  hasTrainingContent &&
+                  trainingAnsweredLines < trainingTotalLines &&
+                  !trainingSession?.flashcardMode &&
+                  !trainingSession?.suddenDeathMode && (
                   <button type="button" className="continue-portrait-btn" onClick={restartTrainingLine}>
                     Continue
                   </button>
@@ -3902,17 +5607,6 @@ function App() {
                     onClick={() => setTrainingSession((prev) => (prev ? { ...prev, hintVisible: true } : prev))}
                   >
                     Hint
-                  </button>
-                )}
-                {isTrainingActive && (
-                  <button
-                    type="button"
-                    className={`gear-btn training-stats-portrait-gear ${isTrainingStatsMenuOpen ? 'active' : ''}`}
-                    aria-label="Training statistics options"
-                    title="Training statistics options"
-                    onClick={() => setIsTrainingStatsMenuOpen((prev) => !prev)}
-                  >
-                    ⚙
                   </button>
                 )}
                 {!isTrainingActive && (
@@ -4021,6 +5715,15 @@ function App() {
                     </button>
                     <button
                       type="button"
+                      className={trainingSession?.flashcardMode ? 'flashcard-toggle-btn mode-icon-btn active' : 'flashcard-toggle-btn mode-icon-btn'}
+                      onClick={toggleFlashcardMode}
+                      aria-label="Toggle flashcard mode"
+                      title="Toggle flashcard mode"
+                    >
+                      <FlashcardIcon />
+                    </button>
+                    <button
+                      type="button"
                       className="gear-btn training-stats-gear-btn"
                       aria-label="Training statistics options"
                       title="Training statistics options"
@@ -4030,7 +5733,12 @@ function App() {
                     </button>
                   </div>
                   {isTrainingStatsMenuOpen && (
-                    <div className="training-stats-dropdown">
+                    <div
+                      ref={(element) => {
+                        trainingStatsMenuRef.current = element;
+                      }}
+                      className="training-stats-dropdown"
+                    >
                       <div className="training-stats-menu-actions">
                         <button
                           type="button"
@@ -4089,16 +5797,42 @@ function App() {
                   <div className="controls-row">
                     <span className="status">{`Errors: ${trainingErrorCount}`}</span>
                   </div>
+                  {trainingSession?.suddenDeathMode && suddenDeathThinking && (
+                    <div className="controls-row training-thinking-row">
+                      <span className="spinner" aria-hidden="true" />
+                      <span className="status">Stockfish thinking...</span>
+                    </div>
+                  )}
                   <div className="controls-row training-position-stats">
                     <span className="status">{`This position success rate: ${trainingPositionSuccessPct}%`}</span>
                   </div>
+                  {suddenDeathGameOver && (
+                    <div className="controls-row training-position-stats training-game-over-row">
+                      <span className="status">{`Sudden death over (${suddenDeathGameOver.side}): ${formatSignedCp(
+                        suddenDeathGameOver.baselineEvalCp * (suddenDeathGameOver.side === 'white' ? 1 : -1),
+                      )} -> ${formatSignedCp(
+                        suddenDeathGameOver.failedEvalCp * (suddenDeathGameOver.side === 'white' ? 1 : -1),
+                      )} (threshold ${(
+                        suddenDeathGameOver.thresholdCp / 100
+                      ).toFixed(2)})`}</span>
+                    </div>
+                  )}
+                  {isTrainingActive && trainingSession?.hintVisible && trainingHintMoveText && (
+                    <div className="controls-row training-position-stats">
+                      <span className="status">{`Hint move: ${trainingHintMoveText}`}</span>
+                    </div>
+                  )}
                   {trainingRepoOverallSuccessPct !== null && (
                     <div className="controls-row training-position-stats">
                       <span className="status">{`Overall success rate: ${trainingRepoOverallSuccessPct}%`}</span>
                     </div>
                   )}
                   <div className="controls-row">
-                    {isTrainingLineEnd && (
+                    {isTrainingLineEnd &&
+                      hasTrainingContent &&
+                      trainingAnsweredLines < trainingTotalLines &&
+                      !trainingSession?.flashcardMode &&
+                      !trainingSession?.suddenDeathMode && (
                       <button type="button" className="continue-training-btn desktop-only" onClick={restartTrainingLine}>
                         Continue
                       </button>
@@ -4107,6 +5841,56 @@ function App() {
                 </>
               ) : (
                 <>
+                  {isTrainingStatsMenuOpen && (
+                    <div
+                      ref={(element) => {
+                        trainingStatsMenuRef.current = element;
+                      }}
+                      className="training-stats-dropdown"
+                    >
+                      <div className="training-stats-menu-actions">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            clearActiveTrainingStatistics();
+                          }}
+                        >
+                          Clear current repertoire stats
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            clearAllTrainingStatistics();
+                          }}
+                        >
+                          Clear all stats
+                        </button>
+                      </div>
+                      <div className="slider-stack single-column">
+                        <label>
+                          {`Stats FIFO length: ${trainingStatsQueueLength}`}
+                          <span className="slider-field">
+                            <input
+                              className="threshold-slider"
+                              type="range"
+                              min={TRAINING_STATS_QUEUE_MIN}
+                              max={TRAINING_STATS_QUEUE_MAX}
+                              step={1}
+                              value={trainingStatsQueueLength}
+                              onChange={(e) => {
+                                const next = Number.parseInt(e.target.value, 10);
+                                if (Number.isFinite(next)) {
+                                  setTrainingStatsQueueLength(
+                                    Math.min(TRAINING_STATS_QUEUE_MAX, Math.max(TRAINING_STATS_QUEUE_MIN, next)),
+                                  );
+                                }
+                              }}
+                            />
+                          </span>
+                        </label>
+                      </div>
+                    </div>
+                  )}
                   <div className="controls-row">
                     <button
                       className="desktop-only back-btn"
@@ -4138,8 +5922,34 @@ function App() {
                       type="button"
                       onClick={handleTrainButtonClick}
                       title="Train"
+                      disabled={!canStartTrainingForActiveSide}
                     >
                       Train
+                    </button>
+                    <button
+                      type="button"
+                      className="sudden-death-toggle-btn mode-icon-btn desktop-only"
+                      onClick={handleSuddenDeathButtonClick}
+                      aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
+                      title={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
+                      disabled={suddenDeathThinking}
+                    >
+                      <SuddenDeathIcon />
+                    </button>
+                    <span className="controls-row-break" aria-hidden="true" />
+                    <button
+                      type="button"
+                      className="next-missing-btn"
+                      onClick={jumpToNextMissingLichessMove}
+                      disabled={!canRunFindMissingSearch}
+                      aria-label="Find missing popular opponent move"
+                      title={`Find missing popular opponent move (${lichessArrowThreshold}%+)`}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <circle cx="12" cy="12" r="4.2" />
+                        <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
+                        <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2" />
+                      </svg>
                     </button>
                     <div className="arrow-toggle-group">
                       <button
@@ -4165,6 +5975,17 @@ function App() {
                       />
                     </div>
                   </div>
+                  {suddenDeathGameOver && (
+                    <div className="controls-row training-position-stats training-game-over-row">
+                      <span className="status">{`Sudden death over (${suddenDeathGameOver.side}): ${formatSignedCp(
+                        suddenDeathGameOver.baselineEvalCp * (suddenDeathGameOver.side === 'white' ? 1 : -1),
+                      )} -> ${formatSignedCp(
+                        suddenDeathGameOver.failedEvalCp * (suddenDeathGameOver.side === 'white' ? 1 : -1),
+                      )} (threshold ${(
+                        suddenDeathGameOver.thresholdCp / 100
+                      ).toFixed(2)})`}</span>
+                    </div>
+                  )}
                   <div className="move-notation-line">
                     <div className="move-inline-wrap">
                       {inlineMoves.map((move) => (
@@ -4215,9 +6036,42 @@ function App() {
                       ))}
                     </div>
                   )}
+                  {repertoiresAtPosition.length === 0 && (
+                    <div className="repertoire-hit-block move-tools-only desktop-only">
+                      <div className="repertoire-hit-head">
+                        <span />
+                        <button
+                          type="button"
+                          className={`gear-btn ${isMoveToolsOpen ? 'active' : ''}`}
+                          aria-label="Move tools"
+                          title="Move tools"
+                          onClick={() => {
+                            setIsMoveToolsOpen((prev) => !prev);
+                            setIsTrainingStatsMenuOpen(false);
+                          }}
+                        >
+                          ⚙
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   {repertoiresAtPosition.length > 0 && (
                     <div className="repertoire-hit-block">
-                      <strong>Repertoires with this position</strong>
+                      <div className="repertoire-hit-head">
+                        <strong>Repertoires with this position</strong>
+                        <button
+                          type="button"
+                          className={`gear-btn desktop-only ${isMoveToolsOpen ? 'active' : ''}`}
+                          aria-label="Move tools"
+                          title="Move tools"
+                          onClick={() => {
+                            setIsMoveToolsOpen((prev) => !prev);
+                            setIsTrainingStatsMenuOpen(false);
+                          }}
+                        >
+                          ⚙
+                        </button>
+                      </div>
                       <div className="repertoire-hit-list">
                         {repertoiresAtPosition.map((item) => (
                           <button
@@ -4229,7 +6083,7 @@ function App() {
                                 enterBrowseMode(activeSide);
                                 return;
                               }
-                              loadRepertoire(item.id, activeSide);
+                              loadRepertoire(item.id, activeSide, true);
                             }}
                           >
                             {item.name}
@@ -4311,6 +6165,278 @@ function App() {
         </div>
       )}
 
+      {isMoveToolsOpen && (
+        <div className="modal-backdrop" onClick={() => setIsMoveToolsOpen(false)}>
+          <div className="modal-card stockfish-quick-modal move-tools-modal" onClick={(e) => e.stopPropagation()}>
+            <label className="inline-check">
+              <input
+                type="checkbox"
+                checked={showLichessOnTreeMoves}
+                onChange={(e) => setShowLichessOnTreeMoves(e.target.checked)}
+              />
+              Show Lichess arrows for tree moves
+            </label>
+            <div className="desktop-only">
+              <h3 className="eval-manager-title">Sudden death settings</h3>
+              <div className="slider-stack single-column">
+                <label>
+                  {`Max think time: ${suddenDeathMaxThinkTimeSec.toFixed(1)}s`}
+                  <span className="slider-field">
+                    <input
+                      className="threshold-slider"
+                      type="range"
+                      min={SUDDEN_DEATH_THINK_TIME_MIN}
+                      max={SUDDEN_DEATH_THINK_TIME_MAX}
+                      step={0.1}
+                      value={suddenDeathMaxThinkTimeSec}
+                      onChange={(e) => {
+                        const next = Number.parseFloat(e.target.value);
+                        if (Number.isFinite(next)) {
+                          setSuddenDeathMaxThinkTimeSec(
+                            Math.min(SUDDEN_DEATH_THINK_TIME_MAX, Math.max(SUDDEN_DEATH_THINK_TIME_MIN, next)),
+                          );
+                        }
+                      }}
+                    />
+                  </span>
+                </label>
+                <label>
+                  {`Drop threshold: ${suddenDeathThreshold.toFixed(1)}`}
+                  <span className="slider-field">
+                    <input
+                      className="threshold-slider"
+                      type="range"
+                      min={SUDDEN_DEATH_THRESHOLD_MIN}
+                      max={SUDDEN_DEATH_THRESHOLD_MAX}
+                      step={0.1}
+                      value={suddenDeathThreshold}
+                      onChange={(e) => {
+                        const next = Number.parseFloat(e.target.value);
+                        if (Number.isFinite(next)) {
+                          setSuddenDeathThreshold(
+                            Math.min(SUDDEN_DEATH_THRESHOLD_MAX, Math.max(SUDDEN_DEATH_THRESHOLD_MIN, next)),
+                          );
+                        }
+                      }}
+                    />
+                  </span>
+                </label>
+                <label>
+                  {`Stockfish: ${suddenDeathStockfishElo >= SUDDEN_DEATH_STOCKFISH_ELO_MAX ? 'Max' : suddenDeathStockfishElo}`}
+                  <span className="slider-field">
+                    <input
+                      className="threshold-slider"
+                      type="range"
+                      min={SUDDEN_DEATH_STOCKFISH_ELO_MIN}
+                      max={SUDDEN_DEATH_STOCKFISH_ELO_MAX}
+                      step={50}
+                      value={suddenDeathStockfishElo}
+                      onChange={(e) => {
+                        const next = Number.parseInt(e.target.value, 10);
+                        if (Number.isFinite(next)) {
+                          setSuddenDeathStockfishElo(
+                            Math.min(SUDDEN_DEATH_STOCKFISH_ELO_MAX, Math.max(SUDDEN_DEATH_STOCKFISH_ELO_MIN, next)),
+                          );
+                        }
+                      }}
+                    />
+                  </span>
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isSuddenDeathSettingsOpen && (
+        <div className="modal-backdrop" onClick={() => setIsSuddenDeathSettingsOpen(false)}>
+          <div className="modal-card stockfish-quick-modal sudden-death-settings-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="eval-manager-title">Sudden death settings</h3>
+            <div className="slider-stack single-column">
+              <label>
+                {`Max think time: ${suddenDeathMaxThinkTimeSec.toFixed(1)}s`}
+                <span className="slider-field">
+                  <input
+                    className="threshold-slider"
+                    type="range"
+                    min={SUDDEN_DEATH_THINK_TIME_MIN}
+                    max={SUDDEN_DEATH_THINK_TIME_MAX}
+                    step={0.1}
+                    value={suddenDeathMaxThinkTimeSec}
+                    onChange={(e) => {
+                      const next = Number.parseFloat(e.target.value);
+                      if (Number.isFinite(next)) {
+                        setSuddenDeathMaxThinkTimeSec(
+                          Math.min(SUDDEN_DEATH_THINK_TIME_MAX, Math.max(SUDDEN_DEATH_THINK_TIME_MIN, next)),
+                        );
+                      }
+                    }}
+                  />
+                </span>
+              </label>
+              <label>
+                {`Drop threshold: ${suddenDeathThreshold.toFixed(1)}`}
+                <span className="slider-field">
+                  <input
+                    className="threshold-slider"
+                    type="range"
+                    min={SUDDEN_DEATH_THRESHOLD_MIN}
+                    max={SUDDEN_DEATH_THRESHOLD_MAX}
+                    step={0.1}
+                    value={suddenDeathThreshold}
+                    onChange={(e) => {
+                      const next = Number.parseFloat(e.target.value);
+                      if (Number.isFinite(next)) {
+                        setSuddenDeathThreshold(
+                          Math.min(SUDDEN_DEATH_THRESHOLD_MAX, Math.max(SUDDEN_DEATH_THRESHOLD_MIN, next)),
+                        );
+                      }
+                    }}
+                  />
+                </span>
+              </label>
+              <label>
+                {`Stockfish: ${suddenDeathStockfishElo >= SUDDEN_DEATH_STOCKFISH_ELO_MAX ? 'Max' : suddenDeathStockfishElo}`}
+                <span className="slider-field">
+                  <input
+                    className="threshold-slider"
+                    type="range"
+                    min={SUDDEN_DEATH_STOCKFISH_ELO_MIN}
+                    max={SUDDEN_DEATH_STOCKFISH_ELO_MAX}
+                    step={50}
+                    value={suddenDeathStockfishElo}
+                    onChange={(e) => {
+                      const next = Number.parseInt(e.target.value, 10);
+                      if (Number.isFinite(next)) {
+                        setSuddenDeathStockfishElo(
+                          Math.min(SUDDEN_DEATH_STOCKFISH_ELO_MAX, Math.max(SUDDEN_DEATH_STOCKFISH_ELO_MIN, next)),
+                        );
+                      }
+                    }}
+                  />
+                </span>
+              </label>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isEvalManagerOpen && (
+        <div className="modal-backdrop" onClick={() => { if (!isTreeEvalRunning) setIsEvalManagerOpen(false); }}>
+          <div className="modal-card stockfish-quick-modal eval-manager-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="eval-manager-title">Stockfish evals</h3>
+            <div className="eval-progress-block">
+              <div className="eval-progress-label">
+                {`Cloud API: ${treeEvalProgress?.cloud.done ?? 0}/${treeEvalProgress?.cloud.total ?? treeEvalScopeStats.missing}`}
+              </div>
+              <div className="eval-progress-track">
+                <div
+                  className="eval-progress-fill cloud"
+                  style={{
+                    width: `${Math.round(
+                      ((treeEvalProgress?.cloud.done ?? 0) /
+                        Math.max(1, treeEvalProgress?.cloud.total ?? treeEvalScopeStats.missing)) *
+                        100,
+                    )}%`,
+                  }}
+                />
+              </div>
+            </div>
+            <div className="eval-progress-block">
+              <div className="eval-progress-label">
+                {`Local fallback: ${treeEvalProgress?.local.done ?? 0}/${treeEvalProgress?.local.total ?? 0}`}
+              </div>
+              <div className="eval-progress-track">
+                <div
+                  className="eval-progress-fill local"
+                  style={{
+                    width: `${Math.round(
+                      ((treeEvalProgress?.local.done ?? 0) / Math.max(1, treeEvalProgress?.local.total ?? 0)) * 100,
+                    )}%`,
+                  }}
+                />
+              </div>
+            </div>
+            <div className="eval-manager-summary">
+              {`Nodes with evals: ${treeEvalScopeStats.total - treeEvalScopeStats.missing}/${treeEvalScopeStats.total}`}
+            </div>
+            <div className="eval-manager-actions">
+              <button
+                type="button"
+                onClick={() => {
+                  void runTreeStockfishEval();
+                }}
+                disabled={isTreeEvalRunning || treeEvalScopeStats.missing === 0}
+              >
+                Start process
+              </button>
+              <button type="button" onClick={stopTreeStockfishEval} disabled={!isTreeEvalRunning}>
+                Stop
+              </button>
+              <button type="button" className="danger" onClick={clearAllTreeStockfishEvals} disabled={isTreeEvalRunning}>
+                Remove all existing evals
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {suddenDeathGameOver && (
+        <div className="modal-backdrop" onClick={closeSuddenDeathGameOverPopup}>
+          <div className="modal-card stockfish-quick-modal eval-manager-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="eval-manager-title">Sudden death over</h3>
+            <div className="status">{`${suddenDeathGameOver.side}: ${formatSignedCp(
+              suddenDeathGameOver.baselineEvalCp * (suddenDeathGameOver.side === 'white' ? 1 : -1),
+            )} -> ${formatSignedCp(suddenDeathGameOver.failedEvalCp * (suddenDeathGameOver.side === 'white' ? 1 : -1))}`}</div>
+            <div className="status">{`Drop threshold: ${(suddenDeathGameOver.thresholdCp / 100).toFixed(2)}`}</div>
+            <div className="eval-manager-actions">
+              <button type="button" onClick={closeSuddenDeathGameOverPopup}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isDbStatsOpen && (
+        <div className="modal-backdrop" onClick={() => setIsDbStatsOpen(false)}>
+          <div className="modal-card db-stats-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="eval-manager-title">DB stats</h3>
+            {(['white', 'black'] as Side[]).map((side) => (
+              <section key={side} className="db-stats-side">
+                <h4>{side}</h4>
+                {dbStatsBySide[side].length === 0 ? (
+                  <div className="status">No repertoires</div>
+                ) : (
+                  <div className="db-stats-list">
+                    {dbStatsBySide[side].map((entry) => (
+                      <div key={entry.id} className="db-stats-item">
+                        <div className="db-stats-name" title={entry.name}>
+                          {entry.name}
+                        </div>
+                        <div className="db-stats-values">
+                          <span>{`Nodes: ${entry.nodeCount}`}</span>
+                          <span>{`Leaves: ${entry.leafCount}`}</span>
+                          <span>{`Missing evals: ${entry.missingEvalCount}`}</span>
+                        </div>
+                        <div className="db-stats-values db-stats-training">
+                          <span>{`Lines trained: ${entry.trainedLineCount}/${entry.leafCount} (${entry.trainedCoveragePct}%)`}</span>
+                          <span>{`Positions trained: ${entry.trainedPositionCount}`}</span>
+                          <span>{`Recent attempts: ${entry.recentAttemptCount}`}</span>
+                          <span>{`Recent success: ${entry.recentSuccessPct ?? 0}%`}</span>
+                          <span>{`Avg position success: ${entry.avgPositionSuccessPct ?? 0}%`}</span>
+                          <span>{`Last trained: ${formatTrainedAt(entry.lastTrainedAt)}`}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            ))}
+          </div>
+        </div>
+      )}
+
       {isOptionsOpen && (
         <div className="modal-backdrop" onClick={() => { if (!isTreeEvalRunning) setIsOptionsOpen(false); }}>
           <div className="modal-card options-modal" onClick={(e) => e.stopPropagation()}>
@@ -4379,18 +6505,20 @@ function App() {
                 Import into current repertoire
               </button>
               <button
-                disabled={isBrowseMode}
                 onClick={() => {
-                  if (isTreeEvalRunning) {
-                    stopTreeStockfishEval();
-                    return;
-                  }
-                  void runTreeStockfishEval();
+                  setIsOptionsOpen(false);
+                  setIsEvalManagerOpen(true);
                 }}
               >
-                {isTreeEvalRunning
-                  ? `Stop adding evals (${treeEvalProgress?.done ?? 0}/${treeEvalProgress?.total ?? 0})`
-                  : 'Add Stockfish evals to repertoire'}
+                Add Stockfish evals
+              </button>
+              <button
+                onClick={() => {
+                  setIsOptionsOpen(false);
+                  setIsDbStatsOpen(true);
+                }}
+              >
+                DB stats
               </button>
               <button
                 disabled={isTreeEvalRunning || !hasExportableDbGames}
@@ -4777,14 +6905,6 @@ function App() {
                   </span>
                 </label>
               </div>
-              <label className="inline-check">
-                <input
-                  type="checkbox"
-                  checked={showLichessOnTreeMoves}
-                  onChange={(e) => setShowLichessOnTreeMoves(e.target.checked)}
-                />
-                Show Lichess arrows for tree moves
-              </label>
             </div>
           </div>
         </div>
@@ -4794,3 +6914,10 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
+
+
