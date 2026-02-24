@@ -2759,7 +2759,10 @@ function App() {
     if (isAndroid) {
       const fallbackUrl = encodeURIComponent(url);
       const intentUrl = `intent://lichess.org/analysis/${encodedFenPath}?color=${boardOrientation}#Intent;scheme=https;package=org.lichess.mobileV2;S.browser_fallback_url=${fallbackUrl};end`;
-      window.location.href = intentUrl;
+      const opened = window.open(intentUrl, '_blank', 'noopener,noreferrer');
+      if (!opened) {
+        window.location.href = intentUrl;
+      }
       return;
     }
 
@@ -2941,7 +2944,7 @@ function App() {
   const visibleEngineStatus =
     engineStatus === 'done' || engineStatus === 'stopped' || engineStatus === 'analyzing' ? '' : engineStatus;
   const currentEngineEval = engineLines[0]?.scoreText ?? selectedNode.stockfishEval ?? null;
-  const visibleEngineEval = currentEngineEval ? `eval ${currentEngineEval}` : '';
+  const visibleEngineEval = currentEngineEval ? `(${currentEngineEval})` : '';
   const visibleLichessStatus = lichessStatus === 'done' || lichessStatus === 'idle' ? '' : lichessStatus;
   const openingFullTitle = resolvedOpening ? `${resolvedOpening.eco} ${resolvedOpening.name}` : '';
   const openingTitleContent = useMemo(() => {
@@ -3825,8 +3828,10 @@ function App() {
                     black={lichessData?.black ?? 0}
                     total={lichessTotal}
                   />
-                  <span className="games-total">{formatGamesCount(lichessTotal)}</span>
-                  <span className="status stockfish-eval-text stats-eval-slot">{visibleEngineEval || '\u00A0'}</span>
+                  <span className="games-total">
+                    {formatGamesCount(lichessTotal)}
+                    {visibleEngineEval && <span className="games-eval-inline">{` ${visibleEngineEval}`}</span>}
+                  </span>
                 </div>
               </div>
               <Board

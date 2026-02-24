@@ -245,10 +245,9 @@ select {
   white-space: nowrap;
 }
 
-.stats-eval-slot {
-  margin-left: auto;
-  min-width: 6.4rem;
-  text-align: right;
+.games-eval-inline {
+  font-size: 0.88em;
+  margin-left: 0.2em;
 }
 
 .current-repertoire {
