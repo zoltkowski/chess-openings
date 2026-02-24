@@ -245,6 +245,12 @@ select {
   white-space: nowrap;
 }
 
+.stats-eval-slot {
+  margin-left: auto;
+  min-width: 6.4rem;
+  text-align: right;
+}
+
 .current-repertoire {
   color: #475569;
   font-size: 0.82rem;
@@ -729,22 +735,8 @@ select {
   display: none;
 }
 
-.stockfish-eval-row {
-  width: min(100%, 760px);
-  margin: 0 auto;
-  margin-top: -0.08rem;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-}
-
 .stockfish-eval-text {
   font-weight: 600;
-}
-
-.portrait-stockfish-eval {
-  margin-left: auto;
-  font-size: 0.82rem;
 }
 
 
@@ -1333,11 +1325,6 @@ select {
     position: relative;
   }
 
-  .portrait-tabbar .portrait-stockfish-eval {
-    margin-left: auto;
-    font-size: 0.72rem;
-  }
-
   .portrait-tabbar .active {
     background: #dbeafe;
     border-color: #93c5fd;
@@ -1377,7 +1364,7 @@ select {
     width: 5rem;
     min-width: 5rem;
     margin-left: auto;
-    margin-right: auto;
+    margin-right: 0;
   }
 
   .desktop-only {

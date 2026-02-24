@@ -3825,7 +3825,8 @@ function App() {
                     black={lichessData?.black ?? 0}
                     total={lichessTotal}
                   />
-                  <span className="games-total">{formatGamesCount(lichessTotal)} games</span>
+                  <span className="games-total">{formatGamesCount(lichessTotal)}</span>
+                  <span className="status stockfish-eval-text stats-eval-slot">{visibleEngineEval || '\u00A0'}</span>
                 </div>
               </div>
               <Board
@@ -3835,11 +3836,6 @@ function App() {
                 arrows={trainingForActive ? trainingHintArrow : autoArrows}
                 onMove={makeMove}
               />
-              {visibleEngineEval && (
-                <div className="stockfish-eval-row desktop-only">
-                  <span className="status stockfish-eval-text">{visibleEngineEval}</span>
-                </div>
-              )}
               <div className="portrait-tabbar">
                 {!isTrainingActive && (
                   <>
@@ -3929,9 +3925,6 @@ function App() {
                   >
                     <BackIcon />
                   </button>
-                )}
-                {!isTrainingActive && (
-                  <span className="status stockfish-eval-text portrait-stockfish-eval">{visibleEngineEval || ''}</span>
                 )}
               </div>
             </div>
