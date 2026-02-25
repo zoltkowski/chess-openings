@@ -2617,7 +2617,7 @@ function App() {
         if (controller.signal.aborted && abortedByIdle && latestData) {
           setLichessStatus('done');
         } else if (!controller.signal.aborted) {
-          setLichessApiIssueNote((prev) => prev || 'Lichess API request failed. Showing cached data when available.');
+          setLichessApiIssueNote((prev) => prev || 'Lichess API error (?)');
           setLichessStatus('error');
         } else {
           setLichessStatus('error');
@@ -2810,7 +2810,7 @@ function App() {
         if (data) setLichessApiIssueNote('');
         return data ?? null;
       } catch {
-        setLichessApiIssueNote((prev) => prev || 'Lichess API request failed. Showing cached data when available.');
+        setLichessApiIssueNote((prev) => prev || 'Lichess API error (?)');
         return null;
       } finally {
         window.clearTimeout(timeout);
@@ -5505,12 +5505,12 @@ function App() {
                   <span>{visibleLichessStatus || 'loading'}</span>
                 </div>
               )}
-              {lichessStatus === 'limited' && (
+              {lichessStatus === 'limited' && !lichessData && (
                 <div className="status lichess-rate-limit-note">
                   {`Lichess API error (429), ${lichessData ? 'showing cached data' : 'no cached data'}`}
                 </div>
               )}
-              {lichessApiIssueNote && (
+              {lichessApiIssueNote && !lichessData && (
                 <div className="status lichess-rate-limit-note">{lichessApiIssueNote}</div>
               )}
               {lichessData && (
