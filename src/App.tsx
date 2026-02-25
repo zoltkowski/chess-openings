@@ -70,6 +70,11 @@ type LichessResponse = {
   moves: LichessMove[];
 };
 
+type LichessResponseCacheEntry = {
+  expiresAt: number;
+  data: LichessResponse;
+};
+
 type UndoSnapshot = {
   tree: MoveTree;
   selectedNodeId: string;
@@ -201,6 +206,7 @@ const APP_STATE_KEY = 'app-state-v1';
 const APP_SETTINGS_KEY = 'settings-v1';
 const APP_TRAINING_STATS_KEY = 'training-stats-v1';
 const APP_TRAINING_LEAF_LAST_SHOWN_KEY = 'training-leaf-last-shown-v1';
+const APP_LICHESS_RESPONSE_CACHE_KEY = 'lichess-response-cache-v1';
 const TRAINING_SCOPE_WHOLE_DB = 'whole-db';
 const TRAINING_STATS_QUEUE_MIN = 1;
 const TRAINING_STATS_QUEUE_MAX = 30;
@@ -215,6 +221,9 @@ const SUDDEN_DEATH_THINK_TIME_MAX = 5;
 // Conservative pacing for explorer API requests to avoid 429 and respect public API usage guidance.
 const LICHESS_API_MIN_INTERVAL_MS = 2000;
 const LICHESS_API_COOLDOWN_FALLBACK_MS = 120000;
+const LICHESS_CACHE_PLAYER_TTL_MS = 24 * 60 * 60 * 1000;
+const LICHESS_CACHE_DEFAULT_TTL_MS = 10 * 24 * 60 * 60 * 1000;
+const LICHESS_CACHE_DEFAULT_JITTER_MS = 5 * 24 * 60 * 60 * 1000;
 const CLOUD_EVAL_MIN_INTERVAL_MS = 1400;
 const CLOUD_EVAL_RETRY_FALLBACK_MS = 4000;
 const CLOUD_EVAL_MAX_RETRIES = 3;
@@ -1617,6 +1626,9 @@ function App() {
   const lichessRateLimitedUntilRef = useRef(0);
   const lichessNextRequestAtRef = useRef(0);
   const lichessRequestQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const lichessResponseCacheRef = useRef<Map<string, LichessResponseCacheEntry>>(new Map());
+  const lichessResponseCacheLoadedRef = useRef(false);
+  const lichessResponseCacheLoadPromiseRef = useRef<Promise<void> | null>(null);
   const trainingStatsMenuRef = useRef<HTMLDivElement | null>(null);
   const movePaneRef = useRef<HTMLElement | null>(null);
   const backLongPressTimeoutRef = useRef<number | null>(null);
@@ -2272,6 +2284,84 @@ function App() {
     }
   }, []);
 
+  const ensureLichessResponseCacheLoaded = useCallback(async () => {
+    if (lichessResponseCacheLoadedRef.current) return;
+    if (lichessResponseCacheLoadPromiseRef.current) {
+      await lichessResponseCacheLoadPromiseRef.current;
+      return;
+    }
+    lichessResponseCacheLoadPromiseRef.current = (async () => {
+      try {
+        const raw = await idbGet<Record<string, LichessResponseCacheEntry>>(APP_LICHESS_RESPONSE_CACHE_KEY);
+        const now = Date.now();
+        const nextMap = new Map<string, LichessResponseCacheEntry>();
+        if (raw && typeof raw === 'object') {
+          for (const [url, entry] of Object.entries(raw)) {
+            if (!entry || typeof entry !== 'object') continue;
+            if (typeof entry.expiresAt !== 'number' || !Number.isFinite(entry.expiresAt)) continue;
+            if (entry.expiresAt <= now) continue;
+            const data = (entry as LichessResponseCacheEntry).data;
+            if (!data || typeof data !== 'object' || !Array.isArray(data.moves)) continue;
+            nextMap.set(url, { expiresAt: entry.expiresAt, data });
+          }
+        }
+        lichessResponseCacheRef.current = nextMap;
+      } catch {
+        lichessResponseCacheRef.current = new Map();
+      } finally {
+        lichessResponseCacheLoadedRef.current = true;
+      }
+    })().finally(() => {
+      lichessResponseCacheLoadPromiseRef.current = null;
+    });
+    await lichessResponseCacheLoadPromiseRef.current;
+  }, []);
+
+  const persistLichessResponseCache = useCallback(async () => {
+    if (!lichessResponseCacheLoadedRef.current) return;
+    const now = Date.now();
+    const serialized: Record<string, LichessResponseCacheEntry> = {};
+    for (const [url, entry] of lichessResponseCacheRef.current.entries()) {
+      if (entry.expiresAt <= now) continue;
+      serialized[url] = entry;
+    }
+    await idbSet(APP_LICHESS_RESPONSE_CACHE_KEY, serialized).catch(() => {
+      // Keep cache write failures silent.
+    });
+  }, []);
+
+  const getCachedLichessResponse = useCallback(
+    async (url: string): Promise<LichessResponse | null> => {
+      await ensureLichessResponseCacheLoaded();
+      const now = Date.now();
+      const cached = lichessResponseCacheRef.current.get(url);
+      if (!cached) return null;
+      if (cached.expiresAt <= now) {
+        lichessResponseCacheRef.current.delete(url);
+        void persistLichessResponseCache();
+        return null;
+      }
+      return cached.data;
+    },
+    [ensureLichessResponseCacheLoaded, persistLichessResponseCache],
+  );
+
+  const setCachedLichessResponse = useCallback(
+    async (url: string, data: LichessResponse, source: LichessSource) => {
+      await ensureLichessResponseCacheLoaded();
+      const ttlMs =
+        source === 'player'
+          ? LICHESS_CACHE_PLAYER_TTL_MS
+          : LICHESS_CACHE_DEFAULT_TTL_MS + Math.floor(Math.random() * (LICHESS_CACHE_DEFAULT_JITTER_MS + 1));
+      lichessResponseCacheRef.current.set(url, {
+        expiresAt: Date.now() + ttlMs,
+        data,
+      });
+      void persistLichessResponseCache();
+    },
+    [ensureLichessResponseCacheLoaded, persistLichessResponseCache],
+  );
+
   useEffect(() => {
     const controller = new AbortController();
     const isPlayerWithoutHandle = lichessSource === 'player' && playerHandle.trim().length === 0;
@@ -2390,6 +2480,14 @@ function App() {
       const endpoint = lichessSource === 'player' ? 'player' : lichessSource;
       const url = `https://explorer.lichess.ovh/${endpoint}?${params.toString()}`;
 
+      const cachedResponse = await getCachedLichessResponse(url);
+      if (cachedResponse) {
+        setLichessData(cachedResponse);
+        setLichessDataFen(fenKey);
+        setLichessStatus('done');
+        return;
+      }
+
       const requestTimeoutMs = 120000;
       const idleTimeoutMs = 20000;
       let abortedByIdle = false;
@@ -2467,6 +2565,7 @@ function App() {
         }
 
         if (!latestData) throw new Error('Invalid Lichess payload');
+        void setCachedLichessResponse(url, latestData, lichessSource);
         setLichessStatus('done');
       } catch {
         if (controller.signal.aborted && abortedByIdle && latestData) {
@@ -2500,6 +2599,8 @@ function App() {
     lichessRateLimitedUntil,
     registerLichessRateLimit,
     waitForLichessRateSlot,
+    getCachedLichessResponse,
+    setCachedLichessResponse,
   ]);
 
   useEffect(() => {
@@ -2634,6 +2735,13 @@ function App() {
 
       const endpoint = lichessSource === 'player' ? 'player' : lichessSource;
       const url = `https://explorer.lichess.ovh/${endpoint}?${params.toString()}`;
+
+      const cachedResponse = await getCachedLichessResponse(url);
+      if (cachedResponse) {
+        lichessNodeLookupCacheRef.current.set(cacheKey, cachedResponse);
+        return cachedResponse;
+      }
+
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 20000);
       try {
@@ -2652,6 +2760,7 @@ function App() {
         const rawBody = await response.text();
         const data = parseLastJsonObject<LichessResponse>(rawBody);
         lichessNodeLookupCacheRef.current.set(cacheKey, data ?? null);
+        if (data) void setCachedLichessResponse(url, data, lichessSource);
         return data ?? null;
       } catch {
         lichessNodeLookupCacheRef.current.set(cacheKey, null);
@@ -2670,6 +2779,8 @@ function App() {
       selectedModes,
       registerLichessRateLimit,
       waitForLichessRateSlot,
+      getCachedLichessResponse,
+      setCachedLichessResponse,
     ],
   );
 
