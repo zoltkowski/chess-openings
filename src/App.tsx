@@ -224,6 +224,7 @@ const LICHESS_API_COOLDOWN_FALLBACK_MS = 120000;
 const LICHESS_CACHE_PLAYER_TTL_MS = 24 * 60 * 60 * 1000;
 const LICHESS_CACHE_DEFAULT_TTL_MS = 10 * 24 * 60 * 60 * 1000;
 const LICHESS_CACHE_DEFAULT_JITTER_MS = 5 * 24 * 60 * 60 * 1000;
+const LICHESS_API_HEALTHCHECK_INTERVAL_MS = 15 * 60 * 1000;
 const CLOUD_EVAL_MIN_INTERVAL_MS = 1400;
 const CLOUD_EVAL_RETRY_FALLBACK_MS = 4000;
 const CLOUD_EVAL_MAX_RETRIES = 3;
@@ -2261,9 +2262,7 @@ function App() {
     const nextUntil = Date.now() + Math.max(1000, retryAfterMs);
     lichessRateLimitedUntilRef.current = Math.max(lichessRateLimitedUntilRef.current, nextUntil);
     setLichessRateLimitedUntil((prev) => Math.max(prev ?? 0, nextUntil));
-    setLichessApiIssueNote('Lichess API rate limit (429). Showing cached data when available.');
-    setLichessData(null);
-    setLichessDataFen(null);
+    setLichessApiIssueNote('');
     setLichessStatus('limited');
   }, []);
 
@@ -2364,6 +2363,48 @@ function App() {
     [ensureLichessResponseCacheLoaded, persistLichessResponseCache],
   );
 
+  const checkLichessApiAvailability = useCallback(async () => {
+    const fen = START_POS_FEN;
+    const params = new URLSearchParams({
+      fen,
+      variant: FIXED_VARIANT,
+      color: 'white',
+    });
+    const url = `https://explorer.lichess.ovh/lichess?${params.toString()}`;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+      if (response.status === 429) {
+        registerLichessRateLimit(response.headers.get('Retry-After'));
+        return;
+      }
+      if (!response.ok) {
+        setLichessApiIssueNote(`Lichess API health check failed: HTTP ${response.status}`);
+        return;
+      }
+      setLichessApiIssueNote('');
+    } catch {
+      setLichessApiIssueNote((prev) => prev || 'Lichess API health check failed.');
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }, [registerLichessRateLimit]);
+
+  useEffect(() => {
+    if (!hasHydratedAppState) return;
+    void checkLichessApiAvailability();
+    const intervalId = window.setInterval(() => {
+      void checkLichessApiAvailability();
+    }, LICHESS_API_HEALTHCHECK_INTERVAL_MS);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [hasHydratedAppState, checkLichessApiAvailability]);
+
   useEffect(() => {
     const controller = new AbortController();
     const isPlayerWithoutHandle = lichessSource === 'player' && playerHandle.trim().length === 0;
@@ -2381,15 +2422,6 @@ function App() {
 
     if (isTrainingLocalPlay) {
       setLichessStatus('idle');
-      return () => {
-        controller.abort();
-      };
-    }
-
-    if (isRateLimited) {
-      setLichessData(null);
-      setLichessDataFen(null);
-      setLichessStatus('limited');
       return () => {
         controller.abort();
       };
@@ -2486,7 +2518,15 @@ function App() {
       if (cachedResponse) {
         setLichessData(cachedResponse);
         setLichessDataFen(fenKey);
-        setLichessStatus('done');
+        setLichessStatus(isRateLimited ? 'limited' : 'done');
+        return;
+      }
+
+      setLichessData(null);
+      setLichessDataFen(null);
+
+      if (isRateLimited) {
+        setLichessStatus('limited');
         return;
       }
 
@@ -2526,7 +2566,7 @@ function App() {
           return;
         }
         if (!res.ok) {
-          setLichessApiIssueNote(`Lichess API error: HTTP ${res.status}`);
+          setLichessApiIssueNote(`Lichess API error (${res.status})`);
           throw new Error('Lichess request failed');
         }
         const body = res.body;
@@ -2650,16 +2690,6 @@ function App() {
       const cached = lichessNodeLookupCacheRef.current.get(cacheKey);
       if (cached !== undefined) return cached;
 
-      if (Date.now() < lichessRateLimitedUntilRef.current) {
-        lichessNodeLookupCacheRef.current.set(cacheKey, null);
-        return null;
-      }
-
-      if (lichessSource === 'player' && playerHandle.trim().length === 0) {
-        lichessNodeLookupCacheRef.current.set(cacheKey, null);
-        return null;
-      }
-
       const fen = fenKey === START_FEN ? new Chess().fen() : fenKey;
       const params = new URLSearchParams({
         fen,
@@ -2749,22 +2779,28 @@ function App() {
         return cachedResponse;
       }
 
+      if (Date.now() < lichessRateLimitedUntilRef.current) {
+        return null;
+      }
+
+      if (lichessSource === 'player' && playerHandle.trim().length === 0) {
+        return null;
+      }
+
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 20000);
       try {
         const allowed = await waitForLichessRateSlot();
         if (!allowed || controller.signal.aborted) {
-          lichessNodeLookupCacheRef.current.set(cacheKey, null);
           return null;
         }
         const response = await fetch(url, { signal: controller.signal });
         if (response.status === 429) {
           registerLichessRateLimit(response.headers.get('Retry-After'));
-          lichessNodeLookupCacheRef.current.set(cacheKey, null);
           return null;
         }
         if (!response.ok) {
-          setLichessApiIssueNote(`Lichess API error: HTTP ${response.status}`);
+          setLichessApiIssueNote(`Lichess API error (${response.status})`);
           throw new Error('Lichess request failed');
         }
         const rawBody = await response.text();
@@ -2775,7 +2811,6 @@ function App() {
         return data ?? null;
       } catch {
         setLichessApiIssueNote((prev) => prev || 'Lichess API request failed. Showing cached data when available.');
-        lichessNodeLookupCacheRef.current.set(cacheKey, null);
         return null;
       } finally {
         window.clearTimeout(timeout);
@@ -4322,7 +4357,7 @@ function App() {
   const currentEngineEval = currentEngineEvalRaw ? normalizeEvalSignText(currentEngineEvalRaw) : null;
   const visibleEngineEval = currentEngineEval ? `(${currentEngineEval})` : '';
   const visibleLichessStatus = (() => {
-    if (lichessStatus === 'limited') return 'Rate limited';
+    if (lichessStatus === 'limited') return '';
     if (lichessStatus === 'done' || lichessStatus === 'idle') return '';
     return lichessStatus;
   })();
@@ -5472,7 +5507,7 @@ function App() {
               )}
               {lichessStatus === 'limited' && (
                 <div className="status lichess-rate-limit-note">
-                  Too many API calls. Lichess moves and arrows are temporarily paused to respect API limits.
+                  {`Lichess API error (429), ${lichessData ? 'showing cached data' : 'no cached data'}`}
                 </div>
               )}
               {lichessApiIssueNote && (
