@@ -173,6 +173,21 @@ type PersistedSettingsState = {
   nextMissingMoveThreshold: MoveThreshold;
 };
 
+type DriveBackupPayload = {
+  version: 1;
+  exportedAt: string;
+  appState: PersistedAppState;
+  settings: PersistedSettingsState | null;
+  trainingStats: TrainingStatsState;
+  trainingLeafLastShown: TrainingLeafLastShownState;
+};
+
+type GoogleOAuthTokenResponse = {
+  access_token?: string;
+  expires_in?: number;
+  error?: string;
+};
+
 const START_FEN = 'start';
 const START_POS_FEN = new Chess().fen();
 const FIXED_VARIANT = 'standard';
@@ -207,6 +222,10 @@ const APP_SETTINGS_KEY = 'settings-v1';
 const APP_TRAINING_STATS_KEY = 'training-stats-v1';
 const APP_TRAINING_LEAF_LAST_SHOWN_KEY = 'training-leaf-last-shown-v1';
 const APP_LICHESS_RESPONSE_CACHE_KEY = 'lichess-response-cache-v1';
+const DRIVE_BACKUP_FILE_PREFIX = 'opening-prep-drive-backup-';
+const DRIVE_BACKUP_MIME_TYPE = 'application/json';
+const GOOGLE_IDENTITY_SCRIPT_SRC = 'https://accounts.google.com/gsi/client';
+const GOOGLE_DRIVE_OAUTH_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const TRAINING_SCOPE_WHOLE_DB = 'whole-db';
 const TRAINING_STATS_QUEUE_MIN = 1;
 const TRAINING_STATS_QUEUE_MAX = 30;
@@ -228,6 +247,7 @@ const LICHESS_API_HEALTHCHECK_INTERVAL_MS = 15 * 60 * 1000;
 const CLOUD_EVAL_MIN_INTERVAL_MS = 1400;
 const CLOUD_EVAL_RETRY_FALLBACK_MS = 4000;
 const CLOUD_EVAL_MAX_RETRIES = 3;
+let googleIdentityScriptPromise: Promise<void> | null = null;
 
 function createRepertoireId(side: Side) {
   const randomPart =
@@ -570,6 +590,102 @@ function normalizeTrainingLeafLastShown(value: unknown): TrainingLeafLastShownSt
     white: normalizeSide('white'),
     black: normalizeSide('black'),
   };
+}
+
+function formatDriveBackupTimestamp(date = new Date()) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  const hours = String(date.getUTCHours()).padStart(2, '0');
+  const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+  const seconds = String(date.getUTCSeconds()).padStart(2, '0');
+  return `${year}${month}${day}-${hours}${minutes}${seconds}Z`;
+}
+
+function createDriveBackupFilename(date = new Date()) {
+  return `${DRIVE_BACKUP_FILE_PREFIX}${formatDriveBackupTimestamp(date)}.json`;
+}
+
+function normalizeDriveBackupPayload(value: unknown): DriveBackupPayload | null {
+  if (!value || typeof value !== 'object') return null;
+  const parsed = value as Partial<DriveBackupPayload>;
+  if (parsed.version !== 1) return null;
+
+  const normalizedAppState = normalizePersistedState(parsed.appState);
+  if (!normalizedAppState) return null;
+  const normalizedSettings = parsed.settings ? normalizePersistedSettings(parsed.settings) : null;
+  const normalizedTrainingStats = normalizeTrainingStats(parsed.trainingStats) ?? createEmptyTrainingStatsState();
+  const normalizedLeafLastShown =
+    normalizeTrainingLeafLastShown(parsed.trainingLeafLastShown) ?? createEmptyTrainingLeafLastShownState();
+  const exportedAt = typeof parsed.exportedAt === 'string' ? parsed.exportedAt : new Date().toISOString();
+
+  return {
+    version: 1,
+    exportedAt,
+    appState: normalizedAppState,
+    settings: normalizedSettings,
+    trainingStats: normalizedTrainingStats,
+    trainingLeafLastShown: normalizedLeafLastShown,
+  };
+}
+
+function loadGoogleIdentityScript(): Promise<void> {
+  const googleWindow = window as Window & {
+    google?: {
+      accounts?: {
+        oauth2?: {
+          initTokenClient?: unknown;
+        };
+      };
+    };
+  };
+  if (googleWindow.google?.accounts?.oauth2?.initTokenClient) {
+    return Promise.resolve();
+  }
+  if (googleIdentityScriptPromise) return googleIdentityScriptPromise;
+
+  googleIdentityScriptPromise = new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>(`script[src="${GOOGLE_IDENTITY_SCRIPT_SRC}"]`);
+    if (existing) {
+      const maxWaitMs = 5000;
+      const start = Date.now();
+      const poll = () => {
+        if (googleWindow.google?.accounts?.oauth2?.initTokenClient) {
+          resolve();
+          return;
+        }
+        if (Date.now() - start >= maxWaitMs) {
+          reject(new Error('Google sign-in script failed to initialize'));
+          return;
+        }
+        window.setTimeout(poll, 100);
+      };
+      poll();
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = GOOGLE_IDENTITY_SCRIPT_SRC;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Google sign-in script failed to load'));
+    document.head.appendChild(script);
+  }).catch((error) => {
+    googleIdentityScriptPromise = null;
+    throw error;
+  });
+
+  if (!googleIdentityScriptPromise) {
+    return Promise.reject(new Error('Google sign-in script failed to load'));
+  }
+  return googleIdentityScriptPromise;
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === 'string' && error.trim()) return error;
+  return fallback;
 }
 
 function TabIconBase(props: { children: ReactNode; viewBox?: string }) {
@@ -1548,6 +1664,7 @@ function App() {
   });
   const [hasHydratedAppState, setHasHydratedAppState] = useState(false);
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
+  const [isDriveSyncRunning, setIsDriveSyncRunning] = useState(false);
   const [isNewRepertoireOpen, setIsNewRepertoireOpen] = useState(false);
   const [isLoadRepertoireOpen, setIsLoadRepertoireOpen] = useState(false);
   const [newRepertoireName, setNewRepertoireName] = useState('');
@@ -1587,6 +1704,7 @@ function App() {
   const lineCacheRef = useRef<Map<number, EngineLine>>(new Map());
   const previousFenRef = useRef<string>(START_FEN);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const driveAccessTokenRef = useRef<{ token: string; expiresAt: number } | null>(null);
   const [engineReadyTick, setEngineReadyTick] = useState(0);
   const treeEvalAwaiterRef = useRef<{ latestScore: string | null; resolve: (score: string | null) => void } | null>(
     null,
@@ -1836,6 +1954,125 @@ function App() {
 
   const lastMove = parseUciMove(selectedNode.moveUci);
 
+  const applyPersistedSettingsState = useCallback((persistedSettings: PersistedSettingsState) => {
+    setThemeMode(persistedSettings.themeMode);
+    setRepertoireSide(persistedSettings.repertoireSide);
+    setIsTempBoardFlipped(persistedSettings.isTempBoardFlipped);
+    setLichessSource(persistedSettings.lichessSource);
+    setPlayerHandle(persistedSettings.playerHandle);
+    setDateRange(persistedSettings.dateRange);
+    setLichessArrowThreshold(persistedSettings.lichessArrowThreshold);
+    setEngineDepth(persistedSettings.engineDepth);
+    setEngineMultiPv(persistedSettings.engineMultiPv);
+    setSelectedSpeeds(
+      persistedSettings.selectedSpeeds.length > 0
+        ? persistedSettings.selectedSpeeds
+        : SPEEDS.filter((speed) => speed !== 'bullet'),
+    );
+    setSelectedRatings(persistedSettings.selectedRatings.length > 0 ? persistedSettings.selectedRatings : [2000, 2200, 2500]);
+    setSelectedModes(persistedSettings.selectedModes.length > 0 ? persistedSettings.selectedModes : [...MODES]);
+    setShowLichessOnTreeMoves(persistedSettings.showLichessOnTreeMoves);
+    setShowTreeArrows(persistedSettings.showTreeArrows);
+    setShowLichessArrows(persistedSettings.showLichessArrows);
+    setShowStockfishArrows(persistedSettings.showStockfishArrows);
+    setStockfishEvalSeconds(persistedSettings.stockfishEvalSeconds);
+    setTrainingStatsQueueLength(persistedSettings.trainingStatsQueueLength);
+    setSuddenDeathThreshold(persistedSettings.suddenDeathThreshold);
+    setSuddenDeathMinMoves(persistedSettings.suddenDeathMinMoves);
+    setSuddenDeathStockfishElo(persistedSettings.suddenDeathStockfishElo);
+    setSuddenDeathMaxThinkTimeSec(persistedSettings.suddenDeathMaxThinkTimeSec);
+  }, []);
+
+  const applyPersistedDatabaseState = useCallback((persisted: PersistedAppState | null) => {
+    if (persisted) {
+      setRepertoiresBySide(persisted.repertoiresBySide);
+      setActiveRepertoireIdBySide({ white: null, black: null });
+      const whiteActive = persisted.repertoiresBySide.white[0];
+      const blackActive = persisted.repertoiresBySide.black[0];
+      const whiteTree = whiteActive?.tree ?? createEmptyTree('white');
+      const blackTree = blackActive?.tree ?? createEmptyTree('black');
+      setTrees({
+        white: whiteTree,
+        black: blackTree,
+      });
+      setSelectedNodeBySide({
+        white: whiteTree.rootId,
+        black: blackTree.rootId,
+      });
+    } else {
+      const whiteTree = createEmptyTree('white');
+      const blackTree = createEmptyTree('black');
+      setRepertoiresBySide({ white: [], black: [] });
+      setActiveRepertoireIdBySide({ white: null, black: null });
+      setTrees({ white: whiteTree, black: blackTree });
+      setSelectedNodeBySide({ white: whiteTree.rootId, black: blackTree.rootId });
+    }
+    setUndoStackBySide({ white: [], black: [] });
+    setTrainingSession(null);
+    setSuddenDeathGameOver(null);
+    setSuddenDeathStartNodeId(null);
+    setSuddenDeathCurrentFen(null);
+    setSuddenDeathLastMove(null);
+    setFindMissingSearchBaseNodeId(null);
+    setFindMissingSearchCursorNodeId(null);
+  }, []);
+
+  const getGoogleDriveAccessToken = useCallback(async () => {
+    const cached = driveAccessTokenRef.current;
+    if (cached && cached.expiresAt > Date.now() + 30_000) {
+      return cached.token;
+    }
+
+    const clientId = (import.meta.env.VITE_GOOGLE_DRIVE_CLIENT_ID ?? '').trim();
+    if (!clientId) {
+      throw new Error('Google Drive sync is not configured (missing VITE_GOOGLE_DRIVE_CLIENT_ID).');
+    }
+
+    await loadGoogleIdentityScript();
+
+    const googleWindow = window as Window & {
+      google?: {
+        accounts?: {
+          oauth2?: {
+            initTokenClient?: (config: {
+              client_id: string;
+              scope: string;
+              callback: (response: GoogleOAuthTokenResponse) => void;
+            }) => { requestAccessToken: (options?: { prompt?: string }) => void };
+          };
+        };
+      };
+    };
+    const initTokenClient = googleWindow.google?.accounts?.oauth2?.initTokenClient;
+    if (!initTokenClient) {
+      throw new Error('Google sign-in did not initialize. Try again.');
+    }
+
+    return new Promise<string>((resolve, reject) => {
+      const tokenClient = initTokenClient({
+        client_id: clientId,
+        scope: GOOGLE_DRIVE_OAUTH_SCOPE,
+        callback: (response) => {
+          if (response.error) {
+            reject(new Error(`Google auth failed (${response.error}).`));
+            return;
+          }
+          if (!response.access_token) {
+            reject(new Error('Google auth failed (missing access token).'));
+            return;
+          }
+          const expiresInSec = Number.isFinite(response.expires_in) ? Number(response.expires_in) : 3600;
+          driveAccessTokenRef.current = {
+            token: response.access_token,
+            expiresAt: Date.now() + Math.max(60, expiresInSec) * 1000,
+          };
+          resolve(response.access_token);
+        },
+      });
+      tokenClient.requestAccessToken({ prompt: cached ? '' : 'consent' });
+    });
+  }, []);
+
   useEffect(() => {
     const hydrateAppState = async () => {
       setStatus('Loading local repertoire...');
@@ -1855,62 +2092,8 @@ function App() {
           await idbGet<TrainingLeafLastShownState>(APP_TRAINING_LEAF_LAST_SHOWN_KEY),
         );
 
-        if (persistedSettings) {
-          setThemeMode(persistedSettings.themeMode);
-          setRepertoireSide(persistedSettings.repertoireSide);
-          setIsTempBoardFlipped(persistedSettings.isTempBoardFlipped);
-          setLichessSource(persistedSettings.lichessSource);
-          setPlayerHandle(persistedSettings.playerHandle);
-          setDateRange(persistedSettings.dateRange);
-          setLichessArrowThreshold(persistedSettings.lichessArrowThreshold);
-          setEngineDepth(persistedSettings.engineDepth);
-          setEngineMultiPv(persistedSettings.engineMultiPv);
-          setSelectedSpeeds(
-            persistedSettings.selectedSpeeds.length > 0 ? persistedSettings.selectedSpeeds : initialSelectedSpeeds,
-          );
-          setSelectedRatings(
-            persistedSettings.selectedRatings.length > 0 ? persistedSettings.selectedRatings : initialSelectedRatings,
-          );
-          setSelectedModes(
-            persistedSettings.selectedModes.length > 0 ? persistedSettings.selectedModes : [...MODES],
-          );
-          setShowLichessOnTreeMoves(persistedSettings.showLichessOnTreeMoves);
-          setShowTreeArrows(persistedSettings.showTreeArrows);
-          setShowLichessArrows(persistedSettings.showLichessArrows);
-          setShowStockfishArrows(persistedSettings.showStockfishArrows);
-          setStockfishEvalSeconds(persistedSettings.stockfishEvalSeconds);
-          setTrainingStatsQueueLength(persistedSettings.trainingStatsQueueLength);
-          setSuddenDeathThreshold(persistedSettings.suddenDeathThreshold);
-          setSuddenDeathMinMoves(persistedSettings.suddenDeathMinMoves);
-          setSuddenDeathStockfishElo(persistedSettings.suddenDeathStockfishElo);
-          setSuddenDeathMaxThinkTimeSec(persistedSettings.suddenDeathMaxThinkTimeSec);
-        }
-
-        if (persisted) {
-          setRepertoiresBySide(persisted.repertoiresBySide);
-          setActiveRepertoireIdBySide({ white: null, black: null });
-          const whiteActive = persisted.repertoiresBySide.white[0];
-          const blackActive = persisted.repertoiresBySide.black[0];
-          const whiteTree = whiteActive?.tree ?? createEmptyTree('white');
-          const blackTree = blackActive?.tree ?? createEmptyTree('black');
-          setTrees({
-            white: whiteTree,
-            black: blackTree,
-          });
-          setSelectedNodeBySide({
-            white: whiteTree.rootId,
-            black: blackTree.rootId,
-          });
-          setUndoStackBySide({ white: [], black: [] });
-        } else {
-          const whiteTree = createEmptyTree('white');
-          const blackTree = createEmptyTree('black');
-          setRepertoiresBySide({ white: [], black: [] });
-          setActiveRepertoireIdBySide({ white: null, black: null });
-          setTrees({ white: whiteTree, black: blackTree });
-          setSelectedNodeBySide({ white: whiteTree.rootId, black: blackTree.rootId });
-          setUndoStackBySide({ white: [], black: [] });
-        }
+        if (persistedSettings) applyPersistedSettingsState(persistedSettings);
+        applyPersistedDatabaseState(persisted);
         setTrainingStatsBySide(persistedTrainingStats ?? createEmptyTrainingStatsState());
         setTrainingLeafLastShownBySide(persistedTrainingLeafLastShown ?? createEmptyTrainingLeafLastShownState());
         setStatus('Ready');
@@ -2264,7 +2447,7 @@ function App() {
     setLichessRateLimitedUntil((prev) => Math.max(prev ?? 0, nextUntil));
     setLichessApiIssueNote('');
     setLichessStatus('limited');
-  }, []);
+  }, [applyPersistedDatabaseState, applyPersistedSettingsState]);
 
   const waitForLichessRateSlot = useCallback(async () => {
     let release!: () => void;
@@ -3968,6 +4151,157 @@ function App() {
       return;
     }
     downloadPgn(games.join('\n\n'), 'all-repertoires.pgn');
+  };
+
+  const syncDatabaseToGoogleDrive = async () => {
+    if (isDriveSyncRunning) return;
+    setIsDriveSyncRunning(true);
+    try {
+      const accessToken = await getGoogleDriveAccessToken();
+      const settingsPayload: PersistedSettingsState = {
+        version: 1,
+        themeMode,
+        repertoireSide,
+        isTempBoardFlipped,
+        lichessSource,
+        playerHandle,
+        dateRange,
+        lichessArrowThreshold,
+        engineDepth,
+        engineMultiPv,
+        selectedSpeeds,
+        selectedRatings,
+        selectedModes,
+        showLichessOnTreeMoves,
+        showTreeArrows,
+        showLichessArrows,
+        showStockfishArrows,
+        stockfishEvalSeconds,
+        trainingStatsQueueLength,
+        suddenDeathThreshold,
+        suddenDeathMinMoves,
+        suddenDeathStockfishElo,
+        suddenDeathMaxThinkTimeSec,
+        nextMissingMoveThreshold: lichessArrowThreshold,
+      };
+      const payload: DriveBackupPayload = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        appState: {
+          version: 2,
+          repertoiresBySide,
+          activeRepertoireIdBySide,
+        },
+        settings: settingsPayload,
+        trainingStats: trainingStatsBySide,
+        trainingLeafLastShown: trainingLeafLastShownBySide,
+      };
+      const filename = createDriveBackupFilename();
+      const boundary = `drive-backup-${Math.random().toString(16).slice(2)}`;
+      const multipartBody = [
+        `--${boundary}`,
+        'Content-Type: application/json; charset=UTF-8',
+        '',
+        JSON.stringify({ name: filename, mimeType: DRIVE_BACKUP_MIME_TYPE }),
+        `--${boundary}`,
+        `Content-Type: ${DRIVE_BACKUP_MIME_TYPE}; charset=UTF-8`,
+        '',
+        JSON.stringify(payload),
+        `--${boundary}--`,
+      ].join('\r\n');
+
+      const response = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': `multipart/related; boundary=${boundary}`,
+        },
+        body: multipartBody,
+      });
+      if (!response.ok) {
+        const details = await response.text();
+        throw new Error(`Drive upload failed (${response.status}): ${details || response.statusText}`);
+      }
+
+      setStatus(`Synced to Google Drive (${filename})`);
+      setIsOptionsOpen(false);
+    } catch (error) {
+      setStatus(`Google Drive sync failed: ${getErrorMessage(error, 'Unknown error')}`);
+    } finally {
+      setIsDriveSyncRunning(false);
+    }
+  };
+
+  const updateDatabaseFromGoogleDrive = async () => {
+    if (isDriveSyncRunning) return;
+    const confirmed = window.confirm(
+      'Replace local DB and training stats with the latest Google Drive backup? Local data will be overwritten.',
+    );
+    if (!confirmed) return;
+
+    setIsDriveSyncRunning(true);
+    try {
+      const accessToken = await getGoogleDriveAccessToken();
+      const query = encodeURIComponent(
+        `trashed = false and mimeType = '${DRIVE_BACKUP_MIME_TYPE}' and name contains '${DRIVE_BACKUP_FILE_PREFIX}'`,
+      );
+      const listResponse = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${query}&orderBy=createdTime desc&pageSize=1&fields=files(id,name,createdTime)`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        },
+      );
+      if (!listResponse.ok) {
+        const details = await listResponse.text();
+        throw new Error(`Drive list failed (${listResponse.status}): ${details || listResponse.statusText}`);
+      }
+      const listed = (await listResponse.json()) as { files?: Array<{ id: string; name: string; createdTime: string }> };
+      const latestFile = listed.files?.[0];
+      if (!latestFile?.id) {
+        throw new Error(`No Drive backup file found for prefix "${DRIVE_BACKUP_FILE_PREFIX}".`);
+      }
+
+      const downloadResponse = await fetch(`https://www.googleapis.com/drive/v3/files/${latestFile.id}?alt=media`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      if (!downloadResponse.ok) {
+        const details = await downloadResponse.text();
+        throw new Error(`Drive download failed (${downloadResponse.status}): ${details || downloadResponse.statusText}`);
+      }
+
+      const backup = normalizeDriveBackupPayload(await downloadResponse.json());
+      if (!backup) {
+        throw new Error('Drive backup file format is invalid.');
+      }
+
+      applyPersistedDatabaseState(backup.appState);
+      setTrainingStatsBySide(backup.trainingStats);
+      setTrainingLeafLastShownBySide(backup.trainingLeafLastShown);
+      if (backup.settings) {
+        applyPersistedSettingsState(backup.settings);
+      }
+
+      const writes: Promise<void>[] = [
+        idbSet(APP_STATE_KEY, backup.appState),
+        idbSet(APP_TRAINING_STATS_KEY, backup.trainingStats),
+        idbSet(APP_TRAINING_LEAF_LAST_SHOWN_KEY, backup.trainingLeafLastShown),
+      ];
+      if (backup.settings) {
+        writes.push(idbSet(APP_SETTINGS_KEY, backup.settings));
+      }
+      await Promise.all(writes);
+
+      setStatus(`Updated from Google Drive (${latestFile.name})`);
+      setIsOptionsOpen(false);
+    } catch (error) {
+      setStatus(`Google Drive update failed: ${getErrorMessage(error, 'Unknown error')}`);
+    } finally {
+      setIsDriveSyncRunning(false);
+    }
   };
 
   const clearWholeDatabase = () => {
@@ -6698,6 +7032,22 @@ function App() {
                 }}
               >
                 Import whole DB
+              </button>
+              <button
+                disabled={isTreeEvalRunning || isDriveSyncRunning}
+                onClick={() => {
+                  void syncDatabaseToGoogleDrive();
+                }}
+              >
+                {isDriveSyncRunning ? 'Syncing...' : 'Sync to Google Drive'}
+              </button>
+              <button
+                disabled={isTreeEvalRunning || isDriveSyncRunning}
+                onClick={() => {
+                  void updateDatabaseFromGoogleDrive();
+                }}
+              >
+                {isDriveSyncRunning ? 'Updating...' : 'Update from Google Drive'}
               </button>
               <button
                 className="danger"
