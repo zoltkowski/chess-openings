@@ -4026,32 +4026,67 @@ function App() {
     }
   };
 
-  const downloadPgn = (pgn: string, filename: string) => {
-    const blob = new Blob([pgn], { type: 'application/x-chess-pgn;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
+  const savePgn = async (pgn: string, filename: string) => {
+    await saveTextFileWithPickers(
+      pgn,
+      filename,
+      'application/x-chess-pgn',
+      'PGN file',
+      ['.pgn', '.txt'],
+    );
   };
 
-  const exportCurrentRepertoirePgn = () => {
+  const exportCurrentRepertoirePgn = async () => {
+    if (isBackupIoRunning) return;
+    setIsBackupIoRunning(true);
     const pgn = exportTreeToPgn(tree, activeSide, activeRepertoireName);
     const safeName = normalizeRepertoireName(activeRepertoireName).replace(/[^\w-]+/g, '_');
-    downloadPgn(pgn, `${activeSide}-${safeName || 'repertoire'}.pgn`);
+    const filename = `${activeSide}-${safeName || 'repertoire'}.pgn`;
+    try {
+      await savePgn(pgn, filename);
+      setStatus(`Exported PGN (${filename})`);
+      setIsOptionsOpen(false);
+    } catch (error) {
+      const errorMessage = getErrorMessage(error, 'Unknown error');
+      if (errorMessage.toLowerCase().includes('abort')) {
+        setStatus('PGN export cancelled');
+      } else {
+        setStatus(`PGN export failed: ${errorMessage}`);
+        window.alert(`PGN export failed.\n\n${errorMessage}`);
+      }
+    } finally {
+      setIsBackupIoRunning(false);
+    }
   };
 
-  const exportWholeDatabasePgn = () => {
+  const exportWholeDatabasePgn = async () => {
+    if (isBackupIoRunning) return;
+    setIsBackupIoRunning(true);
     const games = (['white', 'black'] as Side[]).flatMap((side) =>
       repertoiresBySide[side]
         .filter((entry) => repertoireHasMoves(entry.tree))
         .map((entry) => exportTreeToPgn(entry.tree, side, entry.name)),
     );
     if (games.length === 0) {
+      setIsBackupIoRunning(false);
       return;
     }
-    downloadPgn(games.join('\n\n'), 'all-repertoires.pgn');
+    const filename = 'all-repertoires.pgn';
+    try {
+      await savePgn(games.join('\n\n'), filename);
+      setStatus(`Exported PGN (${filename})`);
+      setIsOptionsOpen(false);
+    } catch (error) {
+      const errorMessage = getErrorMessage(error, 'Unknown error');
+      if (errorMessage.toLowerCase().includes('abort')) {
+        setStatus('PGN export cancelled');
+      } else {
+        setStatus(`PGN export failed: ${errorMessage}`);
+        window.alert(`PGN export failed.\n\n${errorMessage}`);
+      }
+    } finally {
+      setIsBackupIoRunning(false);
+    }
   };
 
   const buildBackupPayload = (): BackupPayload => {
@@ -4095,6 +4130,71 @@ function App() {
     };
   };
 
+  const saveTextFileWithPickers = async (
+    content: string,
+    filename: string,
+    mimeType: string,
+    description: string,
+    extensions: string[],
+  ) => {
+    type PickerWindow = Window & {
+      showDirectoryPicker?: () => Promise<{
+        getFileHandle: (name: string, options?: { create?: boolean }) => Promise<{
+          createWritable: () => Promise<{ write: (data: string | Blob) => Promise<void>; close: () => Promise<void> }>;
+        }>;
+      }>;
+      showSaveFilePicker?: (options?: {
+        suggestedName?: string;
+        types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+      }) => Promise<{
+        createWritable: () => Promise<{ write: (data: string | Blob) => Promise<void>; close: () => Promise<void> }>;
+      }>;
+    };
+    const pickerWindow = window as PickerWindow;
+    if (pickerWindow.showDirectoryPicker) {
+      const dir = await pickerWindow.showDirectoryPicker();
+      const fileHandle = await dir.getFileHandle(filename, { create: true });
+      const writable = await fileHandle.createWritable();
+      await writable.write(content);
+      await writable.close();
+      return;
+    }
+    if (pickerWindow.showSaveFilePicker) {
+      const fileHandle = await pickerWindow.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description, accept: { [mimeType]: extensions } }],
+      });
+      const writable = await fileHandle.createWritable();
+      await writable.write(content);
+      await writable.close();
+      return;
+    }
+    const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const openTextFileWithPicker = async (description: string, mimeType: string, extensions: string[]) => {
+    type PickerWindow = Window & {
+      showOpenFilePicker?: (options?: {
+        multiple?: boolean;
+        types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+      }) => Promise<Array<{ getFile: () => Promise<File> }>>;
+    };
+    const pickerWindow = window as PickerWindow;
+    if (!pickerWindow.showOpenFilePicker) return null;
+    const [handle] = await pickerWindow.showOpenFilePicker({
+      multiple: false,
+      types: [{ description, accept: { [mimeType]: extensions } }],
+    });
+    if (!handle) return null;
+    return handle.getFile();
+  };
+
   const restoreFromBackupFile = async (file: File) => {
     const parsed = normalizeBackupPayload(JSON.parse(await file.text()));
     if (!parsed) throw new Error('Backup file format is invalid.');
@@ -4135,45 +4235,13 @@ function App() {
     try {
       const payload = JSON.stringify(buildBackupPayload());
       const filename = createBackupFilename();
-
-      type PickerWindow = Window & {
-        showDirectoryPicker?: () => Promise<{
-          getFileHandle: (name: string, options?: { create?: boolean }) => Promise<{
-            createWritable: () => Promise<{ write: (data: string | Blob) => Promise<void>; close: () => Promise<void> }>;
-          }>;
-        }>;
-        showSaveFilePicker?: (options?: {
-          suggestedName?: string;
-          types?: Array<{ description?: string; accept: Record<string, string[]> }>;
-        }) => Promise<{
-          createWritable: () => Promise<{ write: (data: string | Blob) => Promise<void>; close: () => Promise<void> }>;
-        }>;
-      };
-      const pickerWindow = window as PickerWindow;
-
-      if (pickerWindow.showDirectoryPicker) {
-        const dir = await pickerWindow.showDirectoryPicker();
-        const fileHandle = await dir.getFileHandle(filename, { create: true });
-        const writable = await fileHandle.createWritable();
-        await writable.write(payload);
-        await writable.close();
-      } else if (pickerWindow.showSaveFilePicker) {
-        const fileHandle = await pickerWindow.showSaveFilePicker({
-          suggestedName: filename,
-          types: [{ description: 'Opening prep backup', accept: { [BACKUP_FILE_MIME_TYPE]: ['.json'] } }],
-        });
-        const writable = await fileHandle.createWritable();
-        await writable.write(payload);
-        await writable.close();
-      } else {
-        const blob = new Blob([payload], { type: `${BACKUP_FILE_MIME_TYPE};charset=utf-8` });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = filename;
-        link.click();
-        URL.revokeObjectURL(url);
-      }
+      await saveTextFileWithPickers(
+        payload,
+        filename,
+        BACKUP_FILE_MIME_TYPE,
+        'Opening prep backup',
+        ['.json'],
+      );
 
       setStatus(`Backup saved (${filename})`);
       window.alert(`Backup saved successfully.\n\nFile: ${filename}`);
@@ -4196,24 +4264,8 @@ function App() {
     setIsBackupIoRunning(true);
     setStatus('Selecting backup...');
     try {
-      type PickerWindow = Window & {
-        showOpenFilePicker?: (options?: {
-          multiple?: boolean;
-          types?: Array<{ description?: string; accept: Record<string, string[]> }>;
-        }) => Promise<Array<{ getFile: () => Promise<File> }>>;
-      };
-      const pickerWindow = window as PickerWindow;
-
-      if (pickerWindow.showOpenFilePicker) {
-        const [handle] = await pickerWindow.showOpenFilePicker({
-          multiple: false,
-          types: [{ description: 'Opening prep backup', accept: { [BACKUP_FILE_MIME_TYPE]: ['.json'] } }],
-        });
-        if (!handle) {
-          setStatus('Backup restore cancelled');
-          return;
-        }
-        const file = await handle.getFile();
+      const file = await openTextFileWithPicker('Opening prep backup', BACKUP_FILE_MIME_TYPE, ['.json']);
+      if (file) {
         await restoreFromBackupFile(file);
       } else {
         backupImportInputRef.current?.click();
@@ -4248,9 +4300,114 @@ function App() {
     setIsOptionsOpen(false);
   };
 
-  const openImportDialog = (mode: 'current' | 'db' = 'current') => {
+  const importPgnFile = async (file: File, mode: 'current' | 'db') => {
+    const pgn = await file.text();
+    if (mode === 'db') {
+      const chunks = splitPgnGames(pgn);
+      if (chunks.length === 0) {
+        return;
+      }
+
+      const importedBySide: Record<Side, RepertoireEntry[]> = { white: [], black: [] };
+
+      chunks.forEach((chunk, index) => {
+        const headers = parsePgnHeaders(chunk);
+        const whiteHeader = (headers.White ?? '').toLowerCase();
+        const blackHeader = (headers.Black ?? '').toLowerCase();
+        const side: Side =
+          whiteHeader.includes('repertoire') ? 'white' : blackHeader.includes('repertoire') ? 'black' : activeSide;
+
+        const eventName = headers.Event ?? '';
+        const baseName = eventName.startsWith('Opening Prep Trainer - ')
+          ? eventName.slice('Opening Prep Trainer - '.length)
+          : `Imported ${side} repertoire ${index + 1}`;
+        const treeForSide = parsePgnToTree(side, chunk, createEmptyTree(side));
+        importedBySide[side].push({
+          id: createRepertoireId(side),
+          name: normalizeRepertoireName(baseName),
+          tree: treeForSide,
+          selectedNodeId: treeForSide.rootId,
+        });
+      });
+
+      if (importedBySide.white.length === 0 && importedBySide.black.length === 0) {
+        return;
+      }
+
+      setRepertoiresBySide((prev) => {
+        const mergeSide = (side: Side): RepertoireEntry[] => {
+          const nextList = [...prev[side]];
+          const byName = new Map<string, number>();
+          nextList.forEach((entry, idx) => {
+            byName.set(normalizeRepertoireName(entry.name).toLowerCase(), idx);
+          });
+
+          for (const imported of importedBySide[side]) {
+            const key = normalizeRepertoireName(imported.name).toLowerCase();
+            const existingIdx = byName.get(key);
+            if (existingIdx === undefined) {
+              nextList.push(imported);
+              byName.set(key, nextList.length - 1);
+              continue;
+            }
+            const existing = nextList[existingIdx];
+            nextList[existingIdx] = {
+              ...existing,
+              name: imported.name,
+              tree: imported.tree,
+              selectedNodeId: imported.selectedNodeId,
+            };
+          }
+
+          return nextList;
+        };
+
+        return {
+          white: mergeSide('white'),
+          black: mergeSide('black'),
+        };
+      });
+      return;
+    }
+
+    const currentTree = trees[activeSide];
+    const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
+    const nextTree = parsePgnToTree(activeSide, pgn, currentTree);
+    setUndoStackBySide((prev) => ({
+      ...prev,
+      [activeSide]: [...prev[activeSide], { tree: currentTree, selectedNodeId: currentSelectedId }].slice(-200),
+    }));
+    setTrees((prev) => ({ ...prev, [activeSide]: nextTree }));
+    setSelectedNodeBySide((prev) => ({
+      ...prev,
+      [activeSide]: nextTree.nodes[currentSelectedId] ? currentSelectedId : nextTree.rootId,
+    }));
+  };
+
+  const openImportDialog = async (mode: 'current' | 'db' = 'current') => {
+    if (isBackupIoRunning) return;
     setImportMode(mode);
-    importInputRef.current?.click();
+    setIsBackupIoRunning(true);
+    try {
+      const file = await openTextFileWithPicker('PGN file', 'application/x-chess-pgn', ['.pgn', '.txt']);
+      if (file) {
+        await importPgnFile(file, mode);
+        setStatus(`Imported ${mode === 'db' ? 'whole DB' : 'current repertoire'} from ${file.name}`);
+        setIsOptionsOpen(false);
+      } else {
+        importInputRef.current?.click();
+      }
+    } catch (error) {
+      const errorMessage = getErrorMessage(error, 'Unknown error');
+      if (errorMessage.toLowerCase().includes('abort')) {
+        setStatus('PGN import cancelled');
+      } else {
+        setStatus(`PGN import failed: ${errorMessage}`);
+        window.alert(`PGN import failed.\n\n${errorMessage}`);
+      }
+    } finally {
+      setIsBackupIoRunning(false);
+    }
   };
 
   const enterBrowseMode = (side: Side = activeSide) => {
@@ -4462,87 +4619,7 @@ function App() {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const pgn = await file.text();
-      if (importMode === 'db') {
-        const chunks = splitPgnGames(pgn);
-        if (chunks.length === 0) {
-          return;
-        }
-
-        const importedBySide: Record<Side, RepertoireEntry[]> = { white: [], black: [] };
-
-        chunks.forEach((chunk, index) => {
-          const headers = parsePgnHeaders(chunk);
-          const whiteHeader = (headers.White ?? '').toLowerCase();
-          const blackHeader = (headers.Black ?? '').toLowerCase();
-          const side: Side =
-            whiteHeader.includes('repertoire') ? 'white' : blackHeader.includes('repertoire') ? 'black' : activeSide;
-
-          const eventName = headers.Event ?? '';
-          const baseName = eventName.startsWith('Opening Prep Trainer - ')
-            ? eventName.slice('Opening Prep Trainer - '.length)
-            : `Imported ${side} repertoire ${index + 1}`;
-          const treeForSide = parsePgnToTree(side, chunk, createEmptyTree(side));
-          importedBySide[side].push({
-            id: createRepertoireId(side),
-            name: normalizeRepertoireName(baseName),
-            tree: treeForSide,
-            selectedNodeId: treeForSide.rootId,
-          });
-        });
-
-        if (importedBySide.white.length === 0 && importedBySide.black.length === 0) {
-          return;
-        }
-
-        setRepertoiresBySide((prev) => {
-          const mergeSide = (side: Side): RepertoireEntry[] => {
-            const nextList = [...prev[side]];
-            const byName = new Map<string, number>();
-            nextList.forEach((entry, idx) => {
-              byName.set(normalizeRepertoireName(entry.name).toLowerCase(), idx);
-            });
-
-            for (const imported of importedBySide[side]) {
-              const key = normalizeRepertoireName(imported.name).toLowerCase();
-              const existingIdx = byName.get(key);
-              if (existingIdx === undefined) {
-                nextList.push(imported);
-                byName.set(key, nextList.length - 1);
-                continue;
-              }
-              const existing = nextList[existingIdx];
-              nextList[existingIdx] = {
-                ...existing,
-                name: imported.name,
-                tree: imported.tree,
-                selectedNodeId: imported.selectedNodeId,
-              };
-            }
-
-            return nextList;
-          };
-
-          return {
-            white: mergeSide('white'),
-            black: mergeSide('black'),
-          };
-        });
-        return;
-      }
-
-      const currentTree = trees[activeSide];
-      const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
-      const nextTree = parsePgnToTree(activeSide, pgn, currentTree);
-      setUndoStackBySide((prev) => ({
-        ...prev,
-        [activeSide]: [...prev[activeSide], { tree: currentTree, selectedNodeId: currentSelectedId }].slice(-200),
-      }));
-      setTrees((prev) => ({ ...prev, [activeSide]: nextTree }));
-      setSelectedNodeBySide((prev) => ({
-        ...prev,
-        [activeSide]: nextTree.nodes[currentSelectedId] ? currentSelectedId : nextTree.rootId,
-      }));
+      await importPgnFile(file, importMode);
     } catch {
       // Keep import flow silent on UI status.
     } finally {
