@@ -18,6 +18,7 @@ import type { Api as ChessgroundApi } from '@lichess-org/chessground/api';
 import type { Key } from '@lichess-org/chessground/types';
 import type { DrawShape } from '@lichess-org/chessground/draw';
 import type { DrawBrushes } from '@lichess-org/chessground/draw';
+import { evaluateMaiaPosition } from './maiaEngine';
 import '@lichess-org/chessground/assets/chessground.base.css';
 import '@lichess-org/chessground/assets/chessground.brown.css';
 import '@lichess-org/chessground/assets/chessground.cburnett.css';
@@ -27,6 +28,7 @@ type Side = 'white' | 'black';
 type LichessSource = 'lichess' | 'masters' | 'player';
 type DateRange = '1m' | '2m' | '3m' | '6m' | '1y' | '3y' | '5y' | '10y' | '20y' | '30y' | '50y' | null;
 type ThemeMode = 'light' | 'dark';
+type EngineChoice = 'stockfish' | 'maia';
 
 type MoveNode = {
   id: string;
@@ -149,6 +151,8 @@ type BrowseMoveOption = {
 type PersistedSettingsState = {
   version: 1;
   themeMode: ThemeMode;
+  selectedEngine: EngineChoice;
+  maiaStrengthElo: number;
   repertoireSide: Side;
   isTempBoardFlipped: boolean;
   lichessSource: LichessSource;
@@ -202,9 +206,11 @@ const ARROW_BRUSHES: DrawBrushes = {
   green: { key: 'g', color: '#15781b', opacity: 1, lineWidth: 10 },
   red: { key: 'r', color: '#882020', opacity: 1, lineWidth: 10 },
   blue: { key: 'b', color: '#003088', opacity: 1, lineWidth: 10 },
+  purple: { key: 'p', color: '#7c3aed', opacity: 1, lineWidth: 10 },
   yellow: { key: 'y', color: '#e68f00', opacity: 1, lineWidth: 10 },
   greenSoft: { key: 'gs', color: '#15781b', opacity: 0.5, lineWidth: 10 },
   blueSoft: { key: 'bs', color: '#003088', opacity: 0.5, lineWidth: 10 },
+  purpleSoft: { key: 'ps', color: '#7c3aed', opacity: 0.5, lineWidth: 10 },
   yellowSoft: { key: 'ys', color: '#e68f00', opacity: 0.5, lineWidth: 10 },
 };
 const APP_DB_NAME = 'opening-prep-db';
@@ -230,6 +236,9 @@ const SUDDEN_DEATH_STOCKFISH_ELO_MIN = 1200;
 const SUDDEN_DEATH_STOCKFISH_ELO_MAX = 3000;
 const SUDDEN_DEATH_THINK_TIME_MIN = 0.2;
 const SUDDEN_DEATH_THINK_TIME_MAX = 5;
+const MAIA_STRENGTH_ELO_MIN = 1100;
+const MAIA_STRENGTH_ELO_MAX = 3000;
+const MAIA_STRENGTH_ELO_STEP = 100;
 // Conservative pacing for explorer API requests to avoid 429 and respect public API usage guidance.
 const LICHESS_API_MIN_INTERVAL_MS = 2000;
 const LICHESS_API_COOLDOWN_FALLBACK_MS = 120000;
@@ -434,12 +443,20 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
   if (parsed.lichessSource !== 'lichess' && parsed.lichessSource !== 'masters' && parsed.lichessSource !== 'player') {
     return null;
   }
+  const normalizedSelectedEngine: EngineChoice = parsed.selectedEngine === 'maia' ? 'maia' : 'stockfish';
   const normalizedThemeMode: ThemeMode = parsed.themeMode === 'dark' ? 'dark' : 'light';
   const dateRangeValues: DateRange[] = ['1m', '2m', '3m', '6m', '1y', '3y', '5y', '10y', '20y', '30y', '50y', null];
   if (!dateRangeValues.includes(parsed.dateRange)) return null;
   return {
     ...parsed,
     themeMode: normalizedThemeMode,
+    selectedEngine: normalizedSelectedEngine,
+    maiaStrengthElo: clampInt(
+      (parsed as Partial<PersistedSettingsState>).maiaStrengthElo,
+      MAIA_STRENGTH_ELO_MIN,
+      MAIA_STRENGTH_ELO_MAX,
+      1500,
+    ),
     lichessArrowThreshold: normalizeMoveThreshold(parsed.lichessArrowThreshold),
     engineDepth: clampInt(parsed.engineDepth, 16, 32, 24),
     engineMultiPv: clampInt(parsed.engineMultiPv, 1, 10, 3),
@@ -1180,6 +1197,11 @@ function formatSignedMate(mate: number) {
   return `${sign}M${Math.abs(mate)}`;
 }
 
+function winProbabilityToCp(winProbability: number) {
+  const p = Math.min(0.99, Math.max(0.01, winProbability));
+  return Math.round(400 * Math.log(p / (1 - p)));
+}
+
 function normalizeEvalSignText(raw: string) {
   const text = raw.trim();
   const cpMatch = text.match(/^[+-]?\d+(?:\.\d+)?$/);
@@ -1419,6 +1441,7 @@ function softenOverlappingArrows(arrows: DrawShape[]): DrawShape[] {
     if ((byOrig.get(arrow.orig) ?? 0) < 2) return arrow;
     if (arrow.brush === 'green') return { ...arrow, brush: 'greenSoft' };
     if (arrow.brush === 'blue') return { ...arrow, brush: 'blueSoft' };
+    if (arrow.brush === 'purple') return { ...arrow, brush: 'purpleSoft' };
     if (arrow.brush === 'yellow') return { ...arrow, brush: 'yellowSoft' };
     return arrow;
   });
@@ -1548,7 +1571,9 @@ function App() {
   const initialPlayerHandle = '';
   const initialDateRange: DateRange = null;
   const initialLichessArrowThreshold = 5;
+  const initialEngineChoice: EngineChoice = 'stockfish';
   const initialEngineDepth = 24;
+  const initialMaiaStrengthElo = 1500;
   const initialSelectedSpeeds: string[] = SPEEDS.filter((speed) => speed !== 'bullet');
   const initialSelectedRatings: number[] = [2000, 2200, 2500];
   const initialSelectedModes: string[] = [...MODES];
@@ -1581,6 +1606,8 @@ function App() {
   const [isTempBoardFlipped, setIsTempBoardFlipped] = useState(false);
   const [, setStatus] = useState('Ready');
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
+  const [selectedEngine, setSelectedEngine] = useState<EngineChoice>(initialEngineChoice);
+  const [maiaStrengthElo, setMaiaStrengthElo] = useState(initialMaiaStrengthElo);
   const [stockfishEvalSeconds, setStockfishEvalSeconds] = useState(10);
   const [trainingStatsQueueLength, setTrainingStatsQueueLength] = useState(initialTrainingStatsQueueLength);
   const [suddenDeathThreshold, setSuddenDeathThreshold] = useState(initialSuddenDeathThreshold);
@@ -1652,6 +1679,8 @@ function App() {
   const [suddenDeathThinking, setSuddenDeathThinking] = useState(false);
 
   const stockfishRef = useRef<Worker | null>(null);
+  const selectedEngineRef = useRef<EngineChoice>(initialEngineChoice);
+  const maiaStrengthEloRef = useRef(initialMaiaStrengthElo);
   const engineReadyRef = useRef(false);
   const isSearchingRef = useRef(false);
   const engineRunningRef = useRef(false);
@@ -1669,6 +1698,7 @@ function App() {
   const treeEvalCancelRef = useRef(false);
   const treeEvalFenCacheRef = useRef<Map<string, string>>(new Map());
   const engineWhitePerspectiveMultiplierRef = useRef(1);
+  const maiaAnalysisRequestRef = useRef(0);
   const suddenDeathBusyRef = useRef(false);
   const suddenDeathAwaiterRef = useRef<{
     perspectiveMultiplier: number;
@@ -1868,6 +1898,7 @@ function App() {
     const engineArrows =
       showStockfishArrows && engineLines.length > 0
         ? (() => {
+            const isMaiaEngine = selectedEngine === 'maia';
             const candidates = engineLines
               .map((line) => {
                 const keyPair = parseUciMove(line.bestMove);
@@ -1879,6 +1910,23 @@ function App() {
 
             const minLineWidth = 6;
             const maxLineWidth = 18;
+
+            if (isMaiaEngine) {
+              const maxPopularity = Math.max(...candidates.map((entry) => Math.max(0, entry.evalValue)), 0);
+              return candidates.map((entry) => {
+                const [orig, dest] = entry.keyPair;
+                const popularity = Math.max(0, entry.evalValue);
+                const ratio = maxPopularity > 0 ? popularity / maxPopularity : 1;
+                const lineWidth = minLineWidth + ratio * (maxLineWidth - minLineWidth);
+                return {
+                  orig,
+                  dest,
+                  brush: 'purple',
+                  modifiers: { lineWidth },
+                } as DrawShape;
+              });
+            }
+
             const topEval = engineLines[0]?.evalValue ?? candidates[0].evalValue;
 
             return candidates.map((entry) => {
@@ -1904,6 +1952,7 @@ function App() {
     lichessData,
     lichessArrowThreshold,
     engineLines,
+    selectedEngine,
     showLichessArrows,
     showStockfishArrows,
     showLichessOnTreeMoves,
@@ -1913,6 +1962,8 @@ function App() {
 
   const applyPersistedSettingsState = useCallback((persistedSettings: PersistedSettingsState) => {
     setThemeMode(persistedSettings.themeMode);
+    setSelectedEngine(persistedSettings.selectedEngine);
+    setMaiaStrengthElo(persistedSettings.maiaStrengthElo);
     setRepertoireSide(persistedSettings.repertoireSide);
     setIsTempBoardFlipped(persistedSettings.isTempBoardFlipped);
     setLichessSource(persistedSettings.lichessSource);
@@ -2057,6 +2108,8 @@ function App() {
     const settingsPayload: PersistedSettingsState = {
       version: 1,
       themeMode,
+      selectedEngine,
+      maiaStrengthElo,
       repertoireSide,
       isTempBoardFlipped,
       lichessSource,
@@ -2091,6 +2144,8 @@ function App() {
   }, [
     hasHydratedAppState,
     themeMode,
+    selectedEngine,
+    maiaStrengthElo,
     repertoireSide,
     isTempBoardFlipped,
     lichessSource,
@@ -2163,6 +2218,14 @@ function App() {
   }, [engineRunning]);
 
   useEffect(() => {
+    selectedEngineRef.current = selectedEngine;
+  }, [selectedEngine]);
+
+  useEffect(() => {
+    maiaStrengthEloRef.current = maiaStrengthElo;
+  }, [maiaStrengthElo]);
+
+  useEffect(() => {
     const worker = new Worker('/stockfish/stockfish-18-lite-single.js');
     stockfishRef.current = worker;
     isSearchingRef.current = false;
@@ -2184,6 +2247,7 @@ function App() {
       setEngineStatus('analyzing');
       engineWhitePerspectiveMultiplierRef.current = whitePerspectiveMultiplierFromFen(pending.fen);
       w.postMessage(`setoption name MultiPV value ${pending.multipv}`);
+      w.postMessage('setoption name UCI_LimitStrength value false');
       w.postMessage(`position fen ${pending.fen}`);
       w.postMessage(`go depth ${pending.depth}`);
       isSearchingRef.current = true;
@@ -2295,6 +2359,49 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (selectedEngine === 'maia') {
+      const worker = stockfishRef.current;
+      pendingAnalysisRef.current = null;
+      isSearchingRef.current = false;
+      worker?.postMessage('stop');
+      if (!engineRunning) {
+        setEngineStatus('stopped');
+        return;
+      }
+
+      const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
+      const requestId = maiaAnalysisRequestRef.current + 1;
+      maiaAnalysisRequestRef.current = requestId;
+      setEngineStatus('analyzing');
+      setEngineLines([]);
+
+      void (async () => {
+        try {
+          const maiaEval = await evaluateMaiaPosition({
+            fen,
+            eloSelf: maiaStrengthElo,
+            eloOppo: maiaStrengthElo,
+            topK: Math.max(1, engineMultiPv),
+          });
+          if (requestId !== maiaAnalysisRequestRef.current) return;
+          const lines: EngineLine[] = maiaEval.moves.map((entry, index) => ({
+            multipv: index + 1,
+            scoreText: `${(entry.probability * 100).toFixed(1)}%`,
+            pv: entry.uci,
+            bestMove: entry.uci,
+            evalValue: entry.probability * 100000,
+          }));
+          setEngineLines(lines);
+          setEngineStatus('done');
+        } catch {
+          if (requestId !== maiaAnalysisRequestRef.current) return;
+          setEngineStatus('maia error');
+          setEngineLines([]);
+        }
+      })();
+      return;
+    }
+
     if (!stockfishRef.current || !engineReadyRef.current) return;
     if (!engineRunning) {
       pendingAnalysisRef.current = null;
@@ -2309,7 +2416,15 @@ function App() {
     currentAnalysisRef.current = analysisId;
     pendingAnalysisRef.current = { fen, depth: engineDepth, multipv: engineMultiPv };
     tryStartPendingRef.current?.();
-  }, [selectedNode.fen, engineDepth, engineRunning, engineMultiPv, engineReadyTick]);
+  }, [
+    selectedNode.fen,
+    engineDepth,
+    engineRunning,
+    engineMultiPv,
+    engineReadyTick,
+    selectedEngine,
+    maiaStrengthElo,
+  ]);
 
   useEffect(() => {
     const fenChanged = previousFenRef.current !== selectedNode.fen;
@@ -2454,7 +2569,7 @@ function App() {
       variant: FIXED_VARIANT,
       color: 'white',
     });
-    const url = `https://explorer.lichess.ovh/lichess?${params.toString()}`;
+      const url = `https://explorer.lichess.ovh/lichess?${params.toString()}`;
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 12000);
     try {
@@ -2980,6 +3095,27 @@ function App() {
     limitStrengthElo?: number | null;
   }): Promise<{ scoreText: string; evalCp: number; bestMove: string | null }> => {
     const { fen, depth, perspectiveSide, multipv = 1, movetimeMs, limitStrengthElo = null } = params;
+    const isMaia = selectedEngineRef.current === 'maia';
+    if (isMaia) {
+      try {
+        const maiaEval = await evaluateMaiaPosition({
+          fen,
+          eloSelf: maiaStrengthEloRef.current,
+          eloOppo: maiaStrengthEloRef.current,
+          topK: Math.max(1, multipv),
+        });
+        const perspectiveMultiplier = perspectiveSide === 'white' ? 1 : -1;
+        const evalCp = winProbabilityToCp(maiaEval.winProbability) * perspectiveMultiplier;
+        return {
+          scoreText: formatSignedCp(evalCp),
+          evalCp,
+          bestMove: maiaEval.moves[0]?.uci ?? null,
+        };
+      } catch {
+        return { scoreText: '+0.00', evalCp: 0, bestMove: null };
+      }
+    }
+
     while (suddenDeathBusyRef.current) {
       await new Promise((resolve) => window.setTimeout(resolve, 25));
     }
@@ -2990,6 +3126,8 @@ function App() {
       if (!worker || !engineReadyRef.current) {
         return { scoreText: '+0.00', evalCp: 0, bestMove: null };
       }
+      const effectiveMultiPv = Math.max(1, multipv);
+      const effectiveElo = limitStrengthElo;
 
       pendingAnalysisRef.current = null;
       worker.postMessage('stop');
@@ -3025,10 +3163,10 @@ function App() {
           resolve,
         };
 
-        worker.postMessage(`setoption name MultiPV value ${Math.max(1, multipv)}`);
-        if (limitStrengthElo !== null) {
+        worker.postMessage(`setoption name MultiPV value ${effectiveMultiPv}`);
+        if (effectiveElo !== null) {
           worker.postMessage('setoption name UCI_LimitStrength value true');
-          worker.postMessage(`setoption name UCI_Elo value ${limitStrengthElo}`);
+          worker.postMessage(`setoption name UCI_Elo value ${effectiveElo}`);
         } else {
           worker.postMessage('setoption name UCI_LimitStrength value false');
         }
@@ -3950,6 +4088,16 @@ function App() {
     playLichessMove(uci);
   };
 
+  const setEngineRunningEnabled = (enabled: boolean) => {
+    if (enabled) {
+      setEngineRunning(true);
+      return;
+    }
+    stockfishRef.current?.postMessage('stop');
+    setEngineStatus('stopped');
+    setEngineRunning(false);
+  };
+
   const jumpToNextMissingLichessMove = async () => {
     if (isTrainingActive || isSuddenDeathActive || isFindMissingSearchRunning) return;
 
@@ -4093,6 +4241,8 @@ function App() {
     const settingsPayload: PersistedSettingsState = {
       version: 1,
       themeMode,
+      selectedEngine,
+      maiaStrengthElo,
       repertoireSide,
       isTempBoardFlipped,
       lichessSource,
@@ -4706,10 +4856,11 @@ function App() {
     return [{ orig, dest, brush: 'green' }];
   }, [isTrainingActive, trainingSession]);
   const canGoBack = Boolean(selectedNode.parentId);
+  const isEngineEnabled = engineRunning;
   const visibleEngineStatus =
     engineStatus === 'done' || engineStatus === 'stopped' || engineStatus === 'analyzing' ? '' : engineStatus;
   const currentEngineEvalRaw = engineLines[0]?.scoreText ?? selectedNode.stockfishEval ?? null;
-  const currentEngineEval = currentEngineEvalRaw ? normalizeEvalSignText(currentEngineEvalRaw) : null;
+  const currentEngineEval = selectedEngine === 'maia' ? null : currentEngineEvalRaw ? normalizeEvalSignText(currentEngineEvalRaw) : null;
   const visibleEngineEval = currentEngineEval ? `(${currentEngineEval})` : '';
   const visibleLichessStatus = (() => {
     if (lichessStatus === 'limited') return '';
@@ -5323,7 +5474,7 @@ function App() {
       return false;
     };
 
-    if (!treeEvalCancelRef.current && localTotal > 0) {
+    if (!treeEvalCancelRef.current && localTotal > 0 && selectedEngineRef.current !== 'maia') {
       const ready = await waitForReady();
       if (!ready) {
         setTreeEvalProgress((prev) => (prev ? { ...prev, running: false, phase: 'done' } : prev));
@@ -5338,13 +5489,28 @@ function App() {
       let scoreText = treeEvalFenCacheRef.current.get(fenKey) ?? null;
       if (!scoreText) {
         const normalizedFen = group[0].fen === START_FEN ? new Chess().fen() : group[0].fen;
-        scoreText = await new Promise<string | null>((resolve) => {
-          treeEvalAwaiterRef.current = { latestScore: null, resolve };
-          engineWhitePerspectiveMultiplierRef.current = whitePerspectiveMultiplierFromFen(normalizedFen);
-          worker.postMessage('setoption name MultiPV value 1');
-          worker.postMessage(`position fen ${normalizedFen}`);
-          worker.postMessage(`go movetime ${stockfishEvalSeconds * 1000}`);
-        });
+        if (selectedEngineRef.current === 'maia') {
+          try {
+            const maiaEval = await evaluateMaiaPosition({
+              fen: normalizedFen,
+              eloSelf: maiaStrengthEloRef.current,
+              eloOppo: maiaStrengthEloRef.current,
+              topK: 1,
+            });
+            scoreText = formatSignedCp(winProbabilityToCp(maiaEval.winProbability));
+          } catch {
+            scoreText = null;
+          }
+        } else {
+          scoreText = await new Promise<string | null>((resolve) => {
+            treeEvalAwaiterRef.current = { latestScore: null, resolve };
+            engineWhitePerspectiveMultiplierRef.current = whitePerspectiveMultiplierFromFen(normalizedFen);
+            worker.postMessage('setoption name MultiPV value 1');
+            worker.postMessage('setoption name UCI_LimitStrength value false');
+            worker.postMessage(`position fen ${normalizedFen}`);
+            worker.postMessage(`go movetime ${stockfishEvalSeconds * 1000}`);
+          });
+        }
       }
       if (treeEvalCancelRef.current) break;
       if (scoreText) {
@@ -5918,33 +6084,37 @@ function App() {
                     </button>
                   </div>
                   <div className="stockfish-inline desktop-only">
-                    <div className="controls-row stockfish-controls-row">
-                      <button
-                        aria-label={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
-                        title={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
-                        onClick={() => {
-                          setEngineRunning((prev) => {
-                            if (prev) {
-                              stockfishRef.current?.postMessage('stop');
-                              setEngineStatus('stopped');
-                            }
-                            return !prev;
-                          });
-                        }}
-                      >
-                        {engineRunning ? '■' : '▶'}
-                      </button>
-                      <button
-                        type="button"
-                        className="stockfish-settings-btn"
-                        aria-label="Stockfish options"
-                        title="Stockfish options"
-                        onClick={() => setIsStockfishQuickOpen(true)}
-                      >
-                        ⚙
-                      </button>
-                      <div className="stockfish-controls-right">
-                        <span className="inline-stepper">
+                    <div className="controls-row stockfish-controls-row ai-engine-controls">
+                      <div className="ai-engine-row">
+                        <span className="ai-engine-select">
+                          <button
+                            type="button"
+                            className={`ai-engine-tab ${selectedEngine === 'stockfish' ? 'active' : ''}`}
+                            onClick={() => setSelectedEngine('stockfish')}
+                          >
+                            SF18
+                          </button>
+                          <button
+                            type="button"
+                            className={`ai-engine-tab ${selectedEngine === 'maia' ? 'active' : ''}`}
+                            onClick={() => setSelectedEngine('maia')}
+                          >
+                            Maia
+                          </button>
+                        </span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={isEngineEnabled}
+                          className={`ai-switch ${isEngineEnabled ? 'on' : 'off'}`}
+                          onClick={() => setEngineRunningEnabled(!isEngineEnabled)}
+                        >
+                          <span className="ai-switch-track" aria-hidden="true">
+                            <span className="ai-switch-thumb" />
+                          </span>
+                          <span className="ai-switch-text">{isEngineEnabled ? 'On' : 'Off'}</span>
+                        </button>
+                        <span className="inline-stepper ai-row-right">
                           <button
                             type="button"
                             onClick={() => setEngineMultiPv((prev) => Math.max(1, prev - 1))}
@@ -5965,29 +6135,86 @@ function App() {
                             </svg>
                           </button>
                         </span>
-                        {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
-                      </div>
-                    </div>
-                    <div className="table">
-                      {engineLines.map((line) => (
-                        <div
-                          className="table-row stockfish-clickable-row"
-                          key={line.multipv}
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => playStockfishMove(line.bestMove)}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.preventDefault();
-                              playStockfishMove(line.bestMove);
-                            }
-                          }}
+                        <button
+                          type="button"
+                          className="stockfish-settings-btn"
+                          aria-label="AI options"
+                          title="AI options"
+                          onClick={() => setIsStockfishQuickOpen(true)}
                         >
-                          <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
-                          <span>{line.scoreText}</span>
-                          <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
+                          ⚙
+                        </button>
+                      </div>
+                      {selectedEngine === 'stockfish' && (
+                        <div className="table ai-eval-table">
+                          {engineLines.map((line) => (
+                            <div
+                              className="table-row stockfish-clickable-row"
+                              key={line.multipv}
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => playStockfishMove(line.bestMove)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter' || event.key === ' ') {
+                                  event.preventDefault();
+                                  playStockfishMove(line.bestMove);
+                                }
+                              }}
+                            >
+                              <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
+                              <span>{line.scoreText}</span>
+                              <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
+                            </div>
+                          ))}
                         </div>
-                      ))}
+                      )}
+                {selectedEngine === 'maia' && (
+                        <div className="ai-engine-row">
+                        <label className="ai-strength-slider">
+                          <input
+                            className="threshold-slider"
+                            type="range"
+                            min={MAIA_STRENGTH_ELO_MIN}
+                            max={MAIA_STRENGTH_ELO_MAX}
+                            step={MAIA_STRENGTH_ELO_STEP}
+                            value={maiaStrengthElo}
+                            onChange={(e) => {
+                              const next = Number.parseInt(e.target.value, 10);
+                              if (Number.isFinite(next)) {
+                                setMaiaStrengthElo(
+                                  Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
+                                );
+                              }
+                            }}
+                          />
+                          <span className="ai-strength-value">{`${maiaStrengthElo} Elo`}</span>
+                        </label>
+                        </div>
+                      )}
+                      {selectedEngine === 'maia' && (
+                        <div className="table ai-eval-table">
+                          {engineLines.map((line) => (
+                            <div
+                              className="table-row stockfish-clickable-row"
+                              key={line.multipv}
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => playStockfishMove(line.bestMove)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter' || event.key === ' ') {
+                                  event.preventDefault();
+                                  playStockfishMove(line.bestMove);
+                                }
+                              }}
+                            >
+                              <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
+                              <span>{line.scoreText}</span>
+                              <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
                     </div>
                   </div>
                 </>
@@ -6048,8 +6275,8 @@ function App() {
                       onPointerUp={handlePortraitStockfishPointerEnd}
                       onPointerCancel={handlePortraitStockfishPointerEnd}
                       onPointerLeave={handlePortraitStockfishPointerEnd}
-                      aria-label="Stockfish"
-                      title="Stockfish (long press: quick settings)"
+                      aria-label="AI"
+                      title="AI (long press: options)"
                     >
                       <ComputerIcon />
                     </button>
@@ -6151,33 +6378,37 @@ function App() {
               </div>
             </div>
             {!isTrainingActive && <aside className={`stockfish-panel card portrait-only portrait-pane ${portraitTab === 'stockfish' ? 'active' : ''}`}>
-              <div className="controls-row stockfish-controls-row">
-                <button
-                  aria-label={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
-                  title={engineRunning ? 'Stop Stockfish' : 'Run Stockfish'}
-                  onClick={() => {
-                    setEngineRunning((prev) => {
-                      if (prev) {
-                        stockfishRef.current?.postMessage('stop');
-                        setEngineStatus('stopped');
-                      }
-                      return !prev;
-                    });
-                  }}
-                >
-                  {engineRunning ? '■' : '▶'}
-                </button>
-                <button
-                  type="button"
-                  className="stockfish-settings-btn"
-                  aria-label="Stockfish options"
-                  title="Stockfish options"
-                  onClick={() => setIsStockfishQuickOpen(true)}
-                >
-                  ⚙
-                </button>
-                <div className="stockfish-controls-right">
-                  <span className="inline-stepper">
+              <div className="controls-row stockfish-controls-row ai-engine-controls">
+                <div className="ai-engine-row">
+                  <span className="ai-engine-select">
+                    <button
+                      type="button"
+                      className={`ai-engine-tab ${selectedEngine === 'stockfish' ? 'active' : ''}`}
+                      onClick={() => setSelectedEngine('stockfish')}
+                    >
+                      SF18
+                    </button>
+                    <button
+                      type="button"
+                      className={`ai-engine-tab ${selectedEngine === 'maia' ? 'active' : ''}`}
+                      onClick={() => setSelectedEngine('maia')}
+                    >
+                      Maia
+                    </button>
+                  </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={isEngineEnabled}
+                    className={`ai-switch ${isEngineEnabled ? 'on' : 'off'}`}
+                    onClick={() => setEngineRunningEnabled(!isEngineEnabled)}
+                  >
+                    <span className="ai-switch-track" aria-hidden="true">
+                      <span className="ai-switch-thumb" />
+                    </span>
+                    <span className="ai-switch-text">{isEngineEnabled ? 'On' : 'Off'}</span>
+                  </button>
+                  <span className="inline-stepper ai-row-right">
                     <button
                       type="button"
                       onClick={() => setEngineMultiPv((prev) => Math.max(1, prev - 1))}
@@ -6198,29 +6429,75 @@ function App() {
                       </svg>
                     </button>
                   </span>
-                  {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
                 </div>
-              </div>
-              <div className="table">
-                {engineLines.map((line) => (
-                  <div
-                    className="table-row stockfish-clickable-row"
-                    key={line.multipv}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => playStockfishMove(line.bestMove)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        playStockfishMove(line.bestMove);
-                      }
-                    }}
-                  >
-                    <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
-                    <span>{line.scoreText}</span>
-                    <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
+                {selectedEngine === 'stockfish' && (
+                  <div className="table ai-eval-table">
+                    {engineLines.map((line) => (
+                      <div
+                        className="table-row stockfish-clickable-row"
+                        key={line.multipv}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => playStockfishMove(line.bestMove)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            playStockfishMove(line.bestMove);
+                          }
+                        }}
+                      >
+                        <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
+                        <span>{line.scoreText}</span>
+                        <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
+                {selectedEngine === 'maia' && <div className="ai-engine-row">
+                  <label className="ai-strength-slider">
+                    <input
+                      className="threshold-slider"
+                      type="range"
+                      min={MAIA_STRENGTH_ELO_MIN}
+                      max={MAIA_STRENGTH_ELO_MAX}
+                      step={MAIA_STRENGTH_ELO_STEP}
+                      value={maiaStrengthElo}
+                      onChange={(e) => {
+                        const next = Number.parseInt(e.target.value, 10);
+                        if (Number.isFinite(next)) {
+                          setMaiaStrengthElo(
+                            Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
+                          );
+                        }
+                      }}
+                    />
+                    <span className="ai-strength-value">{`${maiaStrengthElo} Elo`}</span>
+                  </label>
+                </div>}
+                {selectedEngine === 'maia' && (
+                  <div className="table ai-eval-table">
+                    {engineLines.map((line) => (
+                      <div
+                        className="table-row stockfish-clickable-row"
+                        key={line.multipv}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => playStockfishMove(line.bestMove)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            playStockfishMove(line.bestMove);
+                          }
+                        }}
+                      >
+                        <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
+                        <span>{line.scoreText}</span>
+                        <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
               </div>
             </aside>}
 

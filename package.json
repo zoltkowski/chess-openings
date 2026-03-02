@@ -13,6 +13,7 @@
   "dependencies": {
     "@lichess-org/chessground": "^10.0.2",
     "chess.js": "^1.4.0",
+    "onnxruntime-web": "^1.24.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "stockfish": "^18.0.5"
