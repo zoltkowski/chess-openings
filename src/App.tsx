@@ -159,6 +159,7 @@ type PersistedSettingsState = {
   isTempBoardFlipped: boolean;
   lichessSource: LichessSource;
   playerHandle: string;
+  lichessApiToken: string;
   dateRange: DateRange;
   lichessArrowThreshold: MoveThreshold;
   engineDepth: number;
@@ -482,6 +483,9 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
       MODES.includes(mode as (typeof MODES)[number]),
     ),
     playerHandle: typeof parsed.playerHandle === 'string' ? parsed.playerHandle : '',
+    lichessApiToken: typeof (parsed as Partial<PersistedSettingsState>).lichessApiToken === 'string'
+      ? (parsed as Partial<PersistedSettingsState>).lichessApiToken as string
+      : '',
     stockfishEvalSeconds: clampInt((parsed as Partial<PersistedSettingsState>).stockfishEvalSeconds, 1, 30, 10),
     trainingStatsQueueLength: clampInt(
       (parsed as Partial<PersistedSettingsState>).trainingStatsQueueLength,
@@ -1583,6 +1587,7 @@ function App() {
   const initialThemeMode: ThemeMode = 'light';
   const initialLichessSource: LichessSource = 'lichess';
   const initialPlayerHandle = '';
+  const initialLichessApiToken = '';
   const initialDateRange: DateRange = null;
   const initialLichessArrowThreshold = 5;
   const initialEngineChoice: EngineChoice = 'stockfish';
@@ -1642,13 +1647,16 @@ function App() {
   const [openingByFen, setOpeningByFen] = useState<Record<string, { eco: string; name: string }>>({});
   const [lichessStatus, setLichessStatus] = useState('idle');
   const [lichessApiIssueNote, setLichessApiIssueNote] = useState('');
+  const [lichessAuthRequired, setLichessAuthRequired] = useState(false);
   const [lichessRateLimitedUntil, setLichessRateLimitedUntil] = useState<number | null>(null);
   const [showTreeArrows, setShowTreeArrows] = useState(true);
   const [showLichessArrows, setShowLichessArrows] = useState(true);
   const [showLichessOnTreeMoves, setShowLichessOnTreeMoves] = useState(true);
   const [isLichessFilterOpen, setIsLichessFilterOpen] = useState(false);
+  const [isLichessTokenEditorOpen, setIsLichessTokenEditorOpen] = useState(false);
   const [lichessSource, setLichessSource] = useState<LichessSource>(initialLichessSource);
   const [playerHandle, setPlayerHandle] = useState(initialPlayerHandle);
+  const [lichessApiToken, setLichessApiToken] = useState(initialLichessApiToken);
   const [dateRange, setDateRange] = useState<DateRange>(initialDateRange);
   const [lichessArrowThreshold, setLichessArrowThreshold] = useState<MoveThreshold>(initialLichessArrowThreshold);
   const [selectedSpeeds, setSelectedSpeeds] = useState<string[]>(
@@ -1986,6 +1994,7 @@ function App() {
     setIsTempBoardFlipped(persistedSettings.isTempBoardFlipped);
     setLichessSource(persistedSettings.lichessSource);
     setPlayerHandle(persistedSettings.playerHandle);
+    setLichessApiToken(persistedSettings.lichessApiToken);
     setDateRange(persistedSettings.dateRange);
     setLichessArrowThreshold(persistedSettings.lichessArrowThreshold);
     setEngineDepth(persistedSettings.engineDepth);
@@ -2136,6 +2145,7 @@ function App() {
       isTempBoardFlipped,
       lichessSource,
       playerHandle,
+      lichessApiToken,
       dateRange,
       lichessArrowThreshold,
       engineDepth,
@@ -2174,6 +2184,7 @@ function App() {
     isTempBoardFlipped,
     lichessSource,
     playerHandle,
+    lichessApiToken,
     dateRange,
     lichessArrowThreshold,
     engineDepth,
@@ -2594,28 +2605,37 @@ function App() {
       color: 'white',
     });
       const url = `https://explorer.lichess.ovh/lichess?${params.toString()}`;
+    const token = lichessApiToken.trim();
+    const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 12000);
     try {
       const response = await fetch(url, {
         signal: controller.signal,
         cache: 'no-store',
+        headers,
       });
       if (response.status === 429) {
         registerLichessRateLimit(response.headers.get('Retry-After'));
+        return;
+      }
+      if (response.status === 401) {
+        setLichessAuthRequired(true);
+        setLichessApiIssueNote('Lichess API error (401) - add token in options.');
         return;
       }
       if (!response.ok) {
         setLichessApiIssueNote(`Lichess API health check failed: HTTP ${response.status}`);
         return;
       }
+      setLichessAuthRequired(false);
       setLichessApiIssueNote('');
     } catch {
       setLichessApiIssueNote((prev) => prev || 'Lichess API health check failed.');
     } finally {
       window.clearTimeout(timeoutId);
     }
-  }, [registerLichessRateLimit]);
+  }, [registerLichessRateLimit, lichessApiToken]);
 
   useEffect(() => {
     if (!hasHydratedAppState) return;
@@ -2736,6 +2756,8 @@ function App() {
 
       const endpoint = lichessSource === 'player' ? 'player' : lichessSource;
       const url = `https://explorer.lichess.ovh/${endpoint}?${params.toString()}`;
+      const token = lichessApiToken.trim();
+      const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
 
       const cachedResponse = await getCachedLichessResponse(url);
       if (cachedResponse) {
@@ -2783,9 +2805,16 @@ function App() {
         if (!allowed || controller.signal.aborted) return;
         const res = await fetch(url, {
           signal: controller.signal,
+          headers,
         });
         if (res.status === 429) {
           registerLichessRateLimit(res.headers.get('Retry-After'));
+          return;
+        }
+        if (res.status === 401) {
+          setLichessAuthRequired(true);
+          setLichessApiIssueNote('Lichess API error (401) - add token in options.');
+          setLichessStatus('error');
           return;
         }
         if (!res.ok) {
@@ -2833,6 +2862,7 @@ function App() {
         }
 
         if (!latestData) throw new Error('Invalid Lichess payload');
+        setLichessAuthRequired(false);
         void setCachedLichessResponse(url, latestData, lichessSource);
         setLichessApiIssueNote('');
         setLichessStatus('done');
@@ -2864,6 +2894,7 @@ function App() {
     dateRange,
     lichessSource,
     playerHandle,
+    lichessApiToken,
     activeSide,
     trainingSession?.side,
     lichessRateLimitedUntil,
@@ -2905,6 +2936,7 @@ function App() {
         side: activeSide,
         source: lichessSource,
         player: playerHandle.trim(),
+        token: lichessApiToken.trim(),
         dateRange,
         speeds: [...selectedSpeeds].sort().join(','),
         ratings: [...selectedRatings].sort((a, b) => a - b).join(','),
@@ -2995,6 +3027,8 @@ function App() {
 
       const endpoint = lichessSource === 'player' ? 'player' : lichessSource;
       const url = `https://explorer.lichess.ovh/${endpoint}?${params.toString()}`;
+      const token = lichessApiToken.trim();
+      const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
 
       const cachedResponse = await getCachedLichessResponse(url);
       if (cachedResponse) {
@@ -3017,9 +3051,14 @@ function App() {
         if (!allowed || controller.signal.aborted) {
           return null;
         }
-        const response = await fetch(url, { signal: controller.signal });
+        const response = await fetch(url, { signal: controller.signal, headers });
         if (response.status === 429) {
           registerLichessRateLimit(response.headers.get('Retry-After'));
+          return null;
+        }
+        if (response.status === 401) {
+          setLichessAuthRequired(true);
+          setLichessApiIssueNote('Lichess API error (401) - add token in options.');
           return null;
         }
         if (!response.ok) {
@@ -3028,6 +3067,7 @@ function App() {
         }
         const rawBody = await response.text();
         const data = parseLastJsonObject<LichessResponse>(rawBody);
+        setLichessAuthRequired(false);
         lichessNodeLookupCacheRef.current.set(cacheKey, data ?? null);
         if (data) void setCachedLichessResponse(url, data, lichessSource);
         if (data) setLichessApiIssueNote('');
@@ -3043,6 +3083,7 @@ function App() {
       activeSide,
       lichessSource,
       playerHandle,
+      lichessApiToken,
       dateRange,
       selectedSpeeds,
       selectedRatings,
@@ -4278,6 +4319,7 @@ function App() {
       isTempBoardFlipped,
       lichessSource,
       playerHandle,
+      lichessApiToken,
       dateRange,
       lichessArrowThreshold,
       engineDepth,
@@ -4898,6 +4940,16 @@ function App() {
     if (lichessStatus === 'done' || lichessStatus === 'idle') return '';
     return lichessStatus;
   })();
+  const shouldShowLichessAddTokenButton = lichessApiToken.trim().length === 0 || lichessAuthRequired;
+  const closeLichessTokenEditor = () => {
+    if (lichessApiToken.trim().length > 0) {
+      setLichessAuthRequired(false);
+      if (lichessApiIssueNote.includes('401')) {
+        setLichessApiIssueNote('');
+      }
+    }
+    setIsLichessTokenEditorOpen(false);
+  };
   const openingFullTitle = resolvedOpening ? `${resolvedOpening.eco} ${resolvedOpening.name}` : '';
   const openingTitleContent = useMemo(() => {
     if (!resolvedOpening) return '';
@@ -6063,7 +6115,7 @@ function App() {
         <section className="left-panel">
           <div className={`board-row ${isTrainingActive ? 'training-mode' : ''}`}>
             {!isTrainingActive && <aside className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}>
-              {(visibleLichessStatus || lichessStatus === 'loading') && (
+              {!lichessAuthRequired && (visibleLichessStatus || lichessStatus === 'loading') && (
                 <div className="status lichess-status-row">
                   {lichessStatus === 'loading' && <span className="spinner" aria-hidden="true" />}
                   <span>{visibleLichessStatus || 'loading'}</span>
@@ -6074,8 +6126,19 @@ function App() {
                   {`Lichess API error (429), ${lichessData ? 'showing cached data' : 'no cached data'}`}
                 </div>
               )}
-              {lichessApiIssueNote && !lichessData && (
+              {!lichessAuthRequired && lichessApiIssueNote && !lichessData && (
                 <div className="status lichess-rate-limit-note">{lichessApiIssueNote}</div>
+              )}
+              {lichessAuthRequired && (
+                <div className="status lichess-auth-note">
+                  <span>Lichess token missing or invalid (401).</span>
+                  <button
+                    type="button"
+                    onClick={() => setIsLichessFilterOpen(true)}
+                  >
+                    Open options
+                  </button>
+                </div>
               )}
               {lichessData && (
                 <>
@@ -7657,7 +7720,7 @@ function App() {
       )}
 
       {isLichessFilterOpen && (
-        <div className="modal-backdrop" onClick={() => setIsLichessFilterOpen(false)}>
+        <div className="modal-backdrop" onClick={() => { setIsLichessFilterOpen(false); setIsLichessTokenEditorOpen(false); }}>
           <div className="modal-card filters-modal" onClick={(e) => e.stopPropagation()}>
             <div className="filters-modal-main">
               <div className="filters-grid">
@@ -7688,6 +7751,13 @@ function App() {
                         onChange={(e) => setPlayerHandle(e.target.value)}
                         placeholder="Lichess handle"
                       />
+                    </span>
+                  )}
+                  {shouldShowLichessAddTokenButton && (
+                    <span className="player-handle-row">
+                      <button type="button" onClick={() => setIsLichessTokenEditorOpen(true)}>
+                        Add token
+                      </button>
                     </span>
                   )}
                 </label>
@@ -7849,6 +7919,41 @@ function App() {
                   </span>
                 </label>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {isLichessTokenEditorOpen && (
+        <div className="modal-backdrop" onClick={closeLichessTokenEditor}>
+          <div className="modal-card options-modal token-editor-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="card-head">
+              <h2>Lichess token</h2>
+            </div>
+            <div className="options-grid">
+              <span className="status token-editor-help">
+                Add your personal Lichess API token to enable Lichess DB explorer requests.
+              </span>
+              <a
+                className="token-editor-link"
+                href="https://lichess.org/account/oauth/token"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                https://lichess.org/account/oauth/token
+              </a>
+              <label className="repertoire-name-row">
+                Token
+                <input
+                  type="password"
+                  value={lichessApiToken}
+                  onChange={(e) => setLichessApiToken(e.target.value)}
+                  placeholder="Paste token"
+                  autoFocus
+                />
+              </label>
+              <button type="button" onClick={closeLichessTokenEditor}>
+                Close
+              </button>
             </div>
           </div>
         </div>
