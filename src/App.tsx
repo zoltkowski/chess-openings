@@ -64,12 +64,31 @@ type LichessMove = {
   averageElo?: number;
 };
 
+type LichessExamplePlayer = {
+  name?: string;
+  title?: string;
+  rating?: number;
+};
+
+type LichessExampleGame = {
+  id?: string;
+  winner?: string;
+  speed?: string;
+  mode?: string;
+  year?: number;
+  month?: string;
+  white?: LichessExamplePlayer;
+  black?: LichessExamplePlayer;
+};
+
 type LichessResponse = {
   opening?: { eco: string; name: string };
   white: number;
   draws: number;
   black: number;
   moves: LichessMove[];
+  topGames?: LichessExampleGame[];
+  recentGames?: LichessExampleGame[];
 };
 
 type LichessResponseCacheEntry = {
@@ -121,6 +140,16 @@ type SuddenDeathGameOverState = {
   baselineEvalCp: number;
   failedEvalCp: number;
   thresholdCp: number;
+};
+
+type ExampleReplayState = {
+  side: Side;
+  gameId: string;
+  label: string;
+  fens: string[];
+  lastMoves: Array<[Key, Key] | null>;
+  currentIndex: number;
+  playing: boolean;
 };
 
 type PersistedAppState = {
@@ -252,7 +281,17 @@ const LICHESS_API_COOLDOWN_FALLBACK_MS = 120000;
 const LICHESS_CACHE_PLAYER_TTL_MS = 24 * 60 * 60 * 1000;
 const LICHESS_CACHE_DEFAULT_TTL_MS = 10 * 24 * 60 * 60 * 1000;
 const LICHESS_CACHE_DEFAULT_JITTER_MS = 5 * 24 * 60 * 60 * 1000;
-const LICHESS_API_HEALTHCHECK_INTERVAL_MS = 15 * 60 * 1000;
+function maxTopGamesForSource(source: LichessSource) {
+  if (source === 'masters') return 15;
+  if (source === 'lichess') return 4;
+  return 0;
+}
+
+function maxRecentGamesForSource(source: LichessSource) {
+  if (source === 'player') return 8;
+  if (source === 'lichess') return 4;
+  return 0;
+}
 const CLOUD_EVAL_MIN_INTERVAL_MS = 1400;
 const CLOUD_EVAL_RETRY_FALLBACK_MS = 4000;
 const CLOUD_EVAL_MAX_RETRIES = 3;
@@ -797,6 +836,46 @@ function BackIcon() {
   );
 }
 
+function PlayIcon() {
+  return (
+    <TabIconBase>
+      <path d="M9 7.5v9l7-4.5z" fill="currentColor" />
+    </TabIconBase>
+  );
+}
+
+function StopIcon() {
+  return (
+    <TabIconBase>
+      <rect x="7.6" y="7.6" width="8.8" height="8.8" fill="currentColor" rx="1.1" />
+    </TabIconBase>
+  );
+}
+
+function PrevIcon() {
+  return (
+    <TabIconBase>
+      <path d="M8 7.4v9.2M16 8l-5.4 4 5.4 4z" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+    </TabIconBase>
+  );
+}
+
+function NextIcon() {
+  return (
+    <TabIconBase>
+      <path d="M16 7.4v9.2M8 8l5.4 4L8 16z" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+    </TabIconBase>
+  );
+}
+
+function QuitIcon() {
+  return (
+    <TabIconBase>
+      <path d="M7.8 7.8l8.4 8.4M16.2 7.8l-8.4 8.4" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+    </TabIconBase>
+  );
+}
+
 function createEmptyTree(side: Side): MoveTree {
   const rootId = `${side}-0`;
   return {
@@ -1281,6 +1360,30 @@ function formatAverageElo(move: LichessMove) {
   return `${Math.round(raw)}`;
 }
 
+function formatLichessExamplePlayer(player?: LichessExamplePlayer) {
+  if (!player) return '?';
+  const name = typeof player.name === 'string' && player.name.trim().length > 0 ? player.name.trim() : '?';
+  const title = typeof player.title === 'string' && player.title.trim().length > 0 ? `${player.title.trim()} ` : '';
+  const rating = typeof player.rating === 'number' && Number.isFinite(player.rating) ? ` (${Math.round(player.rating)})` : '';
+  return `${title}${name}${rating}`;
+}
+
+function formatLichessExampleRank(player?: LichessExamplePlayer) {
+  if (!player) return '?';
+  const title = typeof player.title === 'string' && player.title.trim().length > 0 ? player.title.trim() : '';
+  const rating = typeof player.rating === 'number' && Number.isFinite(player.rating) ? `${Math.round(player.rating)}` : '';
+  if (title && rating) return `${title} ${rating}`;
+  if (rating) return rating;
+  if (title) return title;
+  return '?';
+}
+
+function formatLichessExampleResult(game: LichessExampleGame) {
+  if (game.winner === 'white') return '1-0';
+  if (game.winner === 'black') return '0-1';
+  return '½-½';
+}
+
 function normalizeMoveThreshold(value: unknown) {
   const numeric = typeof value === 'number' && Number.isFinite(value) ? value : 5;
   return [...MOVE_THRESHOLD_OPTIONS].reduce<MoveThreshold>(
@@ -1653,6 +1756,9 @@ function App() {
   const [showLichessArrows, setShowLichessArrows] = useState(true);
   const [showLichessOnTreeMoves, setShowLichessOnTreeMoves] = useState(true);
   const [isLichessFilterOpen, setIsLichessFilterOpen] = useState(false);
+  const [exampleReplay, setExampleReplay] = useState<ExampleReplayState | null>(null);
+  const [exampleReplayLoadingId, setExampleReplayLoadingId] = useState<string | null>(null);
+  const [exampleReplayError, setExampleReplayError] = useState('');
   const [isLichessTokenEditorOpen, setIsLichessTokenEditorOpen] = useState(false);
   const [lichessSource, setLichessSource] = useState<LichessSource>(initialLichessSource);
   const [playerHandle, setPlayerHandle] = useState(initialPlayerHandle);
@@ -2597,57 +2703,6 @@ function App() {
     [ensureLichessResponseCacheLoaded, persistLichessResponseCache],
   );
 
-  const checkLichessApiAvailability = useCallback(async () => {
-    const fen = START_POS_FEN;
-    const params = new URLSearchParams({
-      fen,
-      variant: FIXED_VARIANT,
-      color: 'white',
-    });
-      const url = `https://explorer.lichess.ovh/lichess?${params.toString()}`;
-    const token = lichessApiToken.trim();
-    const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 12000);
-    try {
-      const response = await fetch(url, {
-        signal: controller.signal,
-        cache: 'no-store',
-        headers,
-      });
-      if (response.status === 429) {
-        registerLichessRateLimit(response.headers.get('Retry-After'));
-        return;
-      }
-      if (response.status === 401) {
-        setLichessAuthRequired(true);
-        setLichessApiIssueNote('Lichess API error (401) - add token in options.');
-        return;
-      }
-      if (!response.ok) {
-        setLichessApiIssueNote(`Lichess API health check failed: HTTP ${response.status}`);
-        return;
-      }
-      setLichessAuthRequired(false);
-      setLichessApiIssueNote('');
-    } catch {
-      setLichessApiIssueNote((prev) => prev || 'Lichess API health check failed.');
-    } finally {
-      window.clearTimeout(timeoutId);
-    }
-  }, [registerLichessRateLimit, lichessApiToken]);
-
-  useEffect(() => {
-    if (!hasHydratedAppState) return;
-    void checkLichessApiAvailability();
-    const intervalId = window.setInterval(() => {
-      void checkLichessApiAvailability();
-    }, LICHESS_API_HEALTHCHECK_INTERVAL_MS);
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [hasHydratedAppState, checkLichessApiAvailability]);
-
   useEffect(() => {
     const controller = new AbortController();
     const isPlayerWithoutHandle = lichessSource === 'player' && playerHandle.trim().length === 0;
@@ -2755,6 +2810,10 @@ function App() {
       }
 
       const endpoint = lichessSource === 'player' ? 'player' : lichessSource;
+      const topGamesLimit = maxTopGamesForSource(lichessSource);
+      const recentGamesLimit = maxRecentGamesForSource(lichessSource);
+      if (topGamesLimit > 0) params.set('topGames', String(topGamesLimit));
+      if (recentGamesLimit > 0) params.set('recentGames', String(recentGamesLimit));
       const url = `https://explorer.lichess.ovh/${endpoint}?${params.toString()}`;
       const token = lichessApiToken.trim();
       const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
@@ -2872,8 +2931,6 @@ function App() {
         } else if (!controller.signal.aborted) {
           setLichessApiIssueNote((prev) => prev || 'Lichess API error (?)');
           setLichessStatus('error');
-        } else {
-          setLichessStatus('error');
         }
       } finally {
         window.clearTimeout(requestTimeout);
@@ -2941,6 +2998,8 @@ function App() {
         speeds: [...selectedSpeeds].sort().join(','),
         ratings: [...selectedRatings].sort((a, b) => a - b).join(','),
         modes: [...selectedModes].sort().join(','),
+        topGames: maxTopGamesForSource(lichessSource),
+        recentGames: maxRecentGamesForSource(lichessSource),
       });
       const cached = lichessNodeLookupCacheRef.current.get(cacheKey);
       if (cached !== undefined) return cached;
@@ -3026,6 +3085,10 @@ function App() {
       }
 
       const endpoint = lichessSource === 'player' ? 'player' : lichessSource;
+      const topGamesLimit = maxTopGamesForSource(lichessSource);
+      const recentGamesLimit = maxRecentGamesForSource(lichessSource);
+      if (topGamesLimit > 0) params.set('topGames', String(topGamesLimit));
+      if (recentGamesLimit > 0) params.set('recentGames', String(recentGamesLimit));
       const url = `https://explorer.lichess.ovh/${endpoint}?${params.toString()}`;
       const token = lichessApiToken.trim();
       const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
@@ -3828,6 +3891,7 @@ function App() {
   }, [repertoireSide, trainingSession, trees, hasSideTrainingContent]);
 
   const makeMove = (orig: Key, dest: Key, promotion: 'q' | 'r' | 'b' | 'n' = 'q') => {
+    if (exampleReplay && exampleReplay.side === activeSide) return;
     const currentTree = trees[activeSide];
     const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
     const currentNode = currentTree.nodes[currentSelectedId] ?? currentTree.nodes[currentTree.rootId];
@@ -4879,8 +4943,17 @@ function App() {
       ((trainingSession && trainingSession.side === activeSide && trainingSession.suddenDeathMode) ||
         (suddenDeathGameOver && suddenDeathGameOver.side === activeSide)),
   );
-  const boardFen = hasSuddenDeathBoardOverride ? (suddenDeathCurrentFen as string) : selectedNode.fen;
-  const boardLastMove = hasSuddenDeathBoardOverride ? suddenDeathLastMove ?? undefined : lastMove;
+  const hasExampleReplayBoardOverride = Boolean(exampleReplay && exampleReplay.side === activeSide);
+  const boardFen = hasExampleReplayBoardOverride
+    ? (exampleReplay as ExampleReplayState).fens[(exampleReplay as ExampleReplayState).currentIndex]
+    : hasSuddenDeathBoardOverride
+      ? (suddenDeathCurrentFen as string)
+      : selectedNode.fen;
+  const boardLastMove = hasExampleReplayBoardOverride
+    ? (exampleReplay as ExampleReplayState).lastMoves[(exampleReplay as ExampleReplayState).currentIndex] ?? undefined
+    : hasSuddenDeathBoardOverride
+      ? suddenDeathLastMove ?? undefined
+      : lastMove;
   useEffect(() => {
     if (isTrainingActive) return;
     setIsTrainingStatsMenuOpen(false);
@@ -4936,6 +5009,7 @@ function App() {
   const currentEngineEval = selectedEngine === 'maia' ? null : currentEngineEvalRaw ? normalizeEvalSignText(currentEngineEvalRaw) : null;
   const visibleEngineEval = currentEngineEval ? `(${currentEngineEval})` : '';
   const visibleLichessStatus = (() => {
+    if (lichessData && lichessStatus === 'error') return '';
     if (lichessStatus === 'limited') return '';
     if (lichessStatus === 'done' || lichessStatus === 'idle') return '';
     return lichessStatus;
@@ -4975,6 +5049,121 @@ function App() {
       return total / lichessTotal >= thresholdShare;
     });
   }, [lichessData, lichessTotal, lichessArrowThreshold]);
+  const lichessTopGames = lichessData?.topGames ?? [];
+  const lichessRecentGames = lichessData?.recentGames ?? [];
+  const hasLichessExampleGames = lichessTopGames.length > 0 || lichessRecentGames.length > 0;
+  const isExampleReplayActive = Boolean(exampleReplay && exampleReplay.side === activeSide);
+
+  const setExampleReplayPlaying = (playing: boolean) => {
+    setExampleReplay((prev) => (prev ? { ...prev, playing } : prev));
+  };
+
+  const stepExampleReplay = (delta: -1 | 1) => {
+    setExampleReplay((prev) => {
+      if (!prev || prev.side !== activeSide) return prev;
+      const maxIndex = prev.fens.length - 1;
+      const nextIndex = Math.max(0, Math.min(maxIndex, prev.currentIndex + delta));
+      return {
+        ...prev,
+        currentIndex: nextIndex,
+        playing: false,
+      };
+    });
+  };
+
+  const quitExampleReplay = () => {
+    setExampleReplay(null);
+    setExampleReplayError('');
+    setExampleReplayLoadingId(null);
+  };
+
+  useEffect(() => {
+    if (!exampleReplay || exampleReplay.side !== activeSide || !exampleReplay.playing) return;
+    if (exampleReplay.currentIndex >= exampleReplay.fens.length - 1) {
+      setExampleReplayPlaying(false);
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      setExampleReplay((prev) => {
+        if (!prev || prev.side !== activeSide || !prev.playing) return prev;
+        const maxIndex = prev.fens.length - 1;
+        const nextIndex = Math.min(maxIndex, prev.currentIndex + 1);
+        return {
+          ...prev,
+          currentIndex: nextIndex,
+          playing: nextIndex < maxIndex,
+        };
+      });
+    }, 850);
+    return () => window.clearTimeout(timeoutId);
+  }, [exampleReplay, activeSide]);
+
+  const loadExampleReplayGame = async (game: LichessExampleGame) => {
+    const gameId = typeof game.id === 'string' ? game.id.trim() : '';
+    if (!gameId) return;
+    setExampleReplayLoadingId(gameId);
+    setExampleReplayError('');
+    try {
+      const response = await fetch(`https://lichess.org/game/export/${gameId}?moves=true&tags=true&clocks=false&evals=false`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const pgn = await response.text();
+      const headerFenMatch = pgn.match(/\[FEN\s+"([^"]+)"\]/i);
+      const gameStartFen = headerFenMatch ? headerFenMatch[1] : START_POS_FEN;
+      const fullGame = fenToChess(gameStartFen);
+      try {
+        fullGame.loadPgn(pgn);
+      } catch {
+        throw new Error('Invalid PGN');
+      }
+      const verboseMoves = fullGame.history({ verbose: true }) as Move[];
+      const targetFen = selectedNode.fen === START_FEN ? START_POS_FEN : selectedNode.fen;
+      const targetKey = positionFenKey(targetFen);
+      const scanChess = fenToChess(gameStartFen);
+      const replayMovesUci: string[] = [];
+      let foundTarget = false;
+
+      for (const move of verboseMoves) {
+        if (positionFenKey(scanChess.fen()) === targetKey) foundTarget = true;
+        if (foundTarget) replayMovesUci.push(uciFromMove(move));
+        scanChess.move({
+          from: move.from,
+          to: move.to,
+          promotion: move.promotion as 'q' | 'r' | 'b' | 'n' | undefined,
+        });
+      }
+      if (!foundTarget && positionFenKey(scanChess.fen()) === targetKey) foundTarget = true;
+      if (!foundTarget) throw new Error('This game does not contain the current position.');
+
+      const replayChess = fenToChess(targetFen);
+      const fens = [targetFen];
+      const lastMoves: Array<[Key, Key] | null> = [null];
+      for (const uci of replayMovesUci) {
+        const input = uciToMoveInput(uci);
+        if (!input) break;
+        const applied = replayChess.move(input);
+        if (!applied) break;
+        fens.push(replayChess.fen());
+        lastMoves.push(parseUciMove(uci) ?? null);
+      }
+      if (fens.length <= 1) throw new Error('No continuation available from current position.');
+
+      const playerText = `${formatLichessExamplePlayer(game.white)} vs ${formatLichessExamplePlayer(game.black)}`;
+      setExampleReplay({
+        side: activeSide,
+        gameId,
+        label: playerText,
+        fens,
+        lastMoves,
+        currentIndex: 0,
+        playing: true,
+      });
+    } catch (error) {
+      const errorMessage = getErrorMessage(error, 'Failed to load game');
+      setExampleReplayError(errorMessage);
+    } finally {
+      setExampleReplayLoadingId(null);
+    }
+  };
   const activeFindMissingBaseNode =
     (findMissingSearchBaseNodeId ? tree.nodes[findMissingSearchBaseNodeId] : null) ?? selectedNode;
   const canRunFindMissingSearch =
@@ -6171,6 +6360,50 @@ function App() {
                       );
                     })}
                   </div>
+                  <div className="lichess-example-games">
+                    {!hasLichessExampleGames && (
+                      <span className="status">No example games for current filters.</span>
+                    )}
+                    {hasLichessExampleGames && (
+                      <div className="lichess-example-lists">
+                        {lichessTopGames.map((game, index) => {
+                          const gameId = typeof game.id === 'string' ? game.id.trim() : '';
+                          const gameType = typeof game.speed === 'string' && game.speed.trim().length > 0 ? game.speed.trim() : '?';
+                          const gameLine = `${formatLichessExampleRank(game.white)} - ${formatLichessExampleRank(game.black)} - ${gameType}, ${formatLichessExampleResult(game)}`;
+                          return (
+                            <div key={`top-${gameId || index}`} className="lichess-example-item">
+                              <button
+                                type="button"
+                                className="lichess-example-load-btn"
+                                onClick={() => void loadExampleReplayGame(game)}
+                                disabled={!gameId || exampleReplayLoadingId === gameId}
+                              >
+                                {exampleReplayLoadingId === gameId ? 'Loading...' : gameLine}
+                              </button>
+                            </div>
+                          );
+                        })}
+                        {lichessRecentGames.map((game, index) => {
+                          const gameId = typeof game.id === 'string' ? game.id.trim() : '';
+                          const gameType = typeof game.speed === 'string' && game.speed.trim().length > 0 ? game.speed.trim() : '?';
+                          const gameLine = `${formatLichessExampleRank(game.white)} - ${formatLichessExampleRank(game.black)} - ${gameType}, ${formatLichessExampleResult(game)}`;
+                          return (
+                            <div key={`recent-${gameId || index}`} className="lichess-example-item">
+                              <button
+                                type="button"
+                                className="lichess-example-load-btn"
+                                onClick={() => void loadExampleReplayGame(game)}
+                                disabled={!gameId || exampleReplayLoadingId === gameId}
+                              >
+                                {exampleReplayLoadingId === gameId ? 'Loading...' : gameLine}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {exampleReplayError && <span className="status">{exampleReplayError}</span>}
+                  </div>
                   <div className="lichess-table-actions desktop-only">
                     <button
                       className="gear-btn"
@@ -6351,7 +6584,57 @@ function App() {
                 onMove={makeMove}
               />
               <div className="portrait-tabbar">
-                {!isTrainingActive && (
+                {!isTrainingActive && isExampleReplayActive && (
+                  <>
+                    <button
+                      type="button"
+                      className="replay-control-btn mode-icon-btn"
+                      onClick={() => {
+                        if (!exampleReplay) return;
+                        const atEnd = exampleReplay.currentIndex >= exampleReplay.fens.length - 1;
+                        if (atEnd) {
+                          setExampleReplay((prev) => (prev ? { ...prev, currentIndex: 0, playing: true } : prev));
+                          return;
+                        }
+                        setExampleReplayPlaying(!exampleReplay.playing);
+                      }}
+                      aria-label={exampleReplay?.playing ? 'Stop autoplay' : 'Play autoplay'}
+                      title={exampleReplay?.playing ? 'Stop autoplay' : 'Play autoplay'}
+                    >
+                      {exampleReplay?.playing ? <StopIcon /> : <PlayIcon />}
+                    </button>
+                    <button
+                      type="button"
+                      className="replay-control-btn mode-icon-btn"
+                      onClick={() => stepExampleReplay(-1)}
+                      disabled={!exampleReplay || exampleReplay.currentIndex <= 0}
+                      aria-label="Previous move"
+                      title="Previous move"
+                    >
+                      <PrevIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className="replay-control-btn mode-icon-btn"
+                      onClick={() => stepExampleReplay(1)}
+                      disabled={!exampleReplay || exampleReplay.currentIndex >= exampleReplay.fens.length - 1}
+                      aria-label="Next move"
+                      title="Next move"
+                    >
+                      <NextIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className="replay-control-btn mode-icon-btn danger"
+                      onClick={quitExampleReplay}
+                      aria-label="Quit replay"
+                      title="Quit replay"
+                    >
+                      <QuitIcon />
+                    </button>
+                  </>
+                )}
+                {!isTrainingActive && !isExampleReplayActive && (
                   <>
                     <button
                       type="button"
@@ -6394,21 +6677,23 @@ function App() {
                     </button>
                   </>
                 )}
-                <button
-                  type="button"
-                  className={`${isTrainingActive ? 'active training-stop-btn' : ''} long-pressable-btn`}
-                  onClick={handleTrainButtonClick}
-                  onPointerDown={handleTrainButtonPointerDown}
-                  onPointerUp={handleTrainButtonPointerEnd}
-                  onPointerCancel={handleTrainButtonPointerEnd}
-                  onPointerLeave={handleTrainButtonPointerEnd}
-                  aria-label={isTrainingActive ? 'Stop training' : 'Train'}
-                  title={isTrainingActive ? 'Stop training' : 'Train (long press: options)'}
-                  disabled={!isTrainingActive && !canStartTrainingForActiveSide}
-                >
-                  {isTrainingActive ? 'Stop training' : <TrainIcon />}
-                </button>
-                {!isTrainingActive && (
+                {(!isExampleReplayActive || isTrainingActive) && (
+                  <button
+                    type="button"
+                    className={`${isTrainingActive ? 'active training-stop-btn' : ''} long-pressable-btn`}
+                    onClick={handleTrainButtonClick}
+                    onPointerDown={handleTrainButtonPointerDown}
+                    onPointerUp={handleTrainButtonPointerEnd}
+                    onPointerCancel={handleTrainButtonPointerEnd}
+                    onPointerLeave={handleTrainButtonPointerEnd}
+                    aria-label={isTrainingActive ? 'Stop training' : 'Train'}
+                    title={isTrainingActive ? 'Stop training' : 'Train (long press: options)'}
+                    disabled={!isTrainingActive && !canStartTrainingForActiveSide}
+                  >
+                    {isTrainingActive ? 'Stop training' : <TrainIcon />}
+                  </button>
+                )}
+                {!isTrainingActive && !isExampleReplayActive && (
                   <button
                     type="button"
                     className={
@@ -6458,7 +6743,7 @@ function App() {
                     Hint
                   </button>
                 )}
-                {!isTrainingActive && (
+                {!isTrainingActive && !isExampleReplayActive && (
                   <button
                     type="button"
                     className="portrait-back-btn long-pressable-btn"
@@ -6797,88 +7082,142 @@ function App() {
                     </div>
                   )}
                   <div className="controls-row">
-                    <button
-                      className="desktop-only back-btn"
-                      onClick={handleBackClick}
-                      onPointerDown={handleBackPointerDown}
-                      onPointerUp={handleBackPointerEnd}
-                      onPointerCancel={handleBackPointerEnd}
-                      onPointerLeave={handleBackPointerEnd}
-                      disabled={!canGoBack}
-                      aria-label="Back 1 move"
-                      title="Back 1 move"
-                    >
-                      <BackIcon />
-                    </button>
-                    <button
-                      className="danger"
-                      onClick={deleteLastMove}
-                      disabled={!canGoBack || isBrowseMode}
-                      aria-label="Delete last move"
-                      title="Delete last move"
-                    >
-                      ✕
-                    </button>
-                    <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
-                      Undo
-                    </button>
-                    <button
-                      className="desktop-only"
-                      type="button"
-                      onClick={handleTrainButtonClick}
-                      title="Train"
-                      disabled={!canStartTrainingForActiveSide}
-                    >
-                      Train
-                    </button>
-                    <button
-                      type="button"
-                      className="sudden-death-toggle-btn mode-icon-btn desktop-only"
-                      onClick={handleSuddenDeathButtonClick}
-                      aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
-                      title={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
-                      disabled={suddenDeathThinking}
-                    >
-                      <SuddenDeathIcon />
-                    </button>
-                    <span className="controls-row-break" aria-hidden="true" />
-                    <button
-                      type="button"
-                      className="next-missing-btn"
-                      onClick={jumpToNextMissingLichessMove}
-                      disabled={!canRunFindMissingSearch}
-                      aria-label="Find missing popular opponent move"
-                      title={`Find missing popular opponent move (${lichessArrowThreshold}%+)`}
-                    >
-                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                        <circle cx="12" cy="12" r="4.2" />
-                        <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
-                        <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2" />
-                      </svg>
-                    </button>
-                    <div className="arrow-toggle-group">
-                      <button
-                        type="button"
-                        className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-lichess ${showLichessArrows ? 'active' : ''}`}
-                        onClick={() => setShowLichessArrows((prev) => !prev)}
-                        aria-label="Toggle Lichess arrows"
-                        title="Toggle Lichess arrows"
-                      />
-                      <button
-                        type="button"
-                        className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-stockfish ${showStockfishArrows ? 'active' : ''}`}
-                        onClick={() => setShowStockfishArrows((prev) => !prev)}
-                        aria-label="Toggle Stockfish arrows"
-                        title="Toggle Stockfish arrows"
-                      />
-                      <button
-                        type="button"
-                        className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-tree ${showTreeArrows ? 'active' : ''}`}
-                        onClick={() => setShowTreeArrows((prev) => !prev)}
-                        aria-label="Toggle tree arrows"
-                        title="Toggle tree arrows"
-                      />
-                    </div>
+                    {isExampleReplayActive ? (
+                      <>
+                        <button
+                          type="button"
+                          className="replay-control-btn mode-icon-btn"
+                          onClick={() => {
+                            if (!exampleReplay) return;
+                            const atEnd = exampleReplay.currentIndex >= exampleReplay.fens.length - 1;
+                            if (atEnd) {
+                              setExampleReplay((prev) => (prev ? { ...prev, currentIndex: 0, playing: true } : prev));
+                              return;
+                            }
+                            setExampleReplayPlaying(!exampleReplay.playing);
+                          }}
+                          aria-label={exampleReplay?.playing ? 'Stop autoplay' : 'Play autoplay'}
+                          title={exampleReplay?.playing ? 'Stop autoplay' : 'Play autoplay'}
+                        >
+                          {exampleReplay?.playing ? <StopIcon /> : <PlayIcon />}
+                        </button>
+                        <button
+                          type="button"
+                          className="replay-control-btn mode-icon-btn"
+                          onClick={() => stepExampleReplay(-1)}
+                          disabled={!exampleReplay || exampleReplay.currentIndex <= 0}
+                          aria-label="Previous move"
+                          title="Previous move"
+                        >
+                          <PrevIcon />
+                        </button>
+                        <button
+                          type="button"
+                          className="replay-control-btn mode-icon-btn"
+                          onClick={() => stepExampleReplay(1)}
+                          disabled={!exampleReplay || exampleReplay.currentIndex >= exampleReplay.fens.length - 1}
+                          aria-label="Next move"
+                          title="Next move"
+                        >
+                          <NextIcon />
+                        </button>
+                        <button
+                          type="button"
+                          className="replay-control-btn mode-icon-btn danger"
+                          onClick={quitExampleReplay}
+                          aria-label="Quit replay"
+                          title="Quit replay"
+                        >
+                          <QuitIcon />
+                        </button>
+                        {exampleReplay?.label && <span className="status replay-label">{exampleReplay.label}</span>}
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          className="desktop-only back-btn"
+                          onClick={handleBackClick}
+                          onPointerDown={handleBackPointerDown}
+                          onPointerUp={handleBackPointerEnd}
+                          onPointerCancel={handleBackPointerEnd}
+                          onPointerLeave={handleBackPointerEnd}
+                          disabled={!canGoBack}
+                          aria-label="Back 1 move"
+                          title="Back 1 move"
+                        >
+                          <BackIcon />
+                        </button>
+                        <button
+                          className="danger"
+                          onClick={deleteLastMove}
+                          disabled={!canGoBack || isBrowseMode}
+                          aria-label="Delete last move"
+                          title="Delete last move"
+                        >
+                          ✕
+                        </button>
+                        <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
+                          Undo
+                        </button>
+                        <button
+                          className="desktop-only"
+                          type="button"
+                          onClick={handleTrainButtonClick}
+                          title="Train"
+                          disabled={!canStartTrainingForActiveSide}
+                        >
+                          Train
+                        </button>
+                        <button
+                          type="button"
+                          className="sudden-death-toggle-btn mode-icon-btn desktop-only"
+                          onClick={handleSuddenDeathButtonClick}
+                          aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
+                          title={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
+                          disabled={suddenDeathThinking}
+                        >
+                          <SuddenDeathIcon />
+                        </button>
+                        <span className="controls-row-break" aria-hidden="true" />
+                        <button
+                          type="button"
+                          className="next-missing-btn"
+                          onClick={jumpToNextMissingLichessMove}
+                          disabled={!canRunFindMissingSearch}
+                          aria-label="Find missing popular opponent move"
+                          title={`Find missing popular opponent move (${lichessArrowThreshold}%+)`}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <circle cx="12" cy="12" r="4.2" />
+                            <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
+                            <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2" />
+                          </svg>
+                        </button>
+                        <div className="arrow-toggle-group">
+                          <button
+                            type="button"
+                            className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-lichess ${showLichessArrows ? 'active' : ''}`}
+                            onClick={() => setShowLichessArrows((prev) => !prev)}
+                            aria-label="Toggle Lichess arrows"
+                            title="Toggle Lichess arrows"
+                          />
+                          <button
+                            type="button"
+                            className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-stockfish ${showStockfishArrows ? 'active' : ''}`}
+                            onClick={() => setShowStockfishArrows((prev) => !prev)}
+                            aria-label="Toggle Stockfish arrows"
+                            title="Toggle Stockfish arrows"
+                          />
+                          <button
+                            type="button"
+                            className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-tree ${showTreeArrows ? 'active' : ''}`}
+                            onClick={() => setShowTreeArrows((prev) => !prev)}
+                            aria-label="Toggle tree arrows"
+                            title="Toggle tree arrows"
+                          />
+                        </div>
+                      </>
+                    )}
                   </div>
                   {suddenDeathGameOver && (
                     <div className="controls-row training-position-stats training-game-over-row">

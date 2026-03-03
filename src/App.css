@@ -86,6 +86,21 @@ select {
   justify-content: center;
 }
 
+.move-list .controls-row > button.replay-control-btn {
+  width: 2.2rem;
+  min-width: 2.2rem;
+  height: 2.2rem;
+  padding: 0.25rem;
+}
+
+.replay-label {
+  margin-left: 0.2rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: min(22rem, 55vw);
+}
+
 .has-submenu-dot {
   position: relative;
 }
@@ -727,6 +742,54 @@ select {
 
 .lichess-panel .lichess-cell-bar {
   flex: 1;
+}
+
+.lichess-example-games {
+  margin-top: 0.45rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid #e5ebf3;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.lichess-example-lists {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.lichess-example-list {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.lichess-example-item {
+  font-size: 0.8rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.lichess-example-load-btn {
+  border: 0;
+  background: transparent;
+  color: #1d4ed8;
+  text-decoration: none;
+  padding: 0;
+  min-width: 0;
+  width: auto;
+  height: auto;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.lichess-example-load-btn:hover {
+  text-decoration: underline;
+}
+
+.lichess-example-load-btn:disabled {
+  color: #64748b;
+  cursor: default;
+  text-decoration: none;
 }
 
 .danger {
