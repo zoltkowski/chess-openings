@@ -1872,10 +1872,25 @@ select {
     flex-shrink: 0;
   }
 
+  .stockfish-panel.portrait-pane .ai-elo-slot {
+    width: 5.2rem;
+    min-width: 5.2rem;
+    display: inline-flex;
+    justify-content: flex-start;
+  }
+
   .stockfish-panel.portrait-pane .ai-elo-select {
-    min-width: 4.4rem;
+    min-width: 4.2rem;
     font-size: 0.78rem;
     padding-right: 0.78rem;
+  }
+
+  .stockfish-panel.portrait-pane .inline-stepper {
+    gap: 0.16rem;
+  }
+
+  .stockfish-panel.portrait-pane .stepper-value {
+    min-width: 1.35rem;
   }
 
   .stockfish-panel.portrait-pane .ai-portrait-scroll {

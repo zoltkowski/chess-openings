@@ -6507,29 +6507,31 @@ function App() {
                     </span>
                     <span className="ai-switch-text">{isEngineEnabled ? 'On' : 'Off'}</span>
                   </button>
-                  {selectedEngine === 'maia' && (
-                    <label className="ai-elo-select-wrap">
-                      <select
-                        className="ai-elo-select"
-                        value={maiaStrengthElo}
-                        onChange={(e) => {
-                          const next = Number.parseInt(e.target.value, 10);
-                          if (Number.isFinite(next)) {
-                            setMaiaStrengthElo(
-                              Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
-                            );
-                          }
-                        }}
-                        aria-label="Maia strength"
-                      >
-                        {MAIA_STRENGTH_ELO_VALUES.map((elo) => (
-                          <option key={elo} value={elo}>
-                            {`${elo} Elo`}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
+                  <span className="ai-elo-slot">
+                    {selectedEngine === 'maia' && (
+                      <label className="ai-elo-select-wrap">
+                        <select
+                          className="ai-elo-select"
+                          value={maiaStrengthElo}
+                          onChange={(e) => {
+                            const next = Number.parseInt(e.target.value, 10);
+                            if (Number.isFinite(next)) {
+                              setMaiaStrengthElo(
+                                Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
+                              );
+                            }
+                          }}
+                          aria-label="Maia strength"
+                        >
+                          {MAIA_STRENGTH_ELO_VALUES.map((elo) => (
+                            <option key={elo} value={elo}>
+                              {`${elo} Elo`}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                  </span>
                   <span className="inline-stepper ai-row-right">
                     <button
                       type="button"
