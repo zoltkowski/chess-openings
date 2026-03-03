@@ -35,3 +35,4 @@ ideas worth considering:
 add a button in moves pane, to the right of undo, to jump to next node where there is a strong stockfish move (in top 3 moves, if #3 eval is not very lower than #1) for which there is no tree move defined (we need first to add stockfish evals and top moves to each node of repertoire)
 
 
+                                                                                                                                                                                                                           

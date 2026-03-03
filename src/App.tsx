@@ -153,6 +153,8 @@ type PersistedSettingsState = {
   themeMode: ThemeMode;
   selectedEngine: EngineChoice;
   maiaStrengthElo: number;
+  suddenDeathEngine: EngineChoice;
+  suddenDeathMaiaElo: number;
   repertoireSide: Side;
   isTempBoardFlipped: boolean;
   lichessSource: LichessSource;
@@ -239,6 +241,10 @@ const SUDDEN_DEATH_THINK_TIME_MAX = 5;
 const MAIA_STRENGTH_ELO_MIN = 1100;
 const MAIA_STRENGTH_ELO_MAX = 3000;
 const MAIA_STRENGTH_ELO_STEP = 100;
+const MAIA_STRENGTH_ELO_VALUES = Array.from(
+  { length: Math.floor((MAIA_STRENGTH_ELO_MAX - MAIA_STRENGTH_ELO_MIN) / MAIA_STRENGTH_ELO_STEP) + 1 },
+  (_, index) => MAIA_STRENGTH_ELO_MIN + (index * MAIA_STRENGTH_ELO_STEP),
+);
 // Conservative pacing for explorer API requests to avoid 429 and respect public API usage guidance.
 const LICHESS_API_MIN_INTERVAL_MS = 2000;
 const LICHESS_API_COOLDOWN_FALLBACK_MS = 120000;
@@ -453,6 +459,14 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
     selectedEngine: normalizedSelectedEngine,
     maiaStrengthElo: clampInt(
       (parsed as Partial<PersistedSettingsState>).maiaStrengthElo,
+      MAIA_STRENGTH_ELO_MIN,
+      MAIA_STRENGTH_ELO_MAX,
+      1500,
+    ),
+    suddenDeathEngine:
+      (parsed as Partial<PersistedSettingsState>).suddenDeathEngine === 'maia' ? 'maia' : 'stockfish',
+    suddenDeathMaiaElo: clampInt(
+      (parsed as Partial<PersistedSettingsState>).suddenDeathMaiaElo,
       MAIA_STRENGTH_ELO_MIN,
       MAIA_STRENGTH_ELO_MAX,
       1500,
@@ -1581,6 +1595,8 @@ function App() {
   const initialSuddenDeathThreshold = 1;
   const initialSuddenDeathMinMoves = 4;
   const initialSuddenDeathStockfishElo = 2000;
+  const initialSuddenDeathEngine: EngineChoice = 'stockfish';
+  const initialSuddenDeathMaiaElo = 1500;
   const initialSuddenDeathMaxThinkTimeSec = 1;
   const initialWhiteTree = createEmptyTree('white');
   const initialBlackTree = createEmptyTree('black');
@@ -1613,6 +1629,8 @@ function App() {
   const [suddenDeathThreshold, setSuddenDeathThreshold] = useState(initialSuddenDeathThreshold);
   const [suddenDeathMinMoves, setSuddenDeathMinMoves] = useState(initialSuddenDeathMinMoves);
   const [suddenDeathStockfishElo, setSuddenDeathStockfishElo] = useState(initialSuddenDeathStockfishElo);
+  const [suddenDeathEngine, setSuddenDeathEngine] = useState<EngineChoice>(initialSuddenDeathEngine);
+  const [suddenDeathMaiaElo, setSuddenDeathMaiaElo] = useState(initialSuddenDeathMaiaElo);
   const [suddenDeathMaxThinkTimeSec, setSuddenDeathMaxThinkTimeSec] = useState(initialSuddenDeathMaxThinkTimeSec);
   const [engineMultiPv, setEngineMultiPv] = useState(3);
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
@@ -1988,6 +2006,8 @@ function App() {
     setSuddenDeathThreshold(persistedSettings.suddenDeathThreshold);
     setSuddenDeathMinMoves(persistedSettings.suddenDeathMinMoves);
     setSuddenDeathStockfishElo(persistedSettings.suddenDeathStockfishElo);
+    setSuddenDeathEngine(persistedSettings.suddenDeathEngine);
+    setSuddenDeathMaiaElo(persistedSettings.suddenDeathMaiaElo);
     setSuddenDeathMaxThinkTimeSec(persistedSettings.suddenDeathMaxThinkTimeSec);
   }, []);
 
@@ -2110,6 +2130,8 @@ function App() {
       themeMode,
       selectedEngine,
       maiaStrengthElo,
+      suddenDeathEngine,
+      suddenDeathMaiaElo,
       repertoireSide,
       isTempBoardFlipped,
       lichessSource,
@@ -2146,6 +2168,8 @@ function App() {
     themeMode,
     selectedEngine,
     maiaStrengthElo,
+    suddenDeathEngine,
+    suddenDeathMaiaElo,
     repertoireSide,
     isTempBoardFlipped,
     lichessSource,
@@ -3093,15 +3117,28 @@ function App() {
     multipv?: number;
     movetimeMs?: number;
     limitStrengthElo?: number | null;
+    engineChoice?: EngineChoice;
+    maiaElo?: number;
   }): Promise<{ scoreText: string; evalCp: number; bestMove: string | null }> => {
-    const { fen, depth, perspectiveSide, multipv = 1, movetimeMs, limitStrengthElo = null } = params;
-    const isMaia = selectedEngineRef.current === 'maia';
+    const {
+      fen,
+      depth,
+      perspectiveSide,
+      multipv = 1,
+      movetimeMs,
+      limitStrengthElo = null,
+      engineChoice,
+      maiaElo,
+    } = params;
+    const effectiveEngine: EngineChoice = engineChoice ?? selectedEngineRef.current;
+    const isMaia = effectiveEngine === 'maia';
     if (isMaia) {
       try {
+        const effectiveMaiaElo = clampInt(maiaElo, MAIA_STRENGTH_ELO_MIN, MAIA_STRENGTH_ELO_MAX, maiaStrengthEloRef.current);
         const maiaEval = await evaluateMaiaPosition({
           fen,
-          eloSelf: maiaStrengthEloRef.current,
-          eloOppo: maiaStrengthEloRef.current,
+          eloSelf: effectiveMaiaElo,
+          eloOppo: effectiveMaiaElo,
           topK: Math.max(1, multipv),
         });
         const perspectiveMultiplier = perspectiveSide === 'white' ? 1 : -1;
@@ -3358,7 +3395,9 @@ function App() {
         perspectiveSide: 'white',
         multipv: 1,
         movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
-        limitStrengthElo: suddenDeathStockfishElo,
+        limitStrengthElo: suddenDeathEngine === 'stockfish' ? suddenDeathStockfishElo : null,
+        engineChoice: suddenDeathEngine,
+        maiaElo: suddenDeathMaiaElo,
       });
 
       let promptFen = fixedStartFen;
@@ -3388,6 +3427,8 @@ function App() {
         perspectiveSide: 'white',
         multipv: 1,
         movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
+        limitStrengthElo: null,
+        engineChoice: 'stockfish',
       });
       const userPerspectiveMultiplier = side === 'white' ? 1 : -1;
       setTrainingSession((prev) =>
@@ -3533,21 +3574,7 @@ function App() {
     setSuddenDeathGameOver(null);
     clearSuddenDeathRuntime();
     if (trainingSession && trainingSession.side === side && trainingSession.suddenDeathMode) {
-      const nextSession: TrainingSession = {
-        ...trainingSession,
-        rootNodeId: startNodeId,
-        entryNodeId: startNodeId,
-        suddenDeathBaseEvalCp: null,
-        suddenDeathPromptFen: null,
-        currentPromptFen: null,
-        currentPromptHadError: false,
-        currentPromptScopeIds: [],
-        hintRequested: false,
-        hintVisible: false,
-        hintMoveUci: null,
-      };
-      setTrainingSession(nextSession);
-      void startSuddenDeathRound(nextSession);
+      setTrainingSession(null);
     }
   };
 
@@ -3584,10 +3611,6 @@ function App() {
 
   const startSuddenDeathTraining = () => {
     const side = activeSide;
-    if (!hasSideTrainingContent(side)) {
-      setStatus('No lines to train on this side.');
-      return;
-    }
     const rootNodeId = selectedNode.id;
     clearSuddenDeathRuntime();
     setSuddenDeathGameOver(null);
@@ -3805,6 +3828,8 @@ function App() {
               perspectiveSide: 'white',
               multipv: 1,
               movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
+              limitStrengthElo: null,
+              engineChoice: 'stockfish',
             });
             const thresholdCp = Math.round(suddenDeathThreshold * 100);
             const userPerspectiveMultiplier = activeSide === 'white' ? 1 : -1;
@@ -3828,7 +3853,9 @@ function App() {
               perspectiveSide: 'white',
               multipv: 1,
               movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
-              limitStrengthElo: suddenDeathStockfishElo,
+              limitStrengthElo: suddenDeathEngine === 'stockfish' ? suddenDeathStockfishElo : null,
+              engineChoice: suddenDeathEngine,
+              maiaElo: suddenDeathMaiaElo,
             });
 
             let evalFen = userFen;
@@ -3858,6 +3885,8 @@ function App() {
               perspectiveSide: 'white',
               multipv: 1,
               movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
+              limitStrengthElo: null,
+              engineChoice: 'stockfish',
             });
 
             const evalResultUserCp = evalResult.evalCp * userPerspectiveMultiplier;
@@ -4243,6 +4272,8 @@ function App() {
       themeMode,
       selectedEngine,
       maiaStrengthElo,
+      suddenDeathEngine,
+      suddenDeathMaiaElo,
       repertoireSide,
       isTempBoardFlipped,
       lichessSource,
@@ -5842,6 +5873,11 @@ function App() {
 
   const handleSuddenDeathButtonPointerEnd = () => {
     clearSuddenDeathButtonLongPress();
+    if (suddenDeathButtonLongPressHandledRef.current) {
+      window.setTimeout(() => {
+        suddenDeathButtonLongPressHandledRef.current = false;
+      }, 0);
+    }
   };
 
   const handleSuddenDeathButtonClick: MouseEventHandler<HTMLButtonElement> = (event) => {
@@ -6114,6 +6150,29 @@ function App() {
                           </span>
                           <span className="ai-switch-text">{isEngineEnabled ? 'On' : 'Off'}</span>
                         </button>
+                        {selectedEngine === 'maia' && (
+                          <label className="ai-elo-select-wrap">
+                            <select
+                              className="ai-elo-select"
+                              value={maiaStrengthElo}
+                              onChange={(e) => {
+                                const next = Number.parseInt(e.target.value, 10);
+                                if (Number.isFinite(next)) {
+                                  setMaiaStrengthElo(
+                                    Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
+                                  );
+                                }
+                              }}
+                              aria-label="Maia strength"
+                            >
+                              {MAIA_STRENGTH_ELO_VALUES.map((elo) => (
+                                <option key={elo} value={elo}>
+                                  {`${elo} Elo`}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        )}
                         <span className="inline-stepper ai-row-right">
                           <button
                             type="button"
@@ -6166,29 +6225,6 @@ function App() {
                               <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
                             </div>
                           ))}
-                        </div>
-                      )}
-                {selectedEngine === 'maia' && (
-                        <div className="ai-engine-row">
-                        <label className="ai-strength-slider">
-                          <input
-                            className="threshold-slider"
-                            type="range"
-                            min={MAIA_STRENGTH_ELO_MIN}
-                            max={MAIA_STRENGTH_ELO_MAX}
-                            step={MAIA_STRENGTH_ELO_STEP}
-                            value={maiaStrengthElo}
-                            onChange={(e) => {
-                              const next = Number.parseInt(e.target.value, 10);
-                              if (Number.isFinite(next)) {
-                                setMaiaStrengthElo(
-                                  Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
-                                );
-                              }
-                            }}
-                          />
-                          <span className="ai-strength-value">{`${maiaStrengthElo} Elo`}</span>
-                        </label>
                         </div>
                       )}
                       {selectedEngine === 'maia' && (
@@ -6379,7 +6415,7 @@ function App() {
             </div>
             {!isTrainingActive && <aside className={`stockfish-panel card portrait-only portrait-pane ${portraitTab === 'stockfish' ? 'active' : ''}`}>
               <div className="controls-row stockfish-controls-row ai-engine-controls">
-                <div className="ai-engine-row">
+                <div className="ai-engine-row ai-engine-row-top">
                   <span className="ai-engine-select">
                     <button
                       type="button"
@@ -6408,6 +6444,29 @@ function App() {
                     </span>
                     <span className="ai-switch-text">{isEngineEnabled ? 'On' : 'Off'}</span>
                   </button>
+                  {selectedEngine === 'maia' && (
+                    <label className="ai-elo-select-wrap">
+                      <select
+                        className="ai-elo-select"
+                        value={maiaStrengthElo}
+                        onChange={(e) => {
+                          const next = Number.parseInt(e.target.value, 10);
+                          if (Number.isFinite(next)) {
+                            setMaiaStrengthElo(
+                              Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
+                            );
+                          }
+                        }}
+                        aria-label="Maia strength"
+                      >
+                        {MAIA_STRENGTH_ELO_VALUES.map((elo) => (
+                          <option key={elo} value={elo}>
+                            {`${elo} Elo`}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   <span className="inline-stepper ai-row-right">
                     <button
                       type="button"
@@ -6430,6 +6489,8 @@ function App() {
                     </button>
                   </span>
                 </div>
+              </div>
+              <div className="ai-portrait-scroll">
                 {selectedEngine === 'stockfish' && (
                   <div className="table ai-eval-table">
                     {engineLines.map((line) => (
@@ -6453,27 +6514,6 @@ function App() {
                     ))}
                   </div>
                 )}
-                {selectedEngine === 'maia' && <div className="ai-engine-row">
-                  <label className="ai-strength-slider">
-                    <input
-                      className="threshold-slider"
-                      type="range"
-                      min={MAIA_STRENGTH_ELO_MIN}
-                      max={MAIA_STRENGTH_ELO_MAX}
-                      step={MAIA_STRENGTH_ELO_STEP}
-                      value={maiaStrengthElo}
-                      onChange={(e) => {
-                        const next = Number.parseInt(e.target.value, 10);
-                        if (Number.isFinite(next)) {
-                          setMaiaStrengthElo(
-                            Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
-                          );
-                        }
-                      }}
-                    />
-                    <span className="ai-strength-value">{`${maiaStrengthElo} Elo`}</span>
-                  </label>
-                </div>}
                 {selectedEngine === 'maia' && (
                   <div className="table ai-eval-table">
                     {engineLines.map((line) => (
@@ -6980,6 +7020,25 @@ function App() {
               <h3 className="eval-manager-title">Sudden death settings</h3>
               <div className="slider-stack single-column">
                 <label>
+                  Engine
+                  <span className="toggle-group database-toggle">
+                    <button
+                      type="button"
+                      className={suddenDeathEngine === 'stockfish' ? 'active' : ''}
+                      onClick={() => setSuddenDeathEngine('stockfish')}
+                    >
+                      SF18
+                    </button>
+                    <button
+                      type="button"
+                      className={suddenDeathEngine === 'maia' ? 'active' : ''}
+                      onClick={() => setSuddenDeathEngine('maia')}
+                    >
+                      Maia
+                    </button>
+                  </span>
+                </label>
+                <label>
                   {`Max think time: ${suddenDeathMaxThinkTimeSec.toFixed(1)}s`}
                   <span className="slider-field">
                     <input
@@ -7021,27 +7080,52 @@ function App() {
                     />
                   </span>
                 </label>
-                <label>
-                  {`Stockfish: ${suddenDeathStockfishElo >= SUDDEN_DEATH_STOCKFISH_ELO_MAX ? 'Max' : suddenDeathStockfishElo}`}
-                  <span className="slider-field">
-                    <input
-                      className="threshold-slider"
-                      type="range"
-                      min={SUDDEN_DEATH_STOCKFISH_ELO_MIN}
-                      max={SUDDEN_DEATH_STOCKFISH_ELO_MAX}
-                      step={50}
-                      value={suddenDeathStockfishElo}
-                      onChange={(e) => {
-                        const next = Number.parseInt(e.target.value, 10);
-                        if (Number.isFinite(next)) {
-                          setSuddenDeathStockfishElo(
-                            Math.min(SUDDEN_DEATH_STOCKFISH_ELO_MAX, Math.max(SUDDEN_DEATH_STOCKFISH_ELO_MIN, next)),
-                          );
-                        }
-                      }}
-                    />
-                  </span>
-                </label>
+                {suddenDeathEngine === 'stockfish' && (
+                  <label>
+                    {`Stockfish: ${suddenDeathStockfishElo >= SUDDEN_DEATH_STOCKFISH_ELO_MAX ? 'Max' : suddenDeathStockfishElo}`}
+                    <span className="slider-field">
+                      <input
+                        className="threshold-slider"
+                        type="range"
+                        min={SUDDEN_DEATH_STOCKFISH_ELO_MIN}
+                        max={SUDDEN_DEATH_STOCKFISH_ELO_MAX}
+                        step={50}
+                        value={suddenDeathStockfishElo}
+                        onChange={(e) => {
+                          const next = Number.parseInt(e.target.value, 10);
+                          if (Number.isFinite(next)) {
+                            setSuddenDeathStockfishElo(
+                              Math.min(SUDDEN_DEATH_STOCKFISH_ELO_MAX, Math.max(SUDDEN_DEATH_STOCKFISH_ELO_MIN, next)),
+                            );
+                          }
+                        }}
+                      />
+                    </span>
+                  </label>
+                )}
+                {suddenDeathEngine === 'maia' && (
+                  <label>
+                    {`Maia: ${suddenDeathMaiaElo}`}
+                    <span className="slider-field">
+                      <input
+                        className="threshold-slider"
+                        type="range"
+                        min={MAIA_STRENGTH_ELO_MIN}
+                        max={MAIA_STRENGTH_ELO_MAX}
+                        step={MAIA_STRENGTH_ELO_STEP}
+                        value={suddenDeathMaiaElo}
+                        onChange={(e) => {
+                          const next = Number.parseInt(e.target.value, 10);
+                          if (Number.isFinite(next)) {
+                            setSuddenDeathMaiaElo(
+                              Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
+                            );
+                          }
+                        }}
+                      />
+                    </span>
+                  </label>
+                )}
               </div>
             </div>
           </div>
@@ -7053,6 +7137,25 @@ function App() {
           <div className="modal-card stockfish-quick-modal sudden-death-settings-modal" onClick={(e) => e.stopPropagation()}>
             <h3 className="eval-manager-title">Sudden death settings</h3>
             <div className="slider-stack single-column">
+              <label>
+                Engine
+                <span className="toggle-group database-toggle">
+                  <button
+                    type="button"
+                    className={suddenDeathEngine === 'stockfish' ? 'active' : ''}
+                    onClick={() => setSuddenDeathEngine('stockfish')}
+                  >
+                    SF18
+                  </button>
+                  <button
+                    type="button"
+                    className={suddenDeathEngine === 'maia' ? 'active' : ''}
+                    onClick={() => setSuddenDeathEngine('maia')}
+                  >
+                    Maia
+                  </button>
+                </span>
+              </label>
               <label>
                 {`Max think time: ${suddenDeathMaxThinkTimeSec.toFixed(1)}s`}
                 <span className="slider-field">
@@ -7095,27 +7198,52 @@ function App() {
                   />
                 </span>
               </label>
-              <label>
-                {`Stockfish: ${suddenDeathStockfishElo >= SUDDEN_DEATH_STOCKFISH_ELO_MAX ? 'Max' : suddenDeathStockfishElo}`}
-                <span className="slider-field">
-                  <input
-                    className="threshold-slider"
-                    type="range"
-                    min={SUDDEN_DEATH_STOCKFISH_ELO_MIN}
-                    max={SUDDEN_DEATH_STOCKFISH_ELO_MAX}
-                    step={50}
-                    value={suddenDeathStockfishElo}
-                    onChange={(e) => {
-                      const next = Number.parseInt(e.target.value, 10);
-                      if (Number.isFinite(next)) {
-                        setSuddenDeathStockfishElo(
-                          Math.min(SUDDEN_DEATH_STOCKFISH_ELO_MAX, Math.max(SUDDEN_DEATH_STOCKFISH_ELO_MIN, next)),
-                        );
-                      }
-                    }}
-                  />
-                </span>
-              </label>
+              {suddenDeathEngine === 'stockfish' && (
+                <label>
+                  {`Stockfish: ${suddenDeathStockfishElo >= SUDDEN_DEATH_STOCKFISH_ELO_MAX ? 'Max' : suddenDeathStockfishElo}`}
+                  <span className="slider-field">
+                    <input
+                      className="threshold-slider"
+                      type="range"
+                      min={SUDDEN_DEATH_STOCKFISH_ELO_MIN}
+                      max={SUDDEN_DEATH_STOCKFISH_ELO_MAX}
+                      step={50}
+                      value={suddenDeathStockfishElo}
+                      onChange={(e) => {
+                        const next = Number.parseInt(e.target.value, 10);
+                        if (Number.isFinite(next)) {
+                          setSuddenDeathStockfishElo(
+                            Math.min(SUDDEN_DEATH_STOCKFISH_ELO_MAX, Math.max(SUDDEN_DEATH_STOCKFISH_ELO_MIN, next)),
+                          );
+                        }
+                      }}
+                    />
+                  </span>
+                </label>
+              )}
+              {suddenDeathEngine === 'maia' && (
+                <label>
+                  {`Maia: ${suddenDeathMaiaElo}`}
+                  <span className="slider-field">
+                    <input
+                      className="threshold-slider"
+                      type="range"
+                      min={MAIA_STRENGTH_ELO_MIN}
+                      max={MAIA_STRENGTH_ELO_MAX}
+                      step={MAIA_STRENGTH_ELO_STEP}
+                      value={suddenDeathMaiaElo}
+                      onChange={(e) => {
+                        const next = Number.parseInt(e.target.value, 10);
+                        if (Number.isFinite(next)) {
+                          setSuddenDeathMaiaElo(
+                            Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
+                          );
+                        }
+                      }}
+                    />
+                  </span>
+                </label>
+              )}
             </div>
           </div>
         </div>

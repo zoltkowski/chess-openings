@@ -259,22 +259,46 @@ select {
   border: 0;
 }
 
-.ai-strength-slider {
+.ai-elo-select-wrap {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  min-width: 0;
+  position: relative;
 }
 
-.ai-strength-slider .threshold-slider {
-  width: min(7.6rem, 45vw);
+.ai-elo-select-wrap::after {
+  content: '';
+  position: absolute;
+  right: 0.18rem;
+  top: 50%;
+  width: 0.38rem;
+  height: 0.38rem;
+  border-right: 1.5px solid #64748b;
+  border-bottom: 1.5px solid #64748b;
+  transform: translateY(-62%) rotate(45deg);
+  pointer-events: none;
 }
 
-.ai-strength-value {
-  min-width: 4.2rem;
+.ai-elo-select {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #0f172a;
   font-size: 0.82rem;
-  text-align: right;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 0.08rem 0.95rem 0.08rem 0.18rem;
+  min-width: 4.8rem;
   white-space: nowrap;
+}
+
+.ai-elo-select:hover {
+  color: #334155;
+}
+
+.ai-elo-select:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 1px;
+  border-radius: 0.25rem;
 }
 
 .ai-eval-table {
@@ -1562,6 +1586,19 @@ select {
   color: #f8fafc;
 }
 
+.app.theme-dark .ai-elo-select {
+  color: #e2e8f0;
+}
+
+.app.theme-dark .ai-elo-select:hover {
+  color: #f8fafc;
+}
+
+.app.theme-dark .ai-elo-select-wrap::after {
+  border-right-color: #94a3b8;
+  border-bottom-color: #94a3b8;
+}
+
 .app.theme-dark .table-move-btn,
 .app.theme-dark .move-inline-item {
   background: transparent;
@@ -1789,6 +1826,43 @@ select {
 
   .stockfish-panel {
     order: initial;
+  }
+
+  .stockfish-panel.portrait-pane.active {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .stockfish-panel.portrait-pane .ai-engine-controls {
+    flex: 0 0 auto;
+  }
+
+  .stockfish-panel.portrait-pane .ai-engine-row-top {
+    width: 100%;
+    flex-wrap: nowrap;
+  }
+
+  .stockfish-panel.portrait-pane .ai-row-right {
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .stockfish-panel.portrait-pane .ai-elo-select {
+    min-width: 4.4rem;
+    font-size: 0.78rem;
+    padding-right: 0.78rem;
+  }
+
+  .stockfish-panel.portrait-pane .ai-portrait-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+
+  .stockfish-panel.portrait-pane .ai-eval-table {
+    margin-top: 0;
   }
 
   .move-list {
