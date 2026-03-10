@@ -12,8 +12,6 @@ ideas worth considering:
 
 7. Repertoire diff tool (compare two books, show missing/transposed lines)
 
-8. Auto-transposition linker (same position from different move orders)
-
 9. “Why this move?” notes per node
 
 12. Mistake replay session (only previously failed positions)
@@ -29,6 +27,28 @@ ideas worth considering:
 18. Multi-device sync + backup/version history
 
 20. Coach insights summary each week (accuracy trends, forgotten lines, next focus)
+
+2.3 Chaos Mode (sudden death?)
+
+Engine intentionally deviates:
+Early inaccuracies
+Slightly dubious sidelines
+Move-order tricks
+User must:
+Recognize when they’re out of book
+Switch to principles
+This prevents autopilot memorization.
+
+3. Position Understanding Layer
+3.1 Pawn Structure-Based Organization
+Tag positions by:
+Isolated Queen Pawn
+Carlsbad
+Maroczy
+Hedgehog
+King’s Indian pawn chain
+Training by structure instead of move order increases transfer.
+
 
 
 

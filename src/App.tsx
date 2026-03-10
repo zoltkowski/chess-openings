@@ -1909,7 +1909,7 @@ function App() {
     [selectedNode.children, tree.nodes],
   );
 
-  const collectBrowseMoveOptionsAtFen = (side: Side, fen: string): BrowseMoveOption[] => {
+  const collectMergedMoveOptionsAtFen = (side: Side, fen: string): BrowseMoveOption[] => {
     const byUci = new Map<string, { moveSan: string; repertoireNames: Set<string> }>();
     const targetFenKey = positionFenKey(fen);
 
@@ -1941,8 +1941,13 @@ function App() {
 
   const browseMoveOptions = useMemo<BrowseMoveOption[]>(() => {
     if (!isBrowseMode) return [];
-    return collectBrowseMoveOptionsAtFen(activeSide, selectedNode.fen);
+    return collectMergedMoveOptionsAtFen(activeSide, selectedNode.fen);
   }, [isBrowseMode, selectedNode.fen, repertoiresBySide, activeSide]);
+
+  const mergedTreeMoveOptions = useMemo<BrowseMoveOption[]>(
+    () => collectMergedMoveOptionsAtFen(activeSide, selectedNode.fen),
+    [selectedNode.fen, repertoiresBySide, activeSide],
+  );
 
   const displayedChildNodes = useMemo<MoveNode[]>(() => {
     if (!isBrowseMode) return childNodes;
@@ -1977,14 +1982,14 @@ function App() {
 
   const autoArrows = useMemo<DrawShape[]>(() => {
     const treeArrows = showTreeArrows
-      ? displayedChildNodes
-          .map((node) => parseUciMove(node.moveUci))
+      ? mergedTreeMoveOptions
+          .map((option) => parseUciMove(option.moveUci))
           .filter((value): value is [Key, Key] => Boolean(value))
           .map(([orig, dest]) => ({ orig, dest, brush: 'green' }))
       : [];
 
     const treeChildUcis = new Set(
-      displayedChildNodes.map((node) => node.moveUci).filter((uci): uci is string => Boolean(uci)),
+      mergedTreeMoveOptions.map((option) => option.moveUci).filter((uci): uci is string => Boolean(uci)),
     );
 
     const positionGames = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
@@ -2079,7 +2084,7 @@ function App() {
 
     return softenOverlappingArrows([...treeArrows, ...lichessArrows, ...engineArrows]);
   }, [
-    displayedChildNodes,
+    mergedTreeMoveOptions,
     showTreeArrows,
     lichessData,
     lichessArrowThreshold,
@@ -3574,7 +3579,7 @@ function App() {
       if (turnColor === side) break;
 
       if (isBrowseMode) {
-        const options = collectBrowseMoveOptionsAtFen(side, cursor.fen);
+        const options = collectMergedMoveOptionsAtFen(side, cursor.fen);
         if (options.length === 0) break;
         const randomOption = options[Math.floor(Math.random() * options.length)];
         const moveUci = randomOption.moveUci;
@@ -3626,7 +3631,7 @@ function App() {
     const promptNode = sideTree.nodes[cursorId] ?? rootNode;
     const promptTurnMatches = toTurnColor(promptNode.fen) === side;
     const promptOptions = isBrowseMode
-      ? collectBrowseMoveOptionsAtFen(side, promptNode.fen).map((option) => option.moveUci)
+      ? collectMergedMoveOptionsAtFen(side, promptNode.fen).map((option) => option.moveUci)
       : promptNode.children
           .map((childId) => sideTree.nodes[childId]?.moveUci)
           .filter((value): value is string => Boolean(value));
@@ -4030,7 +4035,7 @@ function App() {
 
       if (toTurnColor(currentNode.fen) !== activeSide) return;
       const trainingOptions = isBrowseMode
-        ? collectBrowseMoveOptionsAtFen(activeSide, currentNode.fen).map((option) => option.moveUci)
+        ? collectMergedMoveOptionsAtFen(activeSide, currentNode.fen).map((option) => option.moveUci)
         : currentNode.children
             .map((childId) => currentTree.nodes[childId]?.moveUci)
             .filter((value): value is string => Boolean(value));
