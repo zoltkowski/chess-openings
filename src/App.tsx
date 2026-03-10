@@ -1948,6 +1948,7 @@ function App() {
     () => collectMergedMoveOptionsAtFen(activeSide, selectedNode.fen),
     [selectedNode.fen, repertoiresBySide, activeSide],
   );
+  const isScopedTrainingOnSingleRepertoire = Boolean(trainingSession && trainingSession.side === activeSide && !isBrowseMode);
 
   const displayedChildNodes = useMemo<MoveNode[]>(() => {
     if (!isBrowseMode) return childNodes;
@@ -1981,15 +1982,25 @@ function App() {
   }, [selectedNode.fen, repertoiresBySide, activeSide, activeRepertoireIdBySide]);
 
   const autoArrows = useMemo<DrawShape[]>(() => {
+    const treeMoveOptionsForUi = isScopedTrainingOnSingleRepertoire
+      ? childNodes
+          .filter((node): node is MoveNode & { moveUci: string; moveSan: string } => Boolean(node.moveUci && node.moveSan))
+          .map((node) => ({
+            moveUci: node.moveUci,
+            moveSan: node.moveSan,
+            repertoireNames: [],
+          }))
+      : mergedTreeMoveOptions;
+
     const treeArrows = showTreeArrows
-      ? mergedTreeMoveOptions
+      ? treeMoveOptionsForUi
           .map((option) => parseUciMove(option.moveUci))
           .filter((value): value is [Key, Key] => Boolean(value))
           .map(([orig, dest]) => ({ orig, dest, brush: 'green' }))
       : [];
 
     const treeChildUcis = new Set(
-      mergedTreeMoveOptions.map((option) => option.moveUci).filter((uci): uci is string => Boolean(uci)),
+      treeMoveOptionsForUi.map((option) => option.moveUci).filter((uci): uci is string => Boolean(uci)),
     );
 
     const positionGames = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
@@ -2084,6 +2095,8 @@ function App() {
 
     return softenOverlappingArrows([...treeArrows, ...lichessArrows, ...engineArrows]);
   }, [
+    isScopedTrainingOnSingleRepertoire,
+    childNodes,
     mergedTreeMoveOptions,
     showTreeArrows,
     lichessData,
@@ -5214,13 +5227,49 @@ function App() {
       return total;
     };
 
-    return childNodes
-      .map((node) => ({
+    if (isScopedTrainingOnSingleRepertoire) {
+      return childNodes.map((node) => ({
         node,
         leaves: countLeaves(node.id),
-      }))
-      .map(({ node, leaves }) => ({ node, leaves }));
-  }, [isBrowseMode, browseMoveOptions, selectedNode.id, selectedNode.fen, childNodes, tree.nodes]);
+      }));
+    }
+
+    const childByUci = new Map(
+      childNodes
+        .filter((node): node is MoveNode & { moveUci: string } => Boolean(node.moveUci))
+        .map((node) => [node.moveUci, node] as const),
+    );
+
+    return mergedTreeMoveOptions.map((option) => {
+      const existingChild = childByUci.get(option.moveUci);
+      if (existingChild) {
+        return {
+          node: existingChild,
+          leaves: countLeaves(existingChild.id),
+        };
+      }
+      return {
+        node: {
+          id: `merged-option-${option.moveUci}`,
+          parentId: selectedNode.id,
+          fen: selectedNode.fen,
+          moveSan: option.moveSan,
+          moveUci: option.moveUci,
+          children: [],
+        } as MoveNode,
+        leaves: option.repertoireNames.length,
+      };
+    });
+  }, [
+    isBrowseMode,
+    isScopedTrainingOnSingleRepertoire,
+    browseMoveOptions,
+    mergedTreeMoveOptions,
+    selectedNode.id,
+    selectedNode.fen,
+    childNodes,
+    tree.nodes,
+  ]);
 
   const clearTreeOptionLongPress = () => {
     if (treeOptionLongPressTimeoutRef.current !== null) {
@@ -5247,6 +5296,7 @@ function App() {
   };
 
   const handleTreeOptionPointerDown = (node: MoveNode, event: PointerEvent<HTMLButtonElement>) => {
+    if (!isBrowseMode && !tree.nodes[node.id]) return;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     clearTreeOptionLongPress();
     treeOptionLongPressHandledNodeRef.current = null;
@@ -5262,6 +5312,7 @@ function App() {
   };
 
   const handleTreeOptionMouseDown = (node: MoveNode, event: MouseEvent<HTMLButtonElement>) => {
+    if (!isBrowseMode && !tree.nodes[node.id]) return;
     if ('PointerEvent' in window) return;
     if (event.button !== 0) return;
     clearTreeOptionLongPress();
@@ -5278,6 +5329,7 @@ function App() {
   };
 
   const handleTreeOptionTouchStart = (node: MoveNode, event: TouchEvent<HTMLButtonElement>) => {
+    if (!isBrowseMode && !tree.nodes[node.id]) return;
     if ('PointerEvent' in window) return;
     clearTreeOptionLongPress();
     treeOptionLongPressHandledNodeRef.current = null;
@@ -5293,6 +5345,7 @@ function App() {
   };
 
   const openTreeOptionDeleteFromContextMenu = (node: MoveNode, element: HTMLButtonElement) => {
+    if (!isBrowseMode && !tree.nodes[node.id]) return;
     const { x, y } = getDeletePopupPosition(element);
     treeOptionLongPressHandledNodeRef.current = node.id;
     setTreeOptionDeletePopup(
@@ -5313,6 +5366,10 @@ function App() {
       return;
     }
     if (isBrowseMode) {
+      if (node.moveUci) playLichessMove(node.moveUci);
+      return;
+    }
+    if (!tree.nodes[node.id]) {
       if (node.moveUci) playLichessMove(node.moveUci);
       return;
     }
