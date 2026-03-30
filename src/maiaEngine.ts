@@ -1,9 +1,11 @@
 import { Chess, type Move } from 'chess.js';
 import * as ort from 'onnxruntime-web/wasm';
 
-const MAIA_MODEL_URL =
-  'https://raw.githubusercontent.com/CSSLab/maia-platform-frontend/e23a50e/public/maia2/maia_rapid.onnx';
-const MAIA_MOVES_URL = '/maia/all_moves.json';
+// Load Maia v3 artifacts from local public folder. Place the model and
+// moves map under `public/maia/maia3/` in the app so they are served
+// statically by the dev/prod server.
+const MAIA_MODEL_URL = '/maia/maia3/maia_rapid.onnx';
+const MAIA_MOVES_URL = '/maia/maia3/all_moves.json';
 const ORT_WASM_CDN_PREFIX = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.2/dist/';
 
 type MaiaEvaluateParams = {

@@ -3691,13 +3691,11 @@ function App() {
 
   const closeSuddenDeathGameOverPopup = () => {
     if (!suddenDeathGameOver) return;
-    const { side, startNodeId } = suddenDeathGameOver;
-    restoreSuddenDeathStartPosition(side, startNodeId);
+    // Close the game-over popup but keep sudden-death runtime state so the
+    // user can step through the sudden-death continuation. Deactivation and
+    // restoring the start position is handled when the user toggles sudden
+    // death off via the sudden-death button (stopTraining).
     setSuddenDeathGameOver(null);
-    clearSuddenDeathRuntime();
-    if (trainingSession && trainingSession.side === side && trainingSession.suddenDeathMode) {
-      setTrainingSession(null);
-    }
   };
 
   const startTraining = () => {
@@ -5585,6 +5583,18 @@ function App() {
         },
       };
     });
+    // If this leaf hasn't been recorded as completed in this session yet,
+    // append a training answer indicating whether it was reached without errors.
+    const alreadyCompleted = trainingSession.completedLeafNodeIds.includes(currentNode.id);
+    if (!alreadyCompleted) {
+      const scopeIds =
+        trainingSession.currentPromptScopeIds && trainingSession.currentPromptScopeIds.length > 0
+          ? trainingSession.currentPromptScopeIds
+          : getScopeIdsForTrainingPosition(activeSide, currentNode.fen);
+      const answer: 0 | 1 = trainingSession.currentPromptHadError ? 0 : 1;
+      appendTrainingAnswer(activeSide, currentNode.fen, scopeIds, answer);
+    }
+
     setTrainingSession((prev) => {
       if (!prev || prev.side !== activeSide) return prev;
       if (prev.completedLeafNodeIds.includes(currentNode.id)) return prev;
