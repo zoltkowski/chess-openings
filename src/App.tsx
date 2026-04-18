@@ -1982,7 +1982,7 @@ function App() {
   }, [selectedNode.fen, repertoiresBySide, activeSide, activeRepertoireIdBySide]);
 
   const autoArrows = useMemo<DrawShape[]>(() => {
-    const treeMoveOptionsForUi = isScopedTrainingOnSingleRepertoire
+    const treeMoveOptionsForUi = !isBrowseMode || isScopedTrainingOnSingleRepertoire
       ? childNodes
           .filter((node): node is MoveNode & { moveUci: string; moveSan: string } => Boolean(node.moveUci && node.moveSan))
           .map((node) => ({
@@ -2095,6 +2095,7 @@ function App() {
 
     return softenOverlappingArrows([...treeArrows, ...lichessArrows, ...engineArrows]);
   }, [
+    isBrowseMode,
     isScopedTrainingOnSingleRepertoire,
     childNodes,
     mergedTreeMoveOptions,
