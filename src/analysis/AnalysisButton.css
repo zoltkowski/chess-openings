@@ -1,0 +1,22 @@
+.analysis-button-backdrop { z-index: 1100; }
+.analysis-button-trigger { touch-action: manipulation; user-select: none; -webkit-touch-callout: none; }
+.analysis-button-dialog { width: min(390px, calc(100vw - 2rem)); }
+.analysis-button-dialog { max-height: calc(100dvh - 2rem); overflow-y: auto; }
+.analysis-button-dark .analysis-button-dialog { color: #e2e8f0; background: #172033; border-color: #334155; }
+.analysis-button-dark .analysis-button-benchmark p { color: #a5b4c7; }
+.analysis-button-dark .analysis-button-close { color: #e2e8f0; }
+.analysis-button-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.analysis-button-header h2 { margin: 0; font-size: 1.15rem; }
+.analysis-button-close { border: 0; background: transparent; font-size: 1.5rem; line-height: 1; cursor: pointer; }
+.analysis-button-benchmark { margin-top: 1.2rem; }
+.analysis-button-benchmark label { display: flex; justify-content: space-between; font-weight: 600; }
+.analysis-button-benchmark input { width: 100%; margin: 0.8rem 0 0; }
+.analysis-button-benchmark p { margin: 0.2rem 0 0; color: #64748b; font-size: 0.82rem; }
+.analysis-button-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem; margin-top: 1.2rem; }
+.analysis-button-dialog .analysis-context-editor { margin-top: 1rem; }
+.analysis-button-actions button { min-height: 2.6rem; cursor: pointer; }
+.analysis-button-actions button span { display: block; margin-top: 0.2rem; font-size: 0.78rem; font-weight: 400; opacity: 0.78; }
+@media (max-width: 420px) {
+  .analysis-button-dialog { padding: 0.8rem; }
+  .analysis-button-actions { grid-template-columns: 1fr; }
+}

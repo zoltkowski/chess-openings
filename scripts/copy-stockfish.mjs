@@ -7,5 +7,5 @@ const outDir = resolve(root, 'public', 'stockfish');
 
 await mkdir(outDir, { recursive: true });
 
-const files = ['stockfish-18-lite-single.js', 'stockfish-18-lite-single.wasm'];
+const files = ['stockfish-19-lite-single.js', 'stockfish-19-lite-single.wasm'];
 await Promise.all(files.map((file) => copyFile(resolve(srcDir, file), resolve(outDir, file))));

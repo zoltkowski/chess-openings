@@ -18,11 +18,17 @@ import type { Api as ChessgroundApi } from '@lichess-org/chessground/api';
 import type { Key } from '@lichess-org/chessground/types';
 import type { DrawShape } from '@lichess-org/chessground/draw';
 import type { DrawBrushes } from '@lichess-org/chessground/draw';
-import { evaluateMaiaPosition } from './maiaEngine';
+import { evaluateMaiaPosition, cancelMaiaEvaluations, MAIA_ENGINE_LABEL } from './maiaEngine';
+import { STOCKFISH_ENGINE_LABEL, STOCKFISH_ENGINE_NAME } from './engineVersions';
 import '@lichess-org/chessground/assets/chessground.base.css';
 import '@lichess-org/chessground/assets/chessground.brown.css';
 import '@lichess-org/chessground/assets/chessground.cburnett.css';
 import './App.css';
+import { GameReport } from './analysis/GameReport';
+import { AnalysisButton } from './analysis/AnalysisButton';
+import { runGameReview } from './analysis/gameReview';
+import type { CandidateEvaluation, DecisionMetrics } from './analysis/decisionMetrics';
+import type { AnalysisContext } from './analysis/AnalysisContextEditor';
 
 type Side = 'white' | 'black';
 type LichessSource = 'lichess' | 'masters' | 'player';
@@ -52,6 +58,94 @@ type EngineLine = {
   pv: string;
   bestMove: string;
   evalValue: number;
+};
+
+export type StockfishEvaluationResult = {
+  scoreText: string; evalCp: number; bestMove: string | null; pv: string;
+  depth: number; nodes: number; hasScore: boolean; wdl?: [number, number, number] | null;
+  candidates?: CandidateEvaluation[];
+};
+
+export type GameAnalysisMoveResult = Partial<DecisionMetrics> & {
+  nodeId: string;
+  moveNumber: number;
+  moveSan: string;
+  mover: Side;
+  bestMoveUci: string | null;
+  bestScoreText: string | null;
+  playedScoreText: string | null;
+  bestScoreCp: number | null;
+  playedScoreCp: number | null;
+  bestWdl?: [number, number, number] | null;
+  playedWdl?: [number, number, number] | null;
+  bestPv: string;
+  playedPv: string;
+  terminalOutcome: 'checkmate' | 'draw' | null;
+  depth: number;
+  nodes: number;
+  lossPoints: number | null;
+  category: 'book' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder' | 'unavailable';
+  status: 'book' | 'complete' | 'uncertain' | 'unavailable';
+  bookRepertoireName?: string;
+  maiaStatus?: 'complete' | 'unavailable' | 'skipped';
+  maiaUnavailableReason?: string;
+  maiaPlayedProbability?: number | null;
+  maiaPlayedRank?: number | null;
+  maiaTopMoveUci?: string | null;
+  maiaTopMoveProbability?: number | null;
+  maiaWinProbability?: number | null;
+  maiaElo?: number;
+  maiaAnchorElo?: number;
+  maiaOpponentElo?: number;
+  maiaRatingSource?: 'pgn' | 'manual' | 'benchmark';
+  maiaBaselineTag?: 'above' | 'below' | null;
+  profileProbabilities?: { rating: number; probability: number }[];
+  profileOpponentElo?: number;
+  goodMassLower?: number;
+  goodMassUpper?: number;
+  obvious?: boolean;
+  greatFind?: boolean;
+  attackEvidence?: string;
+  checkedOpponent?: boolean;
+  answeredCheck?: boolean;
+  difficultyScore?: number;
+  practicalGoodMassLower?: number;
+  practicalGoodMassUpper?: number;
+  practicalPressureScore?: number;
+  practicalQualityScore?: number;
+  responseEntropy?: number;
+  opponentMissedPunishment?: boolean;
+  openingEvidence?: { name?: string; totalGames: number; playedGames?: number; frequency?: number };
+  tablebaseEvidence?: { category: string };
+  ratingSystem?: string;
+  ratingPool?: string;
+  uncertaintyReason?: string;
+};
+
+type GameAnalysisReport = {
+  version: 2;
+  gameKey: string;
+  sourceId?: string;
+  rootNodeId?: string;
+  rootFen?: string;
+  side: Side;
+  createdAt: number;
+  engine: string;
+  maiaEngine?: string;
+  maiaElo?: number;
+  playerRatings?: { white?: number; black?: number };
+  reviewMode?: 'quick' | 'deep';
+  depth: number;
+  status: 'running' | 'complete' | 'partial' | 'cancelled' | 'error';
+  results: GameAnalysisMoveResult[];
+};
+
+type GameAnalysisProgress = {
+  done: number;
+  total: number;
+  moveText: string;
+  phase: 'book' | 'maia' | 'best' | 'played' | 'refine' | 'alternatives' | 'profile';
+  liveScoreText: string | null;
 };
 
 type LichessMove = {
@@ -182,6 +276,7 @@ type PersistedSettingsState = {
   themeMode: ThemeMode;
   selectedEngine: EngineChoice;
   maiaStrengthElo: number;
+  analysisBenchmarkElo: number;
   suddenDeathEngine: EngineChoice;
   suddenDeathMaiaElo: number;
   repertoireSide: Side;
@@ -254,6 +349,7 @@ const APP_SETTINGS_KEY = 'settings-v1';
 const APP_TRAINING_STATS_KEY = 'training-stats-v1';
 const APP_TRAINING_LEAF_LAST_SHOWN_KEY = 'training-leaf-last-shown-v1';
 const APP_LICHESS_RESPONSE_CACHE_KEY = 'lichess-response-cache-v1';
+const APP_GAME_ANALYSIS_REPORT_KEY = 'game-analysis-report-v1';
 const BACKUP_FILE_PREFIX = 'opening-prep-backup-';
 const BACKUP_FILE_EXTENSION = '.json';
 const BACKUP_FILE_MIME_TYPE = 'application/json';
@@ -497,6 +593,7 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
     ...parsed,
     themeMode: normalizedThemeMode,
     selectedEngine: normalizedSelectedEngine,
+    analysisBenchmarkElo: clampInt((parsed as Partial<PersistedSettingsState>).analysisBenchmarkElo, 1100, 3000, 1800),
     maiaStrengthElo: clampInt(
       (parsed as Partial<PersistedSettingsState>).maiaStrengthElo,
       MAIA_STRENGTH_ELO_MIN,
@@ -813,6 +910,78 @@ function TrainIcon() {
   );
 }
 
+type BookRepertoireIndex = {
+  id: string;
+  name: string;
+  movesByFen: Map<string, Set<string>>;
+};
+
+function buildBookRepertoireIndex(repertoires: RepertoireEntry[]): BookRepertoireIndex[] {
+  return repertoires.filter((entry) => repertoireHasMoves(entry.tree)).map((repertoire) => {
+    const movesByFen = new Map<string, Set<string>>();
+    for (const node of Object.values(repertoire.tree.nodes)) {
+      const fenKey = bookPositionFenKey(node.fen);
+      for (const childId of node.children) {
+        const moveUci = repertoire.tree.nodes[childId]?.moveUci;
+        if (!moveUci) continue;
+        const moves = movesByFen.get(fenKey) ?? new Set<string>();
+        moves.add(moveUci);
+        movesByFen.set(fenKey, moves);
+      }
+    }
+    return { id: repertoire.id, name: repertoire.name, movesByFen };
+  });
+}
+
+function findBookMovesForGame(gamePath: MoveNode[], repertoires: BookRepertoireIndex[]) {
+  const matchesByNodeId = new Map<string, BookRepertoireIndex[]>();
+  const matchCounts = new Map<string, number>();
+
+  for (const repertoire of repertoires) {
+    let matchedMoveCount = 0;
+    for (let index = 1; index < gamePath.length; index += 1) {
+      const beforeNode = gamePath[index - 1];
+      const playedNode = gamePath[index];
+      if (!playedNode.moveUci) continue;
+      const targetFenKey = bookPositionFenKey(beforeNode.fen);
+      const isInRepertoire = repertoire.movesByFen.get(targetFenKey)?.has(playedNode.moveUci) ?? false;
+      if (!isInRepertoire) continue;
+      matchedMoveCount += 1;
+      const providers = matchesByNodeId.get(playedNode.id) ?? [];
+      providers.push(repertoire);
+      matchesByNodeId.set(playedNode.id, providers);
+    }
+    matchCounts.set(repertoire.id, matchedMoveCount);
+  }
+
+  const result = new Map<string, { repertoireName: string }>();
+  for (const [nodeId, providers] of matchesByNodeId) {
+    const preferred = [...providers].sort(
+      (a, b) => (matchCounts.get(b.id) ?? 0) - (matchCounts.get(a.id) ?? 0) || a.name.localeCompare(b.name),
+    )[0];
+    if (preferred) result.set(nodeId, { repertoireName: preferred.name });
+  }
+  return result;
+}
+
+function AnalysisIcon() {
+  return (
+    <TabIconBase>
+      <path d="M5 18.5h14M7.5 16V12M12 16V7.5M16.5 16v-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <circle cx="7.5" cy="9" r="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <circle cx="16.5" cy="7" r="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    </TabIconBase>
+  );
+}
+
+function ReportIcon() {
+  return (
+    <TabIconBase>
+      <path d="M6 4.5h12v15H6zM9 8h6M9 11.5h6M9 15h3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </TabIconBase>
+  );
+}
+
 function BackIcon() {
   return (
     <TabIconBase>
@@ -909,6 +1078,17 @@ function boardFen(fen: string) {
 function positionFenKey(fen: string) {
   const fullFen = boardFen(fen);
   const parts = fullFen.split(' ');
+  return parts.slice(0, 4).join(' ');
+}
+
+function bookPositionFenKey(fen: string) {
+  const fullFen = boardFen(fen);
+  const parts = fullFen.split(' ');
+  if (parts[3] && parts[3] !== '-') {
+    const chess = new Chess(fullFen);
+    const hasLegalEnPassant = chess.moves({ verbose: true }).some((move) => move.flags.includes('e'));
+    if (!hasLegalEnPassant) parts[3] = '-';
+  }
   return parts.slice(0, 4).join(' ');
 }
 
@@ -1162,6 +1342,22 @@ function buildPath(tree: MoveTree, nodeId: string): MoveNode[] {
   }
 
   path.reverse();
+  return path;
+}
+
+function buildMainLinePath(tree: MoveTree): MoveNode[] {
+  const root = tree.nodes[tree.rootId];
+  if (!root) return [];
+  const path = [root];
+  let cursor = root;
+  while (cursor.children.length > 0) {
+    const mainChildId = cursor.children.find((childId) => Boolean(tree.nodes[childId]?.moveUci));
+    if (!mainChildId) break;
+    const mainChild = tree.nodes[mainChildId];
+    if (!mainChild) break;
+    path.push(mainChild);
+    cursor = mainChild;
+  }
   return path;
 }
 
@@ -1530,26 +1726,51 @@ function uciToFigurineSan(fen: string, uci: string) {
   }
 }
 
-function pvToFigurineSan(fen: string, pv: string, maxMoves = 8) {
+function buildEnginePvMoves(fen: string, pv: string) {
   const chess = fenToChess(fen);
-  const parts = pv.split(/\s+/).filter(Boolean);
-  const out: string[] = [];
-  for (const uci of parts) {
-    if (!/^[a-h][1-8][a-h][1-8][nbrq]?$/.test(uci)) continue;
+  const moves: Array<{ san: string; fen: string; lastMove: [Key, Key] }> = [];
+  for (const uci of pv.split(/\s+/).filter((part) => /^[a-h][1-8][a-h][1-8][nbrq]?$/.test(part))) {
+    const input = uciToMoveInput(uci);
+    if (!input) break;
     try {
-      const move = chess.move({
-        from: uci.slice(0, 2),
-        to: uci.slice(2, 4),
-        promotion: uci[4] as 'q' | 'r' | 'b' | 'n' | undefined,
-      });
+      const move = chess.move(input);
       if (!move) break;
-      out.push(toFigurineSan(move.san));
+      moves.push({ san: toFigurineSan(move.san), fen: chess.fen(), lastMove: [move.from as Key, move.to as Key] });
     } catch {
       break;
     }
-    if (out.length >= maxMoves) break;
   }
-  return out.join(' ');
+  return moves;
+}
+
+function MaiaMoveSummary({ result, positionFen }: { result: GameAnalysisMoveResult; positionFen?: string }) {
+  if (!result.maiaStatus) return null;
+  const topMove = result.maiaTopMoveUci && positionFen
+    ? uciToFigurineSan(positionFen, result.maiaTopMoveUci)
+    : result.maiaTopMoveUci;
+  const eloLabel = result.maiaElo === undefined ? 'rating unavailable' : `${result.maiaElo} vs ${result.maiaOpponentElo ?? result.maiaElo} Elo`;
+  return (
+    <span className="game-analysis-maia-stat">
+      <strong>{MAIA_ENGINE_LABEL} · {eloLabel}</strong>
+      {result.maiaStatus === 'skipped'
+        ? <span> Maia skipped this position: {result.maiaUnavailableReason || 'analysis is reserved for selected critical decisions'}.</span>
+        : result.maiaStatus === 'unavailable'
+        ? <span> Maia statistics are unavailable for this position{result.maiaUnavailableReason ? `: ${result.maiaUnavailableReason}` : '.'}</span>
+        : <span>
+            {result.maiaPlayedProbability === null || result.maiaPlayedProbability === undefined
+              ? ' Played move is not in Maia’s move vocabulary.'
+              : ` Played move: #${result.maiaPlayedRank ?? '–'} in Maia’s choices (${(result.maiaPlayedProbability * 100).toFixed(1)}%).`}
+            {topMove && result.maiaTopMoveProbability !== null && result.maiaTopMoveProbability !== undefined
+              ? ` Top choice: ${topMove} (${(result.maiaTopMoveProbability * 100).toFixed(1)}%).`
+              : ''}
+            {result.maiaWinProbability !== null && result.maiaWinProbability !== undefined
+              ? ` Expected score for White before the move: ${(result.maiaWinProbability * 100).toFixed(1)}%.`
+              : ''}
+            {result.maiaBaselineTag === 'above' ? ' Difficult find: Stockfish checked the alternatives and Maia predicts few good choices.' : ''}
+            {result.maiaBaselineTag === 'below' ? ' Missed an accessible move: Maia strongly favors alternatives that Stockfish confirms are good.' : ''}
+          </span>}
+    </span>
+  );
 }
 
 function softenOverlappingArrows(arrows: DrawShape[]): DrawShape[] {
@@ -1732,6 +1953,16 @@ function App() {
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
   const [selectedEngine, setSelectedEngine] = useState<EngineChoice>(initialEngineChoice);
   const [maiaStrengthElo, setMaiaStrengthElo] = useState(initialMaiaStrengthElo);
+  const [analysisBenchmarkElo, setAnalysisBenchmarkElo] = useState(1800);
+  const [analysisContext, setAnalysisContext] = useState<AnalysisContext>(() => {
+    try { return JSON.parse(localStorage.getItem('analysis-context') ?? '{}'); } catch { return {}; }
+  });
+  const [analysisContextSource, setAnalysisContextSource] = useState<'pgn' | 'manual'>('manual');
+  const updateAnalysisContext = (value: AnalysisContext) => {
+    setAnalysisContext(value); setAnalysisContextSource('manual');
+    localStorage.setItem('analysis-context', JSON.stringify(value));
+  };
+  const analysisReviewAbortRef = useRef<AbortController | null>(null);
   const [stockfishEvalSeconds, setStockfishEvalSeconds] = useState(10);
   const [trainingStatsQueueLength, setTrainingStatsQueueLength] = useState(initialTrainingStatsQueueLength);
   const [suddenDeathThreshold, setSuddenDeathThreshold] = useState(initialSuddenDeathThreshold);
@@ -1780,6 +2011,11 @@ function App() {
   });
   const [hasHydratedAppState, setHasHydratedAppState] = useState(false);
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
+  const [isAnalysisMode, setIsAnalysisMode] = useState(false);
+  const [analysisGameProgress, setAnalysisGameProgress] = useState<GameAnalysisProgress | null>(null);
+  const [gameAnalysisReport, setGameAnalysisReport] = useState<GameAnalysisReport | null>(null);
+  const [showAnalysisReport, setShowAnalysisReport] = useState(false);
+  const [analysisScratchPosition, setAnalysisScratchPosition] = useState<{ fen: string; lastMove: [Key, Key] | null } | null>(null);
   const [isBackupIoRunning, setIsBackupIoRunning] = useState(false);
   const [isNewRepertoireOpen, setIsNewRepertoireOpen] = useState(false);
   const [isLoadRepertoireOpen, setIsLoadRepertoireOpen] = useState(false);
@@ -1809,6 +2045,8 @@ function App() {
   const [isEvalManagerOpen, setIsEvalManagerOpen] = useState(false);
   const [isDbStatsOpen, setIsDbStatsOpen] = useState(false);
   const [suddenDeathThinking, setSuddenDeathThinking] = useState(false);
+  const analysisGameCancelRef = useRef(false);
+  const analysisCurrentBoardNodeRef = useRef<string | null>(null);
 
   const stockfishRef = useRef<Worker | null>(null);
   const selectedEngineRef = useRef<EngineChoice>(initialEngineChoice);
@@ -1836,7 +2074,16 @@ function App() {
     perspectiveMultiplier: number;
     latestEvalCp: number;
     latestScoreText: string;
-    resolve: (result: { scoreText: string; evalCp: number; bestMove: string | null }) => void;
+    latestPv: string;
+    latestDepth: number;
+    latestNodes: number;
+    latestScoreIsBound: boolean;
+    latestWdl: [number, number, number] | null;
+    wdlMultiplier: number;
+    candidateLayers: Map<number, Map<number, CandidateEvaluation>>;
+    requiredCandidates: number;
+    onInfo?: (scoreText: string) => void;
+    resolve: (result: StockfishEvaluationResult) => void;
     timeoutId: number | null;
   } | null>(null);
   const treeOptionLongPressTimeoutRef = useRef<number | null>(null);
@@ -1882,6 +2129,10 @@ function App() {
     activeRepertoireId ? activeRepertoireList.find((item) => item.id === activeRepertoireId) : null;
   const isBrowseMode = !activeRepertoire;
   const activeRepertoireName = activeRepertoire?.name ?? 'Review mode';
+  const bookRepertoireIndex = useMemo(
+    () => buildBookRepertoireIndex([...repertoiresBySide.white, ...repertoiresBySide.black]),
+    [repertoiresBySide],
+  );
   const boardOrientation: 'white' | 'black' =
     isTempBoardFlipped ? (repertoireSide === 'white' ? 'black' : 'white') : repertoireSide;
   const newRepertoireSide: Side = boardOrientation;
@@ -1899,10 +2150,27 @@ function App() {
   const tree = trees[activeSide];
   const selectedNodeId = selectedNodeBySide[activeSide] ?? tree.rootId;
   const selectedNode = tree.nodes[selectedNodeId] ?? tree.nodes[tree.rootId];
+  const analysisScratchFen = analysisScratchPosition?.fen ?? null;
+  const selectedBoardFen = analysisScratchFen ?? selectedNode.fen;
   const trainingForActive = trainingSession?.side === activeSide && !trainingSession.suddenDeathMode;
   const isTreeEvalRunning = Boolean(treeEvalProgress?.running);
 
   const path = useMemo(() => buildPath(tree, selectedNode.id), [tree, selectedNode.id]);
+  const mainLinePath = useMemo(() => buildMainLinePath(tree), [tree]);
+  const currentPathGameKey = path.map((node) => `${node.id}:${node.moveUci ?? ''}:${node.fen}`).join('|');
+  const gameAnalysisReportMatchesLine = Boolean(
+    gameAnalysisReport &&
+    gameAnalysisReport.side === activeSide &&
+    gameAnalysisReport.gameKey === mainLinePath.map(node => `${node.id}:${node.moveUci ?? ''}:${node.fen}`).join('|') &&
+    (gameAnalysisReport.sourceId
+      ? gameAnalysisReport.sourceId === (activeRepertoireIdBySide[activeSide] ?? `browse:${activeSide}`) &&
+        gameAnalysisReport.rootNodeId === tree.rootId &&
+        gameAnalysisReport.rootFen === tree.nodes[tree.rootId]?.fen
+      : gameAnalysisReport.gameKey === currentPathGameKey || gameAnalysisReport.gameKey.startsWith(`${currentPathGameKey}|`)),
+  );
+  useEffect(() => {
+    setAnalysisScratchPosition(null);
+  }, [activeSide, selectedNode.id]);
 
   const childNodes = useMemo(
     () => selectedNode.children.map((id) => tree.nodes[id]).filter(Boolean),
@@ -1992,7 +2260,7 @@ function App() {
           }))
       : mergedTreeMoveOptions;
 
-    const treeArrows = showTreeArrows
+    const treeArrows = !isAnalysisMode && !analysisScratchFen && showTreeArrows
       ? treeMoveOptionsForUi
           .map((option) => parseUciMove(option.moveUci))
           .filter((value): value is [Key, Key] => Boolean(value))
@@ -2006,7 +2274,7 @@ function App() {
     const positionGames = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
     const thresholdShare = lichessArrowThreshold / 100;
     const lichessArrows =
-      showLichessArrows && positionGames > 0
+      !isAnalysisMode && !analysisScratchFen && showLichessArrows && positionGames > 0
         ? (() => {
             const allEntries = (lichessData?.moves ?? [])
               .map((move) => {
@@ -2044,7 +2312,7 @@ function App() {
         : [];
 
     const engineArrows =
-      showStockfishArrows && engineLines.length > 0
+      !isAnalysisMode && showStockfishArrows && engineLines.length > 0
         ? (() => {
             const isMaiaEngine = selectedEngine === 'maia';
             const candidates = engineLines
@@ -2104,9 +2372,11 @@ function App() {
     lichessArrowThreshold,
     engineLines,
     selectedEngine,
+    isAnalysisMode,
     showLichessArrows,
     showStockfishArrows,
     showLichessOnTreeMoves,
+    analysisScratchFen,
   ]);
 
   const lastMove = parseUciMove(selectedNode.moveUci);
@@ -2115,6 +2385,7 @@ function App() {
     setThemeMode(persistedSettings.themeMode);
     setSelectedEngine(persistedSettings.selectedEngine);
     setMaiaStrengthElo(persistedSettings.maiaStrengthElo);
+    setAnalysisBenchmarkElo(persistedSettings.analysisBenchmarkElo ?? 1800);
     setRepertoireSide(persistedSettings.repertoireSide);
     setIsTempBoardFlipped(persistedSettings.isTempBoardFlipped);
     setLichessSource(persistedSettings.lichessSource);
@@ -2197,11 +2468,18 @@ function App() {
         const persistedTrainingLeafLastShown = normalizeTrainingLeafLastShown(
           await idbGet<TrainingLeafLastShownState>(APP_TRAINING_LEAF_LAST_SHOWN_KEY),
         );
+        const persistedGameAnalysis = await idbGet<GameAnalysisReport>(APP_GAME_ANALYSIS_REPORT_KEY);
 
         if (persistedSettings) applyPersistedSettingsState(persistedSettings);
         applyPersistedDatabaseState(persisted);
         setTrainingStatsBySide(persistedTrainingStats ?? createEmptyTrainingStatsState());
         setTrainingLeafLastShownBySide(persistedTrainingLeafLastShown ?? createEmptyTrainingLeafLastShownState());
+        if (persistedGameAnalysis?.version === 2) {
+          setGameAnalysisReport({
+            ...persistedGameAnalysis,
+            status: persistedGameAnalysis.status === 'running' ? 'partial' : persistedGameAnalysis.status,
+          });
+        }
         setStatus('Ready');
       } catch {
         setStatus('Local storage load failed');
@@ -2212,6 +2490,16 @@ function App() {
 
     void hydrateAppState();
   }, []);
+
+  useEffect(() => {
+    if (!hasHydratedAppState || !gameAnalysisReport) return;
+    const timeout = window.setTimeout(() => {
+      void idbSet(APP_GAME_ANALYSIS_REPORT_KEY, gameAnalysisReport).catch(() => {
+        setStatus('Game analysis save failed');
+      });
+    }, 160);
+    return () => window.clearTimeout(timeout);
+  }, [hasHydratedAppState, gameAnalysisReport]);
 
   useEffect(() => {
     if (!hasHydratedAppState) return;
@@ -2264,6 +2552,7 @@ function App() {
       themeMode,
       selectedEngine,
       maiaStrengthElo,
+      analysisBenchmarkElo,
       suddenDeathEngine,
       suddenDeathMaiaElo,
       repertoireSide,
@@ -2303,6 +2592,7 @@ function App() {
     themeMode,
     selectedEngine,
     maiaStrengthElo,
+    analysisBenchmarkElo,
     suddenDeathEngine,
     suddenDeathMaiaElo,
     repertoireSide,
@@ -2386,7 +2676,7 @@ function App() {
   }, [maiaStrengthElo]);
 
   useEffect(() => {
-    const worker = new Worker('/stockfish/stockfish-18-lite-single.js');
+    const worker = new Worker('/stockfish/stockfish-19-lite-single.js');
     stockfishRef.current = worker;
     isSearchingRef.current = false;
     pendingAnalysisRef.current = null;
@@ -2430,18 +2720,60 @@ function App() {
       }
 
       if (text.startsWith('info ') && text.includes(' pv ') && text.includes(' multipv ')) {
+        const pending = suddenDeathAwaiterRef.current;
+        if (pending && !/\b(?:lowerbound|upperbound)\b/.test(text)) {
+          const depth = Number(text.match(/\bdepth (\d+)/)?.[1] ?? 0);
+          const rank = Number(text.match(/\bmultipv (\d+)/)?.[1] ?? 0);
+          const cp = text.match(/\bscore cp (-?\d+)/);
+          const mate = text.match(/\bscore mate (-?\d+)/);
+          const uci = text.match(/\bpv (\S+)/)?.[1];
+          const rawWdl = text.match(/\bwdl (\d+) (\d+) (\d+)/);
+          if (depth && rank && uci && (cp || mate)) {
+            const value = Number((cp ?? mate)![1]) * pending.perspectiveMultiplier;
+            const wdl: [number, number, number] | null = rawWdl
+              ? pending.wdlMultiplier < 0 ? [+rawWdl[3], +rawWdl[2], +rawWdl[1]] : [+rawWdl[1], +rawWdl[2], +rawWdl[3]] : null;
+            const layer = pending.candidateLayers.get(depth) ?? new Map<number, CandidateEvaluation>();
+            layer.set(rank, { uci, depth, evalCp: cp ? value : value > 0 ? 100000 : -100000,
+              scoreText: cp ? formatSignedCp(value) : formatSignedMate(value), wdl, pv: text.match(/\bpv (.+)$/)?.[1] });
+            pending.candidateLayers.set(depth, layer);
+            for (const old of pending.candidateLayers.keys()) if (old < depth - 2) pending.candidateLayers.delete(old);
+          }
+        }
         if (suddenDeathAwaiterRef.current && text.includes(' multipv 1')) {
+          const awaiter = suddenDeathAwaiterRef.current;
           const cpMatch = text.match(/ score cp (-?\d+)/);
           const mateMatch = text.match(/ score mate (-?\d+)/);
-          if (cpMatch) {
-            suddenDeathAwaiterRef.current.latestEvalCp =
-              Number(cpMatch[1]) * suddenDeathAwaiterRef.current.perspectiveMultiplier;
-            suddenDeathAwaiterRef.current.latestScoreText =
-              formatSignedCp(suddenDeathAwaiterRef.current.latestEvalCp);
-          } else if (mateMatch) {
-            const matePly = Number(mateMatch[1]) * suddenDeathAwaiterRef.current.perspectiveMultiplier;
-            suddenDeathAwaiterRef.current.latestEvalCp = matePly > 0 ? 100000 : -100000;
-            suddenDeathAwaiterRef.current.latestScoreText = formatSignedMate(matePly);
+          const wdlMatch = text.match(/\bwdl (\d+) (\d+) (\d+)/);
+          const pvMatch = text.match(/ pv (.+)$/);
+          const depthMatch = text.match(/ depth (\d+)/);
+          const nodesMatch = text.match(/ nodes (\d+)/);
+          const previousDepth = awaiter.latestDepth;
+          const isBound = text.includes(' lowerbound') || text.includes(' upperbound');
+          const hasScore = Boolean(cpMatch || mateMatch);
+          const infoDepth = depthMatch ? Number(depthMatch[1]) : 0;
+          // A later bound score is not an exact evaluation. Keep the last exact
+          // score instead of replacing it and marking the whole position unavailable.
+          if (isBound || !hasScore || infoDepth < previousDepth) {
+            if (awaiter.latestDepth === 0 && infoDepth > 0) awaiter.onInfo?.('?');
+          } else {
+            if (cpMatch) {
+              awaiter.latestEvalCp = Number(cpMatch[1]) * awaiter.perspectiveMultiplier;
+              awaiter.latestScoreText = formatSignedCp(awaiter.latestEvalCp);
+            } else if (mateMatch) {
+              const matePly = Number(mateMatch[1]) * awaiter.perspectiveMultiplier;
+              awaiter.latestEvalCp = matePly > 0 ? 100000 : -100000;
+              awaiter.latestScoreText = formatSignedMate(matePly);
+            }
+            if (pvMatch) awaiter.latestPv = pvMatch[1].trim();
+            if (infoDepth > 0) awaiter.latestDepth = infoDepth;
+            if (nodesMatch) awaiter.latestNodes = Number(nodesMatch[1]);
+            if (wdlMatch) {
+              const [, win, draw, loss] = wdlMatch;
+              const [w, d, l] = [Number(win), Number(draw), Number(loss)];
+              awaiter.latestWdl = awaiter.wdlMultiplier < 0 ? [l, d, w] : [w, d, l];
+            }
+            awaiter.latestScoreIsBound = false;
+            if (awaiter.latestDepth > previousDepth) awaiter.onInfo?.(awaiter.latestScoreText);
           }
         }
 
@@ -2483,10 +2815,20 @@ function App() {
           suddenDeathAwaiterRef.current = null;
           if (awaiter.timeoutId !== null) window.clearTimeout(awaiter.timeoutId);
           const bestMove = text.split(' ')[1] || null;
+          const completeLayer = [...awaiter.candidateLayers.entries()].sort(([a], [b]) => b-a)
+            .find(([, layer]) => layer.size >= awaiter.requiredCandidates)?.[1];
+          const principal = completeLayer?.get(1);
           awaiter.resolve({
-            scoreText: awaiter.latestScoreText,
-            evalCp: awaiter.latestEvalCp,
-            bestMove,
+            scoreText: principal?.scoreText ?? awaiter.latestScoreText,
+            evalCp: principal?.evalCp ?? awaiter.latestEvalCp,
+            bestMove: principal?.uci ?? bestMove,
+            pv: principal?.pv ?? awaiter.latestPv,
+            depth: principal?.depth ?? awaiter.latestDepth,
+            nodes: awaiter.latestNodes,
+            hasScore: awaiter.latestDepth > 0 && !awaiter.latestScoreIsBound,
+            wdl: principal?.wdl ?? awaiter.latestWdl,
+            candidates: [...((completeLayer ?? awaiter.candidateLayers.get(awaiter.latestDepth))?.entries() ?? [])]
+              .sort(([a], [b]) => a - b).map(([, candidate]) => candidate),
           });
           return;
         }
@@ -2529,7 +2871,7 @@ function App() {
         return;
       }
 
-      const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
+      const fen = selectedBoardFen === START_FEN ? new Chess().fen() : selectedBoardFen;
       const requestId = maiaAnalysisRequestRef.current + 1;
       maiaAnalysisRequestRef.current = requestId;
       setEngineStatus('analyzing');
@@ -2555,7 +2897,7 @@ function App() {
           setEngineStatus('done');
         } catch {
           if (requestId !== maiaAnalysisRequestRef.current) return;
-          setEngineStatus('maia error');
+          setEngineStatus(`${MAIA_ENGINE_LABEL} error`);
           setEngineLines([]);
         }
       })();
@@ -2571,13 +2913,13 @@ function App() {
       return;
     }
 
-    const fen = selectedNode.fen === START_FEN ? new Chess().fen() : selectedNode.fen;
+    const fen = selectedBoardFen === START_FEN ? new Chess().fen() : selectedBoardFen;
     const analysisId = currentAnalysisRef.current + 1;
     currentAnalysisRef.current = analysisId;
     pendingAnalysisRef.current = { fen, depth: engineDepth, multipv: engineMultiPv };
     tryStartPendingRef.current?.();
   }, [
-    selectedNode.fen,
+    selectedBoardFen,
     engineDepth,
     engineRunning,
     engineMultiPv,
@@ -2587,13 +2929,13 @@ function App() {
   ]);
 
   useEffect(() => {
-    const fenChanged = previousFenRef.current !== selectedNode.fen;
+    const fenChanged = previousFenRef.current !== selectedBoardFen;
     if (!engineRunning && fenChanged) {
       setEngineLines([]);
       lineCacheRef.current = new Map();
     }
-    previousFenRef.current = selectedNode.fen;
-  }, [selectedNode.fen, engineRunning]);
+    previousFenRef.current = selectedBoardFen;
+  }, [selectedBoardFen, engineRunning]);
 
   useEffect(() => {
     lichessRateLimitedUntilRef.current = lichessRateLimitedUntil ?? 0;
@@ -3242,7 +3584,9 @@ function App() {
     limitStrengthElo?: number | null;
     engineChoice?: EngineChoice;
     maiaElo?: number;
-  }): Promise<{ scoreText: string; evalCp: number; bestMove: string | null }> => {
+    positionCommand?: string;
+    onInfo?: (scoreText: string) => void;
+  }): Promise<StockfishEvaluationResult> => {
     const {
       fen,
       depth,
@@ -3252,6 +3596,8 @@ function App() {
       limitStrengthElo = null,
       engineChoice,
       maiaElo,
+      positionCommand,
+      onInfo,
     } = params;
     const effectiveEngine: EngineChoice = engineChoice ?? selectedEngineRef.current;
     const isMaia = effectiveEngine === 'maia';
@@ -3270,9 +3616,13 @@ function App() {
           scoreText: formatSignedCp(evalCp),
           evalCp,
           bestMove: maiaEval.moves[0]?.uci ?? null,
+          pv: maiaEval.moves[0]?.uci ?? '',
+          depth: 0,
+          nodes: 0,
+          hasScore: maiaEval.moves.length > 0,
         };
       } catch {
-        return { scoreText: '+0.00', evalCp: 0, bestMove: null };
+        return { scoreText: '?', evalCp: 0, bestMove: null, pv: '', depth: 0, nodes: 0, hasScore: false };
       }
     }
 
@@ -3284,7 +3634,7 @@ function App() {
     try {
       const worker = stockfishRef.current;
       if (!worker || !engineReadyRef.current) {
-        return { scoreText: '+0.00', evalCp: 0, bestMove: null };
+        return { scoreText: '?', evalCp: 0, bestMove: null, pv: '', depth: 0, nodes: 0, hasScore: false };
       }
       const effectiveMultiPv = Math.max(1, multipv);
       const effectiveElo = limitStrengthElo;
@@ -3300,29 +3650,44 @@ function App() {
       const perspectiveMultiplier = whitePerspectiveMultiplier * sidePerspectiveMultiplier;
       engineWhitePerspectiveMultiplierRef.current = perspectiveMultiplier;
 
-      const result = await new Promise<{ scoreText: string; evalCp: number; bestMove: string | null }>((resolve) => {
+      const result = await new Promise<StockfishEvaluationResult>((resolve) => {
         const timeoutId = window.setTimeout(() => {
           const awaiter = suddenDeathAwaiterRef.current;
           if (!awaiter) {
-            resolve({ scoreText: '+0.00', evalCp: 0, bestMove: null });
+            resolve({ scoreText: '?', evalCp: 0, bestMove: null, pv: '', depth: 0, nodes: 0, hasScore: false });
             return;
           }
-          suddenDeathAwaiterRef.current = null;
-          resolve({
-            scoreText: awaiter.latestScoreText,
-            evalCp: awaiter.latestEvalCp,
-            bestMove: null,
-          });
-        }, 12000);
+          // Keep ownership until bestmove arrives: otherwise a late response
+          // could resolve the next position's query.
+          worker.postMessage('stop');
+          awaiter.timeoutId = window.setTimeout(() => {
+            if (suddenDeathAwaiterRef.current !== awaiter) return;
+            suddenDeathAwaiterRef.current = null;
+            engineReadyRef.current = false;
+            worker.terminate();
+            if (stockfishRef.current === worker) stockfishRef.current = null;
+            resolve({ scoreText: '?', evalCp: 0, bestMove: null, pv: '', depth: 0, nodes: 0, hasScore: false });
+          }, 2000);
+        }, Math.max(12000, (movetimeMs ?? 0) + 5000));
 
         suddenDeathAwaiterRef.current = {
           perspectiveMultiplier,
           latestEvalCp: 0,
-          latestScoreText: '+0.00',
+          latestScoreText: '?',
+          latestPv: '',
+          latestDepth: 0,
+          latestNodes: 0,
+          latestScoreIsBound: false,
+          latestWdl: null,
+          wdlMultiplier: perspectiveMultiplier,
+          candidateLayers: new Map(),
+          requiredCandidates: Math.min(effectiveMultiPv, new Chess(fen).moves().length),
+          onInfo,
           timeoutId,
           resolve,
         };
 
+        worker.postMessage('setoption name UCI_ShowWDL value true');
         worker.postMessage(`setoption name MultiPV value ${effectiveMultiPv}`);
         if (effectiveElo !== null) {
           worker.postMessage('setoption name UCI_LimitStrength value true');
@@ -3330,7 +3695,7 @@ function App() {
         } else {
           worker.postMessage('setoption name UCI_LimitStrength value false');
         }
-        worker.postMessage(`position fen ${fen}`);
+        worker.postMessage(positionCommand ?? `position fen ${fen}`);
         if (typeof movetimeMs === 'number' && Number.isFinite(movetimeMs) && movetimeMs > 0) {
           worker.postMessage(`go movetime ${Math.floor(movetimeMs)}`);
         } else {
@@ -3341,6 +3706,137 @@ function App() {
       return result;
     } finally {
       suddenDeathBusyRef.current = false;
+    }
+  };
+
+  const analyzeCurrentGame = async (deep = false) => {
+    if (analysisGameProgress) {
+      analysisGameCancelRef.current = true;
+      analysisReviewAbortRef.current?.abort();
+      cancelMaiaEvaluations();
+      stockfishRef.current?.postMessage('stop');
+      return;
+    }
+
+    const analysisTree = trees[activeSide];
+    const originalNodeId = selectedNode.id;
+    const gamePath = buildMainLinePath(analysisTree);
+    if (gamePath.length < 2) return;
+    const bookMoves = findBookMovesForGame(gamePath, bookRepertoireIndex);
+    const analysisMaiaElo = analysisBenchmarkElo;
+    const ratingMetadata = { white: analysisContext.whiteRating, black: analysisContext.blackRating };
+    const bookResults: GameAnalysisMoveResult[] = gamePath.slice(1).flatMap((node, index) => {
+      const source = bookMoves.get(node.id);
+      if (!source) return [];
+      const beforeNode = gamePath[index];
+      const mover: Side = fenToChess(beforeNode.fen).turn() === 'w' ? 'white' : 'black';
+      return [{
+        nodeId: node.id,
+        moveNumber: Number.parseInt(beforeNode.fen.split(' ')[5] || '1', 10),
+        moveSan: node.moveSan ?? node.moveUci ?? '',
+        mover,
+        bestMoveUci: null,
+        bestScoreText: null,
+        playedScoreText: null,
+        bestScoreCp: null,
+        playedScoreCp: null,
+        bestPv: '',
+        playedPv: '',
+        terminalOutcome: null,
+        depth: 0,
+        nodes: 0,
+        lossPoints: null,
+        category: 'book',
+        status: 'book',
+        bookRepertoireName: source.repertoireName,
+      }];
+    });
+    const analysisSide = activeSide;
+    const gameKey = gamePath.map((node) => `${node.id}:${node.moveUci ?? ''}:${node.fen}`).join('|');
+    const bookMoveCount = bookResults.length;
+    const initialReport: GameAnalysisReport = {
+      version: 2,
+      gameKey,
+      sourceId: activeRepertoireIdBySide[analysisSide] ?? `browse:${analysisSide}`,
+      rootNodeId: analysisTree.rootId,
+      rootFen: gamePath[0].fen,
+      side: analysisSide,
+      createdAt: Date.now(),
+      engine: STOCKFISH_ENGINE_NAME,
+      maiaEngine: MAIA_ENGINE_LABEL,
+      reviewMode: deep ? 'deep' : 'quick',
+      maiaElo: analysisMaiaElo,
+      playerRatings: ratingMetadata ? { white: ratingMetadata.white, black: ratingMetadata.black } : undefined,
+      depth: engineDepth,
+      status: 'running',
+      results: bookResults,
+    };
+    analysisGameCancelRef.current = false;
+    const reviewAbort = new AbortController();
+    analysisReviewAbortRef.current = reviewAbort;
+    setGameAnalysisReport(initialReport);
+    setShowAnalysisReport(false);
+    setAnalysisGameProgress({
+      done: 0,
+      total: gamePath.length - 1,
+      moveText: 'Preparing analysis',
+      phase: 'best',
+      liveScoreText: null,
+    });
+    setPortraitTab('moves');
+    setEngineRunning(false);
+    engineRunningRef.current = false;
+    pendingAnalysisRef.current = null;
+    stockfishRef.current?.postMessage('stop');
+
+    try {
+      if (bookMoveCount === gamePath.length - 1) {
+        setGameAnalysisReport({ ...initialReport, status: 'complete' });
+        setShowAnalysisReport(true);
+        return;
+      }
+      if (!engineReadyRef.current) {
+        for (let attempt = 0; attempt < 200 && !engineReadyRef.current; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 50));
+        }
+      }
+      // Wait for any interactive search stopped above to send its final bestmove.
+      for (let attempt = 0; attempt < 100 && isSearchingRef.current; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 20));
+      }
+      if (isSearchingRef.current) throw new Error('Stockfish did not stop its previous search');
+      if (!engineReadyRef.current || !stockfishRef.current) throw new Error('Stockfish is unavailable');
+
+      await runGameReview({ path: gamePath, bookResults, deep, depth: engineDepth, benchmark: analysisMaiaElo,
+        ratings: ratingMetadata, ratingSystem: analysisContext.ratingSystem, ratingPool: analysisContext.ratingPool,
+        ratingSource: analysisContextSource,
+        explorerToken: lichessApiToken,
+        query: runStockfishSingleQuery, cancelled: () => analysisGameCancelRef.current,
+        signal: reviewAbort.signal,
+        publish: (results) => setGameAnalysisReport(prev => prev?.gameKey === gameKey ? { ...prev, results: [...results] } : prev),
+        progress: (value, nodeId) => {
+          if (analysisGameCancelRef.current) return;
+          analysisCurrentBoardNodeRef.current = nodeId;
+          setSelectedNodeBySide(prev => ({ ...prev, [analysisSide]: nodeId }));
+          setAnalysisGameProgress(value);
+        },
+      });
+      const wasCancelled = analysisGameCancelRef.current;
+      setGameAnalysisReport((prev) => prev?.gameKey === gameKey
+        ? { ...prev, status: wasCancelled ? 'cancelled' : 'complete' }
+        : prev);
+      if (!wasCancelled) setShowAnalysisReport(true);
+    } catch {
+      setGameAnalysisReport((prev) => prev?.gameKey === gameKey ? { ...prev, status: 'error' } : prev);
+      setShowAnalysisReport(true);
+    } finally {
+      reviewAbort.abort();
+      if (analysisReviewAbortRef.current === reviewAbort) analysisReviewAbortRef.current = null;
+      setSelectedNodeBySide((prev) => prev[analysisSide] === analysisCurrentBoardNodeRef.current
+        ? { ...prev, [analysisSide]: originalNodeId }
+        : prev);
+      analysisCurrentBoardNodeRef.current = null;
+      setAnalysisGameProgress(null);
     }
   };
 
@@ -3912,7 +4408,11 @@ function App() {
     const currentTree = trees[activeSide];
     const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
     const currentNode = currentTree.nodes[currentSelectedId] ?? currentTree.nodes[currentTree.rootId];
-    const moveSourceFen =
+    const moveSourceFen = analysisScratchPosition && !isAnalysisMode && !isTrainingActive
+      ? analysisScratchPosition.fen
+      : isAnalysisMode && analysisScratchPosition
+        ? analysisScratchPosition.fen
+      :
       trainingSession &&
       trainingSession.side === activeSide &&
       trainingSession.suddenDeathMode &&
@@ -3923,6 +4423,67 @@ function App() {
     const move = chess.move({ from: orig, to: dest, promotion });
 
     if (!move) return;
+
+    // Review and engine-line previews are deliberately ephemeral. Keep moves
+    // played on this board out of the persisted repertoire tree.
+    if (!isTrainingActive && (analysisScratchPosition || (!isAnalysisMode && isBrowseMode))) {
+      setAnalysisScratchPosition({
+        fen: chess.fen(),
+        lastMove: [move.from as Key, move.to as Key],
+      });
+      setEngineRunning(false);
+      return;
+    }
+
+    if (isAnalysisMode) {
+      const uci = uciFromMove(move);
+      const matchingChildId = currentNode.children.find((id) => currentTree.nodes[id]?.moveUci === uci);
+      const existingChildId = currentNode.children[0] === matchingChildId ? matchingChildId : undefined;
+      let nextTree = currentTree;
+      let nextNodeId = existingChildId;
+      if (!existingChildId) {
+        // Replacing a continuation discards everything after this position.
+        for (const childId of [...currentNode.children]) nextTree = removeBranch(nextTree, childId);
+        const nodeId = createNodeId(nextTree);
+        const nextParent = nextTree.nodes[currentNode.id];
+        const newNode: MoveNode = {
+          id: nodeId,
+          parentId: currentNode.id,
+          fen: chess.fen(),
+          moveSan: move.san,
+          moveUci: uci,
+          children: [],
+        };
+        nextTree = {
+          ...nextTree,
+          nextId: nextTree.nextId + 1,
+          nodes: {
+            ...nextTree.nodes,
+            [nodeId]: newNode,
+            [currentNode.id]: { ...nextParent, children: [nodeId] },
+          },
+        };
+        nextNodeId = nodeId;
+      }
+      if (!nextNodeId || nextNodeId === currentSelectedId) return;
+      if (analysisGameProgress) {
+        analysisGameCancelRef.current = true;
+      cancelMaiaEvaluations();
+        stockfishRef.current?.postMessage('stop');
+      }
+      setUndoStackBySide((prev) => ({
+        ...prev,
+        [activeSide]: [...prev[activeSide], { tree: currentTree, selectedNodeId: currentSelectedId }].slice(-200),
+      }));
+      setTrees((prev) => ({ ...prev, [activeSide]: nextTree }));
+      setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: nextNodeId as string }));
+      setAnalysisScratchPosition(null);
+      setGameAnalysisReport(null);
+      void idbSet(APP_GAME_ANALYSIS_REPORT_KEY, null).catch(() => setStatus('Game analysis save failed'));
+      setShowAnalysisReport(false);
+      setEngineRunning(false);
+      return;
+    }
 
     const uci = uciFromMove(move);
     const existingChildId = currentNode.children.find((id) => currentTree.nodes[id].moveUci === uci);
@@ -4234,9 +4795,10 @@ function App() {
     makeMove(keyPair[0], keyPair[1], promotion);
   };
 
-  const playStockfishMove = (uci: string) => {
-    if (isTrainingActive) return;
-    playLichessMove(uci);
+  const previewEnginePvMove = (rootFen: string, pv: string, moveIndex: number) => {
+    const move = buildEnginePvMoves(rootFen, pv)[moveIndex];
+    if (!move) return;
+    setAnalysisScratchPosition({ fen: move.fen, lastMove: move.lastMove });
   };
 
   const setEngineRunningEnabled = (enabled: boolean) => {
@@ -4394,6 +4956,7 @@ function App() {
       themeMode,
       selectedEngine,
       maiaStrengthElo,
+      analysisBenchmarkElo,
       suddenDeathEngine,
       suddenDeathMaiaElo,
       repertoireSide,
@@ -4688,6 +5251,50 @@ function App() {
     }));
   };
 
+  const loadAnalysisGamePgn = async (file: File) => {
+    const pgn = await file.text();
+    const games = splitPgnGames(pgn);
+    const firstGame = games[0];
+    if (!firstGame) throw new Error('The selected file does not contain a PGN game.');
+
+    const nextTree = parsePgnToTree(activeSide, firstGame, createEmptyTree(activeSide));
+    if (Object.keys(nextTree.nodes).length <= 1) throw new Error('No valid moves were found in the PGN game.');
+    const pgnHeaders = parsePgnHeaders(firstGame);
+    const rawRating = (value?: string) => {
+      const number = Number(value);
+      return Number.isFinite(number) && number > 0 ? number : undefined;
+    };
+    const time = pgnHeaders.TimeControl?.match(/^(\d+)(?:\+(\d+))?$/);
+    const seconds = time ? +time[1] + 40 * +(time[2] ?? 0) : null;
+    const context: AnalysisContext = {
+      whiteRating: rawRating(pgnHeaders.WhiteElo), blackRating: rawRating(pgnHeaders.BlackElo),
+      ratingSystem: /lichess/i.test(pgnHeaders.Site ?? '') ? 'lichess' : /chess\.com/i.test(pgnHeaders.Site ?? '') ? 'chesscom' : undefined,
+      timeControl: pgnHeaders.TimeControl,
+      ratingPool: seconds === null ? 'unknown' : seconds < 180 ? 'bullet' : seconds < 480 ? 'blitz' : seconds < 1500 ? 'rapid' : 'classical',
+    };
+    setAnalysisContext(context); setAnalysisContextSource('pgn');
+    localStorage.setItem('analysis-context', JSON.stringify(context));
+
+    const currentTree = trees[activeSide];
+    const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
+    setUndoStackBySide((prev) => ({
+      ...prev,
+      [activeSide]: [...prev[activeSide], { tree: currentTree, selectedNodeId: currentSelectedId }].slice(-200),
+    }));
+    setActiveRepertoireIdBySide((prev) => ({ ...prev, [activeSide]: null }));
+    setTrees((prev) => ({ ...prev, [activeSide]: nextTree }));
+    setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: nextTree.rootId }));
+    setAnalysisScratchPosition(null);
+    setGameAnalysisReport(null);
+    void idbSet(APP_GAME_ANALYSIS_REPORT_KEY, null).catch(() => setStatus('Game analysis save failed'));
+    setShowAnalysisReport(false);
+    setEngineRunning(false);
+    setPortraitTab('moves');
+    setStatus(games.length > 1
+      ? `Loaded first game from ${file.name} (${games.length} games in file)`
+      : `Loaded game from ${file.name}`);
+  };
+
   const openImportDialog = async (mode: 'current' | 'db' = 'current') => {
     if (isBackupIoRunning) return;
     setImportMode(mode);
@@ -4747,6 +5354,27 @@ function App() {
     setIsNewRepertoireOpen(false);
     setIsOptionsOpen(false);
     setStatus(`Created repertoire "${next.name}" (${side})`);
+  };
+
+  const toggleAnalysisMode = () => {
+    if (isAnalysisMode) {
+      if (analysisGameProgress) {
+        analysisGameCancelRef.current = true;
+      cancelMaiaEvaluations();
+        stockfishRef.current?.postMessage('stop');
+      }
+      setIsAnalysisMode(false);
+      setAnalysisScratchPosition(null);
+      setShowAnalysisReport(false);
+      return;
+    }
+    if (isTrainingActive || isSuddenDeathActive || isExampleReplayActive) return;
+    setIsAnalysisMode(true);
+    setAnalysisScratchPosition(null);
+    setShowAnalysisReport(false);
+    setEngineRunning(false);
+    setPortraitTab('moves');
+    setIsOptionsOpen(false);
   };
 
   const loadRepertoire = (repertoireId: string, side: Side = activeSide, preservePosition = false) => {
@@ -4923,9 +5551,15 @@ function App() {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      await importPgnFile(file, importMode);
-    } catch {
-      // Keep import flow silent on UI status.
+      if (isAnalysisMode) {
+        await loadAnalysisGamePgn(file);
+      } else {
+        await importPgnFile(file, importMode);
+      }
+    } catch (error) {
+      const errorMessage = getErrorMessage(error, 'Unknown error');
+      setStatus(`PGN load failed: ${errorMessage}`);
+      window.alert(`PGN load failed.\n\n${errorMessage}`);
     } finally {
       event.target.value = '';
       setImportMode('current');
@@ -4965,12 +5599,14 @@ function App() {
     ? (exampleReplay as ExampleReplayState).fens[(exampleReplay as ExampleReplayState).currentIndex]
     : hasSuddenDeathBoardOverride
       ? (suddenDeathCurrentFen as string)
-      : selectedNode.fen;
+      : selectedBoardFen;
   const boardLastMove = hasExampleReplayBoardOverride
     ? (exampleReplay as ExampleReplayState).lastMoves[(exampleReplay as ExampleReplayState).currentIndex] ?? undefined
     : hasSuddenDeathBoardOverride
       ? suddenDeathLastMove ?? undefined
-      : lastMove;
+      : analysisScratchFen
+        ? analysisScratchPosition?.lastMove ?? undefined
+        : lastMove;
   useEffect(() => {
     if (isTrainingActive) return;
     setIsTrainingStatsMenuOpen(false);
@@ -5185,16 +5821,71 @@ function App() {
     (findMissingSearchBaseNodeId ? tree.nodes[findMissingSearchBaseNodeId] : null) ?? selectedNode;
   const canRunFindMissingSearch =
     activeFindMissingBaseNode.children.length > 0 && !isFindMissingSearchRunning && !isSuddenDeathActive;
+  const displayedMovePath = isAnalysisMode ? mainLinePath : path;
+  const displayedBookMoves = useMemo(
+    () => findBookMovesForGame(displayedMovePath, bookRepertoireIndex),
+    [displayedMovePath, bookRepertoireIndex],
+  );
   const inlineMoves = useMemo(
     () =>
-      path.slice(1).map((node, index) => ({
+      displayedMovePath.slice(1).map((node, index) => {
+        const result = gameAnalysisReportMatchesLine ? gameAnalysisReport?.results.find((entry) => entry.nodeId === node.id) : undefined;
+        const bookMove = displayedBookMoves.get(node.id);
+        const annotation = result?.status === 'book' || bookMove
+          ? ''
+          : result?.status === 'uncertain'
+          ? ''
+          : result?.status !== 'complete'
+            ? ''
+            : result.greatFind ? '!' : result.category === 'inaccuracy'
+              ? '?!'
+                : result.category === 'mistake'
+                  ? '?'
+                  : result.category === 'blunder'
+                    ? '??'
+                    : '';
+        const categoryClass = result?.status === 'book' || bookMove
+          ? 'book'
+          : result?.status === 'complete'
+            ? (result.greatFind ? 'excellent' : result.category === 'excellent' ? 'good' : result.category)
+            : result?.status === 'uncertain'
+              ? 'provisional'
+              : '';
+        const annotationTitle = result?.status === 'book' || bookMove
+          ? `Book move from ${result?.bookRepertoireName ?? bookMove?.repertoireName}`
+          : result
+            ? `${result.status === 'uncertain' ? 'Classification uncertain' : result.category}${result.lossPoints === null ? '' : ` — ${result.lossPoints.toFixed(1)} evaluation-impact points lost`}`
+            : undefined;
+        return {
         id: node.id,
         san: toFigurineSan(node.moveSan ?? ''),
         prefix: index % 2 === 0 ? `${Math.floor(index / 2) + 1}.` : '',
         hasAlternatives: (node.children?.length ?? 0) > 1,
-      })),
-    [path],
+        annotation,
+        annotationTitle,
+        categoryClass,
+        maiaBaselineTag: result?.maiaBaselineTag ?? null,
+        selected: selectedNode.id === node.id,
+      };
+      }),
+    [displayedMovePath, displayedBookMoves, gameAnalysisReportMatchesLine, gameAnalysisReport, selectedNode.id],
   );
+  const selectedReportResult = isAnalysisMode && gameAnalysisReportMatchesLine
+    ? gameAnalysisReport?.results.find((result) => result.nodeId === selectedNode.id) ?? null
+    : null;
+  const selectedBookMoveName = selectedReportResult?.status === 'book'
+    ? selectedReportResult.bookRepertoireName
+    : displayedBookMoves.get(selectedNode.id)?.repertoireName;
+  const selectedAnalysisResult = selectedBookMoveName ? null : selectedReportResult;
+  const selectedReportParent = selectedReportResult?.nodeId
+    ? tree.nodes[selectedReportResult.nodeId]?.parentId
+      ? tree.nodes[tree.nodes[selectedReportResult.nodeId].parentId as string]
+      : null
+    : null;
+  const selectedAnalysisParent = selectedAnalysisResult ? selectedReportParent : null;
+  const selectedAnalysisBestMove = selectedAnalysisResult?.bestMoveUci && selectedAnalysisParent
+    ? uciToFigurineSan(selectedAnalysisParent.fen, selectedAnalysisResult.bestMoveUci)
+    : null;
 
   const optionRows = useMemo(() => {
     if (isBrowseMode) {
@@ -5407,6 +6098,7 @@ function App() {
   };
 
   const deleteTreeOptionBranch = () => {
+    if (isAnalysisMode) return;
     const popup = treeOptionDeletePopup;
     if (!popup) return;
     const nodeId = popup.nodeId;
@@ -6310,6 +7002,7 @@ function App() {
   );
 
   const deleteLastMove = () => {
+    if (isAnalysisMode) return;
     if (isTrainingActive || isSuddenDeathActive) return;
     const branchRootId = selectedNode.id;
     const parentId = selectedNode.parentId;
@@ -6354,7 +7047,7 @@ function App() {
   };
 
   return (
-    <div className={`app ${themeMode === 'dark' ? 'theme-dark' : ''}`}>
+    <div className={`app ${themeMode === 'dark' ? 'theme-dark' : ''} ${isAnalysisMode ? 'analysis-mode' : ''}`}>
       <header className="topbar">
         <div className="topbar-row" />
       </header>
@@ -6497,14 +7190,14 @@ function App() {
                             className={`ai-engine-tab ${selectedEngine === 'stockfish' ? 'active' : ''}`}
                             onClick={() => setSelectedEngine('stockfish')}
                           >
-                            SF18
+                            {STOCKFISH_ENGINE_LABEL}
                           </button>
                           <button
                             type="button"
                             className={`ai-engine-tab ${selectedEngine === 'maia' ? 'active' : ''}`}
                             onClick={() => setSelectedEngine('maia')}
                           >
-                            Maia
+                            {MAIA_ENGINE_LABEL}
                           </button>
                         </span>
                         <button
@@ -6532,7 +7225,7 @@ function App() {
                                   );
                                 }
                               }}
-                              aria-label="Maia strength"
+                              aria-label={`${MAIA_ENGINE_LABEL} strength`}
                             >
                               {MAIA_STRENGTH_ELO_VALUES.map((elo) => (
                                 <option key={elo} value={elo}>
@@ -6576,22 +7269,22 @@ function App() {
                       {selectedEngine === 'stockfish' && (
                         <div className="table ai-eval-table">
                           {engineLines.map((line) => (
-                            <div
-                              className="table-row stockfish-clickable-row"
-                              key={line.multipv}
-                              role="button"
-                              tabIndex={0}
-                              onClick={() => playStockfishMove(line.bestMove)}
-                              onKeyDown={(event) => {
-                                if (event.key === 'Enter' || event.key === ' ') {
-                                  event.preventDefault();
-                                  playStockfishMove(line.bestMove);
-                                }
-                              }}
-                            >
-                              <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
-                              <span>{line.scoreText}</span>
-                              <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
+                            <div className="table-row engine-pv-row" key={line.multipv}>
+                              <span className="engine-pv-score">{line.scoreText}</span>
+                              <div className="engine-pv-moves">
+                                {buildEnginePvMoves(selectedNode.fen, line.pv).map((move, index) => (
+                                  <button
+                                    type="button"
+                                    className="engine-pv-move"
+                                    key={`${line.multipv}-${index}-${move.san}`}
+                                    title={`Show position after ${move.san}`}
+                                    onClick={() => previewEnginePvMove(selectedBoardFen, line.pv, index)}
+                                  >
+                                    {move.san}
+                                  </button>
+                                ))}
+                                {line.pv.trim() === '' && <span>-</span>}
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -6599,22 +7292,22 @@ function App() {
                       {selectedEngine === 'maia' && (
                         <div className="table ai-eval-table">
                           {engineLines.map((line) => (
-                            <div
-                              className="table-row stockfish-clickable-row"
-                              key={line.multipv}
-                              role="button"
-                              tabIndex={0}
-                              onClick={() => playStockfishMove(line.bestMove)}
-                              onKeyDown={(event) => {
-                                if (event.key === 'Enter' || event.key === ' ') {
-                                  event.preventDefault();
-                                  playStockfishMove(line.bestMove);
-                                }
-                              }}
-                            >
-                              <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
-                              <span>{line.scoreText}</span>
-                              <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
+                            <div className="table-row engine-pv-row" key={line.multipv}>
+                              <span className="engine-pv-score">{line.scoreText}</span>
+                              <div className="engine-pv-moves">
+                                {buildEnginePvMoves(selectedNode.fen, line.pv).map((move, index) => (
+                                  <button
+                                    type="button"
+                                    className="engine-pv-move"
+                                    key={`${line.multipv}-${index}-${move.san}`}
+                                    title={`Show position after ${move.san}`}
+                                    onClick={() => previewEnginePvMove(selectedBoardFen, line.pv, index)}
+                                  >
+                                    {move.san}
+                                  </button>
+                                ))}
+                                {line.pv.trim() === '' && <span>-</span>}
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -6629,8 +7322,8 @@ function App() {
             <div className="board-center">
               <div className="board-meta">
                 <div className="board-head-row">
-                  <div className="opening-title" title={openingFullTitle}>
-                    {openingTitleContent}
+                  <div className="opening-title" title={isAnalysisMode ? '' : openingFullTitle}>
+                    {!isAnalysisMode && openingTitleContent}
                   </div>
                   <button className="hamburger-btn board-options-btn" aria-label="Options menu" onClick={() => setIsOptionsOpen(true)}>
                     &#9776;
@@ -6750,7 +7443,28 @@ function App() {
                     </button>
                   </>
                 )}
-                {(!isExampleReplayActive || isTrainingActive) && (
+                {isAnalysisMode && !isExampleReplayActive && !isTrainingActive && (
+                  <AnalysisButton
+                    className={`analysis-game-btn mode-icon-btn ${analysisGameProgress ? 'active' : ''}`}
+                    onQuick={() => { void analyzeCurrentGame(); }} onDeep={() => { void analyzeCurrentGame(true); }}
+                    benchmark={analysisBenchmarkElo} onBenchmarkChange={setAnalysisBenchmarkElo}
+                    context={analysisContext} onContextChange={updateAnalysisContext}
+                    running={Boolean(analysisGameProgress)} disabled={!analysisGameProgress && mainLinePath.length < 2}>
+                    {analysisGameProgress ? <StopIcon /> : <AnalysisIcon />}
+                  </AnalysisButton>
+                )}
+                {isAnalysisMode && !analysisGameProgress && gameAnalysisReport && gameAnalysisReportMatchesLine && (
+                  <button
+                    type="button"
+                    className="analysis-report-btn mode-icon-btn"
+                    onClick={() => setShowAnalysisReport(true)}
+                    aria-label="Open game analysis report"
+                    title="Open game analysis report"
+                  >
+                    <ReportIcon />
+                  </button>
+                )}
+                {(!isExampleReplayActive || isTrainingActive) && !isAnalysisMode && (
                   <button
                     type="button"
                     className={`${isTrainingActive ? 'active training-stop-btn' : ''} long-pressable-btn`}
@@ -6766,7 +7480,7 @@ function App() {
                     {isTrainingActive ? 'Stop training' : <TrainIcon />}
                   </button>
                 )}
-                {!isTrainingActive && !isExampleReplayActive && (
+                {!isTrainingActive && !isExampleReplayActive && !isAnalysisMode && (
                   <button
                     type="button"
                     className={
@@ -6843,14 +7557,14 @@ function App() {
                       className={`ai-engine-tab ${selectedEngine === 'stockfish' ? 'active' : ''}`}
                       onClick={() => setSelectedEngine('stockfish')}
                     >
-                      SF18
+                      {STOCKFISH_ENGINE_LABEL}
                     </button>
                     <button
                       type="button"
                       className={`ai-engine-tab ${selectedEngine === 'maia' ? 'active' : ''}`}
                       onClick={() => setSelectedEngine('maia')}
                     >
-                      Maia
+                      {MAIA_ENGINE_LABEL}
                     </button>
                   </span>
                   <button
@@ -6879,7 +7593,7 @@ function App() {
                               );
                             }
                           }}
-                          aria-label="Maia strength"
+                          aria-label={`${MAIA_ENGINE_LABEL} strength`}
                         >
                           {MAIA_STRENGTH_ELO_VALUES.map((elo) => (
                             <option key={elo} value={elo}>
@@ -6917,22 +7631,22 @@ function App() {
                 {selectedEngine === 'stockfish' && (
                   <div className="table ai-eval-table">
                     {engineLines.map((line) => (
-                      <div
-                        className="table-row stockfish-clickable-row"
-                        key={line.multipv}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => playStockfishMove(line.bestMove)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            event.preventDefault();
-                            playStockfishMove(line.bestMove);
-                          }
-                        }}
-                      >
-                        <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
-                        <span>{line.scoreText}</span>
-                        <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
+                      <div className="table-row engine-pv-row" key={line.multipv}>
+                        <span className="engine-pv-score">{line.scoreText}</span>
+                        <div className="engine-pv-moves">
+                          {buildEnginePvMoves(selectedNode.fen, line.pv).map((move, index) => (
+                            <button
+                              type="button"
+                              className="engine-pv-move"
+                              key={`${line.multipv}-${index}-${move.san}`}
+                              title={`Show position after ${move.san}`}
+                              onClick={() => previewEnginePvMove(selectedBoardFen, line.pv, index)}
+                            >
+                              {move.san}
+                            </button>
+                          ))}
+                          {line.pv.trim() === '' && <span>-</span>}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -6940,22 +7654,22 @@ function App() {
                 {selectedEngine === 'maia' && (
                   <div className="table ai-eval-table">
                     {engineLines.map((line) => (
-                      <div
-                        className="table-row stockfish-clickable-row"
-                        key={line.multipv}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => playStockfishMove(line.bestMove)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            event.preventDefault();
-                            playStockfishMove(line.bestMove);
-                          }
-                        }}
-                      >
-                        <span>{uciToFigurineSan(selectedNode.fen, line.bestMove) || '-'}</span>
-                        <span>{line.scoreText}</span>
-                        <span>{pvToFigurineSan(selectedNode.fen, line.pv) || '-'}</span>
+                      <div className="table-row engine-pv-row" key={line.multipv}>
+                        <span className="engine-pv-score">{line.scoreText}</span>
+                        <div className="engine-pv-moves">
+                          {buildEnginePvMoves(selectedNode.fen, line.pv).map((move, index) => (
+                            <button
+                              type="button"
+                              className="engine-pv-move"
+                              key={`${line.multipv}-${index}-${move.san}`}
+                              title={`Show position after ${move.san}`}
+                              onClick={() => previewEnginePvMove(selectedBoardFen, line.pv, index)}
+                            >
+                              {move.san}
+                            </button>
+                          ))}
+                          {line.pv.trim() === '' && <span>-</span>}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -7063,7 +7777,7 @@ function App() {
                   {trainingSession?.suddenDeathMode && suddenDeathThinking && (
                     <div className="controls-row training-thinking-row">
                       <span className="spinner" aria-hidden="true" />
-                      <span className="status">Stockfish thinking...</span>
+                      <span className="status">{`${STOCKFISH_ENGINE_NAME} thinking...`}</span>
                     </div>
                   )}
                   <div className="controls-row training-position-stats">
@@ -7223,7 +7937,7 @@ function App() {
                         <button
                           className="danger"
                           onClick={deleteLastMove}
-                          disabled={!canGoBack || isBrowseMode}
+                          disabled={!canGoBack || isBrowseMode || isAnalysisMode}
                           aria-label="Delete last move"
                           title="Delete last move"
                         >
@@ -7232,40 +7946,54 @@ function App() {
                         <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
                           Undo
                         </button>
-                        <button
-                          className="desktop-only"
-                          type="button"
-                          onClick={handleTrainButtonClick}
-                          title="Train"
-                          disabled={!canStartTrainingForActiveSide}
-                        >
-                          Train
-                        </button>
-                        <button
-                          type="button"
-                          className="sudden-death-toggle-btn mode-icon-btn desktop-only"
-                          onClick={handleSuddenDeathButtonClick}
-                          aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
-                          title={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
-                          disabled={suddenDeathThinking}
-                        >
-                          <SuddenDeathIcon />
-                        </button>
+                        {isAnalysisMode ? (
+                          <AnalysisButton className="desktop-only"
+                            onQuick={() => { void analyzeCurrentGame(); }} onDeep={() => { void analyzeCurrentGame(true); }}
+                            benchmark={analysisBenchmarkElo} onBenchmarkChange={setAnalysisBenchmarkElo}
+                            context={analysisContext} onContextChange={updateAnalysisContext}
+                            running={Boolean(analysisGameProgress)} disabled={!analysisGameProgress && mainLinePath.length < 2}>
+                            {analysisGameProgress ? `Stop ${analysisGameProgress.done}/${analysisGameProgress.total}` : 'Analyze game'}
+                          </AnalysisButton>
+                        ) : (
+                          <>
+                            <button
+                              className="desktop-only"
+                              type="button"
+                              onClick={handleTrainButtonClick}
+                              title="Train"
+                              disabled={!canStartTrainingForActiveSide}
+                            >
+                              Train
+                            </button>
+                            <button
+                              type="button"
+                              className="sudden-death-toggle-btn mode-icon-btn desktop-only"
+                              onClick={handleSuddenDeathButtonClick}
+                              aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
+                              title={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
+                              disabled={suddenDeathThinking}
+                            >
+                              <SuddenDeathIcon />
+                            </button>
+                          </>
+                        )}
                         <span className="controls-row-break" aria-hidden="true" />
-                        <button
-                          type="button"
-                          className="next-missing-btn"
-                          onClick={jumpToNextMissingLichessMove}
-                          disabled={!canRunFindMissingSearch}
-                          aria-label="Find missing popular opponent move"
-                          title={`Find missing popular opponent move (${lichessArrowThreshold}%+)`}
-                        >
-                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                            <circle cx="12" cy="12" r="4.2" />
-                            <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
-                            <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2" />
-                          </svg>
-                        </button>
+                        {!isAnalysisMode && (
+                          <button
+                            type="button"
+                            className="next-missing-btn"
+                            onClick={jumpToNextMissingLichessMove}
+                            disabled={!canRunFindMissingSearch}
+                            aria-label="Find missing popular opponent move"
+                            title={`Find missing popular opponent move (${lichessArrowThreshold}%+)`}
+                          >
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                              <circle cx="12" cy="12" r="4.2" />
+                              <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
+                              <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2" />
+                            </svg>
+                          </button>
+                        )}
                         <div className="arrow-toggle-group">
                           <button
                             type="button"
@@ -7278,8 +8006,8 @@ function App() {
                             type="button"
                             className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-stockfish ${showStockfishArrows ? 'active' : ''}`}
                             onClick={() => setShowStockfishArrows((prev) => !prev)}
-                            aria-label="Toggle Stockfish arrows"
-                            title="Toggle Stockfish arrows"
+                            aria-label={`Toggle ${STOCKFISH_ENGINE_NAME} arrows`}
+                            title={`Toggle ${STOCKFISH_ENGINE_NAME} arrows`}
                           />
                           <button
                             type="button"
@@ -7303,13 +8031,24 @@ function App() {
                       ).toFixed(2)})`}</span>
                     </div>
                   )}
+                  {isAnalysisMode && analysisGameProgress && (
+                    <div className="game-analysis-progress-inline" aria-live="polite">
+                      <div className="game-analysis-progress-label">
+                        <span>{analysisGameProgress.moveText} · {analysisGameProgress.phase === 'refine' ? 'Checking critical position' : analysisGameProgress.phase === 'alternatives' ? 'Checking human alternatives' : analysisGameProgress.phase === 'profile' ? 'Comparing Maia rating profiles' : analysisGameProgress.phase === 'maia' ? `${MAIA_ENGINE_LABEL} · ${gameAnalysisReport?.maiaElo ?? maiaStrengthElo} Elo` : analysisGameProgress.phase === 'book' ? 'book move' : analysisGameProgress.phase === 'best' ? 'best move' : 'played move'}</span>
+                        <span>{analysisGameProgress.done}/{analysisGameProgress.total}</span>
+                        {analysisGameProgress.liveScoreText && <b>{analysisGameProgress.liveScoreText}</b>}
+                      </div>
+                      <progress value={analysisGameProgress.done} max={Math.max(1, analysisGameProgress.total)} aria-label="Game analysis progress" />
+                    </div>
+                  )}
                   <div className="move-notation-line">
                     <div className="move-inline-wrap">
                       {inlineMoves.map((move) => (
                         <button
                           key={move.id}
                           type="button"
-                          className={`move-inline-item ${move.hasAlternatives ? 'has-alternatives' : ''}`}
+                          className={`move-inline-item ${move.hasAlternatives ? 'has-alternatives' : ''} ${move.categoryClass ? `analysis-${move.categoryClass}` : ''} ${move.selected ? 'analysis-selected' : ''}`}
+                          title={move.annotationTitle}
                           onClick={(event) => handleInlineMoveClick(move.id, event)}
                           onPointerDown={(event) => handleInlineMovePointerDown(move.id, event)}
                           onPointerUp={handleInlineMovePointerEnd}
@@ -7318,10 +8057,73 @@ function App() {
                         >
                           {move.prefix ? <span className="move-inline-prefix">{move.prefix}</span> : null}
                           <span>{move.san}</span>
+                          {move.annotation && <span className="move-inline-annotation">{move.annotation}</span>}
+                          {move.maiaBaselineTag && (
+                            <span
+                              className={`move-inline-maia-tag ${move.maiaBaselineTag}`}
+                              title={move.maiaBaselineTag === 'above' ? 'Unusual strong move for the Maia baseline' : 'Unusual weak move for the Maia baseline'}
+                            >
+                              {move.maiaBaselineTag === 'above' ? 'M+' : 'M−'}
+                            </span>
+                          )}
                         </button>
                       ))}
                     </div>
                   </div>
+                  {selectedAnalysisResult && (
+                    <div className={`game-analysis-comment ${selectedAnalysisResult.greatFind ? 'excellent' : selectedAnalysisResult.category === 'excellent' ? 'good' : selectedAnalysisResult.category}`} aria-live="polite">
+                      {selectedAnalysisResult.status === 'book' ? (
+                        <strong>Book move · {selectedAnalysisResult.bookRepertoireName}</strong>
+                      ) : (
+                        <>
+                          <strong>
+                            {selectedAnalysisResult.moveNumber}{selectedAnalysisResult.mover === 'black' ? '…' : '.'} {toFigurineSan(selectedAnalysisResult.moveSan)}
+                            {' '}{selectedAnalysisResult.status === 'uncertain' ? ' (provisional)' : selectedAnalysisResult.greatFind ? '!' : selectedAnalysisResult.category === 'inaccuracy' ? '?!' : selectedAnalysisResult.category === 'mistake' ? '?' : selectedAnalysisResult.category === 'blunder' ? '??' : ''}
+                          </strong>
+                          {selectedAnalysisResult.status === 'uncertain'
+                        ? <span>Classification uncertain: engine evaluations changed or need further confirmation.</span>
+                        : selectedAnalysisResult.status === 'unavailable'
+                          ? <span>Stockfish could not provide a reliable evaluation for this move.</span>
+                          : <span>{selectedAnalysisResult.lossPoints === null ? 'No comparable score was available.' : `${selectedAnalysisResult.lossPoints.toFixed(1)} evaluation-impact points lost.`}
+                            {selectedAnalysisBestMove ? ` Engine preferred ${selectedAnalysisBestMove}.` : ''}
+                          </span>}
+                          {selectedAnalysisResult.bestPv && selectedAnalysisParent && (
+                            <span className="analysis-comment-line">
+                              <span>Computer line:</span>
+                              {buildEnginePvMoves(selectedAnalysisParent.fen, selectedAnalysisResult.bestPv).map((move, index) => (
+                                <button
+                                  type="button"
+                                  className="analysis-pv-move"
+                                  key={`analysis-comment-pv-${index}-${move.san}`}
+                                  title={`Show position after ${move.san}`}
+                                  onClick={() => previewEnginePvMove(selectedAnalysisParent.fen, selectedAnalysisResult.bestPv, index)}
+                                >
+                                  {move.san}
+                                </button>
+                              ))}
+                            </span>
+                          )}
+                          <MaiaMoveSummary result={selectedAnalysisResult} positionFen={selectedReportParent?.fen} />
+                          {selectedAnalysisResult.attackEvidence && <span>{selectedAnalysisResult.attackEvidence}</span>}
+                          {selectedAnalysisResult.playedPv && (
+                            <span className="analysis-comment-line">
+                              <span>After the played move:</span>
+                              {buildEnginePvMoves(selectedNode.fen, selectedAnalysisResult.playedPv).map((move, index) => (
+                                <button type="button" className="analysis-pv-move" key={`played-pv-${index}`}
+                                  onClick={() => previewEnginePvMove(selectedNode.fen, selectedAnalysisResult.playedPv, index)}>{move.san}</button>
+                              ))}
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {!selectedAnalysisResult && selectedBookMoveName && (
+                    <div className="game-analysis-comment book" aria-live="polite">
+                      <strong>Book move · {selectedBookMoveName}</strong>
+                      {selectedReportResult && <MaiaMoveSummary result={selectedReportResult} positionFen={selectedReportParent?.fen} />}
+                    </div>
+                  )}
                   {optionRows.length > 0 && (
                     <div className="tree-options-wrap">
                       {optionRows.map(({ node, leaves }) => (
@@ -7347,7 +8149,7 @@ function App() {
                             {toFigurineSan(node.moveSan ?? '')}
                           </button>
                           <span className="tree-option-leaves">
-                            {node.stockfishEval ? `SF ${node.stockfishEval} | ${leaves}` : leaves}
+                            {node.stockfishEval ? `${STOCKFISH_ENGINE_LABEL} ${node.stockfishEval} | ${leaves}` : leaves}
                           </span>
                         </div>
                       ))}
@@ -7417,6 +8219,35 @@ function App() {
         </section>
       </main>
 
+      {showAnalysisReport && gameAnalysisReport && gameAnalysisReportMatchesLine && (
+        <div className="modal-backdrop game-analysis-backdrop" onClick={() => setShowAnalysisReport(false)}>
+          <div className="modal-card game-analysis-modal" role="dialog" aria-modal="true" aria-labelledby="game-analysis-title" onClick={(event) => event.stopPropagation()}>
+            <div className="game-analysis-modal-heading">
+              <h3 id="game-analysis-title">Game analysis</h3>
+              <button type="button" onClick={() => setShowAnalysisReport(false)} aria-label="Close game analysis report">×</button>
+            </div>
+            <p>
+              {gameAnalysisReport.status === 'complete' ? 'Analysis complete' : `Analysis ${gameAnalysisReport.status}`}
+              {' · '}{gameAnalysisReport.results.length} moves · {gameAnalysisReport.engine}
+              {gameAnalysisReport.maiaEngine && gameAnalysisReport.maiaElo !== undefined
+                ? ` · ${gameAnalysisReport.maiaEngine} (fallback baseline ${gameAnalysisReport.maiaElo})`
+                : ''}
+            </p>
+            {gameAnalysisReport.status !== 'complete' && <p>Analysis {gameAnalysisReport.status}. Only available results are included.</p>}
+            {gameAnalysisReport.reviewMode !== 'deep' && <p>Quick review: Stockfish plus Maia on up to six selected decisions. Repertoire moves are skipped. Hold the analysis button for detailed review and benchmark settings.</p>}
+            <GameReport mode={gameAnalysisReport.reviewMode} results={gameAnalysisReport.results} positions={Object.fromEntries(Object.values(tree.nodes).map(node => [node.id, node.fen]))}
+              onSelect={(nodeId) => {
+                setSelectedNodeBySide(prev => ({ ...prev, [gameAnalysisReport.side]: nodeId }));
+                setShowAnalysisReport(false);
+              }} />
+            <div className="game-analysis-modal-actions">
+              {!analysisGameProgress && <button type="button" onClick={() => { void analyzeCurrentGame(true); }}>Deep review with Maia (slower)</button>}
+              <button type="button" onClick={() => setShowAnalysisReport(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {treeOptionDeletePopup && (
         <>
           <div
@@ -7432,7 +8263,7 @@ function App() {
             style={{ left: `${treeOptionDeletePopup.x}px`, top: `${treeOptionDeletePopup.y}px` }}
             onClick={(event) => event.stopPropagation()}
           >
-            <button type="button" className="danger" onClick={deleteTreeOptionBranch}>
+            <button type="button" className="danger" onClick={deleteTreeOptionBranch} disabled={isAnalysisMode}>
               Delete branch
             </button>
           </div>
@@ -7444,7 +8275,7 @@ function App() {
           <div className="modal-card stockfish-quick-modal" onClick={(e) => e.stopPropagation()}>
             <div className="slider-stack single-column">
               <label>
-                {`Stockfish depth: ${engineDepth}`}
+                {`${STOCKFISH_ENGINE_NAME} depth: ${engineDepth}`}
                 <span className="slider-field">
                   <input
                     className="threshold-slider"
@@ -7504,14 +8335,14 @@ function App() {
                       className={suddenDeathEngine === 'stockfish' ? 'active' : ''}
                       onClick={() => setSuddenDeathEngine('stockfish')}
                     >
-                      SF18
+                      {STOCKFISH_ENGINE_LABEL}
                     </button>
                     <button
                       type="button"
                       className={suddenDeathEngine === 'maia' ? 'active' : ''}
                       onClick={() => setSuddenDeathEngine('maia')}
                     >
-                      Maia
+                      {MAIA_ENGINE_LABEL}
                     </button>
                   </span>
                 </label>
@@ -7559,7 +8390,7 @@ function App() {
                 </label>
                 {suddenDeathEngine === 'stockfish' && (
                   <label>
-                    {`Stockfish: ${suddenDeathStockfishElo >= SUDDEN_DEATH_STOCKFISH_ELO_MAX ? 'Max' : suddenDeathStockfishElo}`}
+                    {`${STOCKFISH_ENGINE_NAME}: ${suddenDeathStockfishElo >= SUDDEN_DEATH_STOCKFISH_ELO_MAX ? 'Max' : suddenDeathStockfishElo}`}
                     <span className="slider-field">
                       <input
                         className="threshold-slider"
@@ -7582,7 +8413,7 @@ function App() {
                 )}
                 {suddenDeathEngine === 'maia' && (
                   <label>
-                    {`Maia: ${suddenDeathMaiaElo}`}
+                    {`${MAIA_ENGINE_LABEL}: ${suddenDeathMaiaElo}`}
                     <span className="slider-field">
                       <input
                         className="threshold-slider"
@@ -7622,14 +8453,14 @@ function App() {
                     className={suddenDeathEngine === 'stockfish' ? 'active' : ''}
                     onClick={() => setSuddenDeathEngine('stockfish')}
                   >
-                    SF18
+                    {STOCKFISH_ENGINE_LABEL}
                   </button>
                   <button
                     type="button"
                     className={suddenDeathEngine === 'maia' ? 'active' : ''}
                     onClick={() => setSuddenDeathEngine('maia')}
                   >
-                    Maia
+                    {MAIA_ENGINE_LABEL}
                   </button>
                 </span>
               </label>
@@ -7677,7 +8508,7 @@ function App() {
               </label>
               {suddenDeathEngine === 'stockfish' && (
                 <label>
-                  {`Stockfish: ${suddenDeathStockfishElo >= SUDDEN_DEATH_STOCKFISH_ELO_MAX ? 'Max' : suddenDeathStockfishElo}`}
+                  {`${STOCKFISH_ENGINE_NAME}: ${suddenDeathStockfishElo >= SUDDEN_DEATH_STOCKFISH_ELO_MAX ? 'Max' : suddenDeathStockfishElo}`}
                   <span className="slider-field">
                     <input
                       className="threshold-slider"
@@ -7700,7 +8531,7 @@ function App() {
               )}
               {suddenDeathEngine === 'maia' && (
                 <label>
-                  {`Maia: ${suddenDeathMaiaElo}`}
+                  {`${MAIA_ENGINE_LABEL}: ${suddenDeathMaiaElo}`}
                   <span className="slider-field">
                     <input
                       className="threshold-slider"
@@ -7729,7 +8560,7 @@ function App() {
       {isEvalManagerOpen && (
         <div className="modal-backdrop" onClick={() => { if (!isTreeEvalRunning) setIsEvalManagerOpen(false); }}>
           <div className="modal-card stockfish-quick-modal eval-manager-modal" onClick={(e) => e.stopPropagation()}>
-            <h3 className="eval-manager-title">Stockfish evals</h3>
+            <h3 className="eval-manager-title">{`${STOCKFISH_ENGINE_NAME} evals`}</h3>
             <div className="eval-progress-block">
               <div className="eval-progress-label">
                 {`Cloud API: ${treeEvalProgress?.cloud.done ?? 0}/${treeEvalProgress?.cloud.total ?? treeEvalScopeStats.missing}`}
@@ -7853,6 +8684,24 @@ function App() {
             </div>
             <div className="options-grid">
               <button
+                className={isAnalysisMode ? 'active' : ''}
+                disabled={!isAnalysisMode && (isTreeEvalRunning || isTrainingActive || isSuddenDeathActive || isExampleReplayActive)}
+                onClick={toggleAnalysisMode}
+              >
+                {isAnalysisMode ? 'Exit analysis mode' : 'Analysis mode'}
+              </button>
+              {isAnalysisMode && (
+                <button
+                  disabled={isBackupIoRunning || Boolean(analysisGameProgress)}
+                  onClick={() => {
+                    setIsOptionsOpen(false);
+                    importInputRef.current?.click();
+                  }}
+                >
+                  Load PGN
+                </button>
+              )}
+              <button
                 disabled={isTreeEvalRunning}
                 onClick={() => {
                   if (isBrowseMode) {
@@ -7915,7 +8764,7 @@ function App() {
                   setIsEvalManagerOpen(true);
                 }}
               >
-                Add Stockfish evals
+                {`Add ${STOCKFISH_ENGINE_NAME} evals`}
               </button>
               <button
                 onClick={() => {

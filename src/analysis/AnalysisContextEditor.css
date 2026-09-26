@@ -1,0 +1,8 @@
+.analysis-context-editor { min-width: 0; margin: 0; padding: .8rem; border: 1px solid var(--line, #d9dee8); border-radius: 10px; display: grid; gap: .65rem; }
+.analysis-context-editor legend { padding: 0 .25rem; font-size: .85rem; font-weight: 750; }
+.analysis-context-editor legend span { margin-left: .3rem; color: var(--muted, #697386); font-size: .72rem; font-weight: 500; }
+.analysis-context-editor label { min-width: 0; display: grid; gap: .25rem; color: var(--muted, #697386); font-size: .72rem; font-weight: 650; }
+.analysis-context-editor input,.analysis-context-editor select { box-sizing: border-box; width: 100%; min-height: 2.3rem; padding: .4rem .5rem; color: inherit; background: var(--panel, #fff); border: 1px solid var(--line, #d9dee8); border-radius: 7px; font: inherit; font-size: .82rem; }
+.ace-ratings,.ace-meta { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .55rem; }
+.ace-time-control { grid-column: 1 / -1; }
+@media (min-width: 560px) { .ace-meta { grid-template-columns: repeat(3,minmax(0,1fr)); } .ace-time-control { grid-column: auto; } }

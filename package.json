@@ -4,10 +4,12 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "npm run prepare:stockfish && vite",
-    "build": "npm run prepare:stockfish && tsc -b && vite build",
+    "dev": "npm run prepare:stockfish && npm run prepare:maia && vite",
+    "build": "npm run prepare:stockfish && npm run prepare:maia && tsc -b && vite build",
     "prepare:stockfish": "node scripts/copy-stockfish.mjs",
+    "prepare:maia": "node scripts/download-maia.mjs",
     "lint": "eslint .",
+    "verify:analysis": "node scripts/verify-analysis.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -16,7 +18,7 @@
     "onnxruntime-web": "^1.24.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "stockfish": "^18.0.5"
+    "stockfish": "^19.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

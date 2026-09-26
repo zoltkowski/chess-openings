@@ -1,9 +1,17 @@
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
+const installedStockfish = JSON.parse(
+  readFileSync(new URL('./node_modules/stockfish/package.json', import.meta.url), 'utf8'),
+) as { version: string }
+
 // https://vite.dev/config/
 export default defineConfig({
+  define: {
+    __STOCKFISH_VERSION__: JSON.stringify(installedStockfish.version),
+  },
   plugins: [
     react(),
     VitePWA({

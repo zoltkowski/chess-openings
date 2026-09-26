@@ -341,6 +341,228 @@ select {
   font-size: 0.9rem;
 }
 
+.game-analysis-panel {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.7rem;
+  margin-bottom: 0.7rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.65rem;
+  background: #f8fafc;
+}
+
+.game-analysis-heading,
+.game-analysis-current {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+
+.game-analysis-toggle {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.78rem;
+}
+
+.game-analysis-heading span,
+.game-analysis-current span:nth-child(2),
+.game-analysis-current b {
+  color: #475569;
+  font-variant-numeric: tabular-nums;
+}
+
+.game-analysis-progress-bar {
+  width: 100%;
+  height: 0.65rem;
+  accent-color: #2563eb;
+}
+
+.game-analysis-progress-inline {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0.3rem 0 0.55rem;
+  font-size: 0.75rem;
+}
+.game-analysis-progress-inline progress { width: 100%; height: 0.5rem; accent-color: #2563eb; }
+.game-analysis-progress-label { display: flex; justify-content: space-between; gap: 0.4rem; }
+
+.game-analysis-chart {
+  display: flex;
+  align-items: end;
+  gap: 2px;
+  height: 2.4rem;
+  padding: 0.2rem 0 0;
+  border-bottom: 1px solid #94a3b8;
+  overflow: hidden;
+}
+
+.game-analysis-chart-bar {
+  flex: 1 1 2px;
+  min-width: 2px;
+  max-width: 0.65rem;
+  padding: 0;
+  border: 0;
+  border-radius: 2px 2px 0 0;
+  cursor: pointer;
+  background: #64748b;
+}
+
+.game-analysis-chart-bar.best,
+.game-analysis-chart-bar.good { background: #2563eb; }
+.game-analysis-chart-bar.excellent { background: #9333ea; }
+.game-analysis-chart-bar.book { background: #16a34a; }
+.game-analysis-chart-bar.inaccuracy { background: #f97316; }
+.game-analysis-chart-bar.mistake { background: #dc2626; }
+.game-analysis-chart-bar.blunder { background: #dc2626; }
+.game-analysis-chart-bar.unavailable { background: #94a3b8; }
+
+.game-analysis-note {
+  color: #475569;
+  font-size: 0.78rem;
+}
+
+.maia-performance-summary {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.65rem;
+  padding: 0.65rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.5rem;
+  background: #f8fafc;
+  font-size: 0.8rem;
+}
+
+.maia-player-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.maia-player-summary {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.app.theme-dark .maia-performance-summary {
+  border-color: #475569;
+  background: #172033;
+}
+
+@media (max-width: 480px) {
+  .maia-player-summary-grid { grid-template-columns: 1fr; }
+}
+
+.game-analysis-comment {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.5rem 0.65rem;
+  border-left: 3px solid #94a3b8;
+  border-radius: 0.35rem;
+  background: #f1f5f9;
+  font-size: 0.82rem;
+}
+.game-analysis-comment.best,
+.game-analysis-comment.good { border-color: #2563eb; }
+.game-analysis-comment.excellent { border-color: #9333ea; }
+.game-analysis-comment.book { border-color: #16a34a; }
+.game-analysis-comment.inaccuracy { border-color: #f97316; }
+.game-analysis-comment.mistake { border-color: #dc2626; }
+.game-analysis-comment.blunder { border-color: #dc2626; }
+.game-analysis-comment span { line-height: 1.4; }
+
+.game-analysis-maia-stat {
+  display: grid;
+  gap: 0.15rem;
+  margin-top: 0.2rem;
+  padding-top: 0.25rem;
+  border-top: 1px solid #cbd5e1;
+  color: #334155;
+  font-size: 0.78rem;
+}
+
+.game-analysis-backdrop { z-index: 120; }
+.game-analysis-modal { width: min(34rem, calc(100vw - 2rem)); }
+.game-analysis-modal-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.game-analysis-modal-heading h3 { margin: 0; }
+.game-analysis-modal p { margin: 0.4rem 0 0.7rem; color: #475569; font-size: 0.85rem; }
+.game-analysis-chart-modal { height: 8rem; gap: 3px; }
+.game-analysis-chart-modal .game-analysis-chart-bar { max-width: 1rem; }
+.game-analysis-modal-actions { display: flex; justify-content: flex-end; margin-top: 0.8rem; }
+
+.app.theme-dark .game-analysis-panel {
+  border-color: #475569;
+  background: #172033;
+}
+
+.app.theme-dark .game-analysis-heading span,
+.app.theme-dark .game-analysis-current span:nth-child(2),
+.app.theme-dark .game-analysis-current b,
+.app.theme-dark .game-analysis-note {
+  color: #cbd5e1;
+}
+.app.theme-dark .game-analysis-comment { background: #0f172a; }
+.app.theme-dark .game-analysis-maia-stat { border-color: #475569; color: #cbd5e1; }
+.app.theme-dark .game-analysis-modal p { color: #cbd5e1; }
+
+.analysis-mode .opening-title { visibility: hidden; }
+.analysis-mode .ai-eval-table,
+.analysis-mode .tree-options-wrap,
+.analysis-mode .repertoire-hit-block,
+.analysis-mode .ai-engine-controls .status,
+.analysis-mode .stockfish-panel .status { display: none !important; }
+
+.analysis-mode .move-list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.analysis-mode .move-list .move-notation-line {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.analysis-mode .move-list .game-analysis-progress-inline,
+.analysis-mode .move-list .game-analysis-comment {
+  flex: 0 0 auto;
+}
+
+.analysis-comment-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.analysis-pv-move {
+  padding: 0.1rem 0.25rem;
+  border: 0;
+  border-radius: 0.25rem;
+  background: transparent;
+  color: #1d4ed8;
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.analysis-pv-move:hover,
+.analysis-pv-move:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 1px;
+}
+
+.app.theme-dark .analysis-pv-move {
+  color: #93c5fd;
+}
+
 .layout {
   display: block;
   flex: 1;
@@ -577,15 +799,38 @@ select {
   border-color: #dbeafe;
 }
 
+.move-inline-item.analysis-selected { outline: 2px solid #60a5fa; }
+.move-inline-annotation { font-size: 0.72em; font-weight: 800; }
+
 .move-inline-item.has-alternatives {
   font-weight: 700;
   color: #15803d;
 }
 
+.move-inline-item.analysis-best,
+.move-inline-item.analysis-good { color: #2563eb; }
+.move-inline-item.analysis-excellent { color: #9333ea; }
+.move-inline-item.analysis-book { color: #15803d; }
+.move-inline-item.analysis-inaccuracy { color: #f97316; }
+.move-inline-item.analysis-mistake,
+.move-inline-item.analysis-blunder { color: #dc2626; }
+.move-inline-item.analysis-provisional { color: #64748b; }
+
 .move-inline-prefix {
   color: #64748b;
   font-weight: 600;
 }
+
+.move-inline-maia-tag {
+  padding: 0 0.2rem;
+  border-radius: 0.2rem;
+  font-size: 0.68em;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.move-inline-maia-tag.above { color: #7e22ce; background: #f3e8ff; }
+.move-inline-maia-tag.below { color: #b91c1c; background: #fee2e2; }
 
 .tree-options-wrap {
   display: flex;
@@ -715,6 +960,52 @@ select {
 .stockfish-clickable-row:focus-visible {
   outline: 2px solid #93c5fd;
   outline-offset: 2px;
+}
+
+.engine-pv-row {
+  align-items: flex-start;
+  gap: 0.45rem;
+  min-height: 2.2rem;
+  padding-block: 0.25rem;
+}
+
+.engine-pv-row .engine-pv-score {
+  flex: 0 0 3.4rem;
+  padding-top: 0.2rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.engine-pv-row .engine-pv-moves {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.25rem;
+  min-width: 0;
+  overflow: visible;
+  white-space: normal;
+}
+
+.engine-pv-move {
+  min-height: 1.7rem;
+  padding: 0.1rem 0.3rem;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.engine-pv-move:hover,
+.engine-pv-move:focus-visible {
+  outline: none;
+  background: #dbeafe;
+}
+
+.app.theme-dark .engine-pv-move:hover,
+.app.theme-dark .engine-pv-move:focus-visible {
+  background: #263b59;
 }
 
 .table-row span {
@@ -1725,6 +2016,21 @@ select {
   color: #4ade80;
 }
 
+.app.theme-dark .move-inline-item.analysis-best,
+.app.theme-dark .move-inline-item.analysis-good { color: #60a5fa; }
+.app.theme-dark .move-inline-item.analysis-excellent { color: #c084fc; }
+.app.theme-dark .move-inline-item.analysis-inaccuracy { color: #fb923c; }
+.app.theme-dark .move-inline-item.analysis-mistake,
+.app.theme-dark .move-inline-item.analysis-blunder { color: #f87171; }
+.app.theme-dark .move-inline-item.analysis-provisional { color: #94a3b8; }
+
+.app.theme-dark .move-inline-item.analysis-book {
+  color: #4ade80;
+}
+
+.app.theme-dark .move-inline-maia-tag.above { color: #d8b4fe; background: #3b2455; }
+.app.theme-dark .move-inline-maia-tag.below { color: #fca5a5; background: #4a2429; }
+
 .app.theme-dark .modal-backdrop {
   background: rgba(2, 6, 23, 0.7);
 }
@@ -1905,6 +2211,12 @@ select {
 
   .portrait-pane.active {
     display: block;
+  }
+
+  .analysis-mode .move-list.portrait-pane.active {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
   .lichess-panel {
