@@ -1914,8 +1914,9 @@ function MaiaStatusView({ status }: { status: MaiaLoadingStatus | null }) {
     const percent = status.totalBytes > 0 ? Math.floor(status.loadedBytes / status.totalBytes * 100) : 0;
     const loaded = (status.loadedBytes / (1024 * 1024)).toFixed(1);
     const total = (status.totalBytes / (1024 * 1024)).toFixed(1);
+    const action = status.source === 'network' ? 'Pobieranie' : 'Wczytywanie z pamięci telefonu';
     return <div className="maia-load-status" role="status">
-      <span>Pobieranie modelu Maia-3: {status.totalBytes ? `${percent}% (${loaded} / ${total} MB)` : 'łączenie…'}</span>
+      <span>{action} modelu Maia-3: {status.totalBytes ? `${percent}% (${loaded} / ${total} MB)` : 'przygotowanie…'}</span>
       <progress max={status.totalBytes || 1} value={status.loadedBytes} aria-label="Postęp pobierania Maia-3" />
     </div>;
   }
@@ -1993,14 +1994,6 @@ function App() {
   const [maiaLoadingStatus, setMaiaLoadingStatus] = useState<MaiaLoadingStatus | null>(null);
   const [maiaError, setMaiaError] = useState('');
   const [maiaTreeStatus, setMaiaTreeStatus] = useState('');
-  useEffect(() => subscribeMaiaStatus((status) => {
-    if (status.phase === 'loading' && status.detail && typeof status.detail !== 'string') {
-      setMaiaLoadingStatus(status.detail);
-      setMaiaError('');
-    } else if (status.phase === 'error') {
-      setMaiaError(typeof status.detail === 'string' ? status.detail : 'Nieznany błąd Maia');
-    }
-  }), []);
   const [engineRunning, setEngineRunning] = useState(false);
   const [lichessData, setLichessData] = useState<LichessResponse | null>(null);
   const [lichessDataFen, setLichessDataFen] = useState<string | null>(null);
@@ -2039,8 +2032,38 @@ function App() {
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
   const [isAnalysisMode, setIsAnalysisMode] = useState(false);
   const [analysisGameProgress, setAnalysisGameProgress] = useState<GameAnalysisProgress | null>(null);
+  const [analysisMaiaNotice, setAnalysisMaiaNotice] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [gameAnalysisReport, setGameAnalysisReport] = useState<GameAnalysisReport | null>(null);
   const [showAnalysisReport, setShowAnalysisReport] = useState(false);
+  useEffect(() => subscribeMaiaStatus((status) => {
+    if (status.phase === 'loading' && status.detail && typeof status.detail !== 'string') {
+      const detail = status.detail;
+      setMaiaLoadingStatus(detail);
+      setMaiaError('');
+      const percent = detail.phase === 'downloading' && detail.totalBytes > 0
+        ? Math.floor(detail.loadedBytes / detail.totalBytes * 100) : 0;
+      const text = detail.phase === 'initializing'
+        ? 'Maia-3: inicjalizacja modelu w WebAssembly…'
+        : detail.totalBytes > 0
+          ? `Maia-3: ${detail.source === 'network' ? 'pobieranie' : 'wczytywanie z pamięci telefonu'} ${percent}%`
+          : 'Maia-3: przygotowanie modelu…';
+      setAnalysisGameProgress((prev) => prev ? { ...prev, detail: text } : prev);
+      setAnalysisMaiaNotice({ kind: 'info', text });
+    } else if (status.phase === 'evaluating') {
+      const text = 'Maia-3 załadowana. Analizowanie wybranych pozycji…';
+      setAnalysisGameProgress((prev) => prev ? { ...prev, detail: text } : prev);
+      setAnalysisMaiaNotice({ kind: 'info', text });
+    } else if (status.phase === 'ready') {
+      const text = 'Maia-3 działa poprawnie. Analiza pozycji trwa.';
+      setAnalysisGameProgress((prev) => prev ? { ...prev, detail: text } : prev);
+      setAnalysisMaiaNotice({ kind: 'success', text });
+    } else if (status.phase === 'error') {
+      const message = typeof status.detail === 'string' ? status.detail : 'Nieznany błąd Maia';
+      setMaiaError(message);
+      setAnalysisGameProgress((prev) => prev ? { ...prev, detail: `Błąd Maia-3: ${message}` } : prev);
+      setAnalysisMaiaNotice({ kind: 'error', text: `Błąd Maia-3: ${message}` });
+    }
+  }), []);
   const [analysisScratchPosition, setAnalysisScratchPosition] = useState<{ fen: string; lastMove: [Key, Key] | null } | null>(null);
   const [isBackupIoRunning, setIsBackupIoRunning] = useState(false);
   const [isNewRepertoireOpen, setIsNewRepertoireOpen] = useState(false);
@@ -2088,6 +2111,7 @@ function App() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const backupImportInputRef = useRef<HTMLInputElement | null>(null);
   const [engineReadyTick, setEngineReadyTick] = useState(0);
+  const [stockfishGeneration, setStockfishGeneration] = useState(0);
   const treeEvalAwaiterRef = useRef<{ latestScore: string | null; resolve: (score: string | null) => void } | null>(
     null,
   );
@@ -2518,6 +2542,12 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!isAnalysisMode && selectedEngine === 'stockfish' && !stockfishRef.current) {
+      setStockfishGeneration((value) => value + 1);
+    }
+  }, [isAnalysisMode, selectedEngine]);
+
+  useEffect(() => {
     if (!hasHydratedAppState || !gameAnalysisReport) return;
     const timeout = window.setTimeout(() => {
       void idbSet(APP_GAME_ANALYSIS_REPORT_KEY, gameAnalysisReport).catch(() => {
@@ -2884,7 +2914,7 @@ function App() {
       isSearchingRef.current = false;
       pendingAnalysisRef.current = null;
     };
-  }, []);
+  }, [stockfishGeneration]);
 
   useEffect(() => {
     if (selectedEngine === 'maia') {
@@ -3805,6 +3835,7 @@ function App() {
     analysisReviewAbortRef.current = reviewAbort;
     setGameAnalysisReport(initialReport);
     setShowAnalysisReport(false);
+    setAnalysisMaiaNotice(null);
     setAnalysisGameProgress({
       done: 0,
       total: gamePath.length - 1,
@@ -3838,6 +3869,10 @@ function App() {
         setShowAnalysisReport(true);
         return;
       }
+      if (!stockfishRef.current) {
+        setStockfishGeneration((value) => value + 1);
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      }
       if (!engineReadyRef.current) {
         for (let attempt = 0; attempt < 200 && !engineReadyRef.current; attempt += 1) {
           await new Promise((resolve) => window.setTimeout(resolve, 50));
@@ -3850,7 +3885,7 @@ function App() {
       if (isSearchingRef.current) throw new Error('Stockfish did not stop its previous search');
       if (!engineReadyRef.current || !stockfishRef.current) throw new Error('Stockfish is unavailable');
 
-      await runGameReview({ path: gamePath, bookResults, deep, depth: engineDepth, benchmark: analysisMaiaElo,
+      const reviewResults = await runGameReview({ path: gamePath, bookResults, deep, depth: engineDepth, benchmark: analysisMaiaElo,
         ratings: ratingMetadata, ratingSystem: analysisContext.ratingSystem, ratingPool: analysisContext.ratingPool,
         ratingSource: analysisContextSource,
         explorerToken: lichessApiToken,
@@ -3866,11 +3901,23 @@ function App() {
         },
       });
       const wasCancelled = analysisGameCancelRef.current;
+      if (!wasCancelled) {
+        const maiaComplete = reviewResults.filter((result) => result.maiaStatus === 'complete').length;
+        const maiaUnavailable = reviewResults.filter((result) => result.maiaStatus === 'unavailable');
+        if (maiaComplete > 0) {
+          setAnalysisMaiaNotice({ kind: 'success', text: `Maia-3 załadowana i użyta dla ${maiaComplete} ${maiaComplete === 1 ? 'pozycji' : 'pozycji'}.` });
+        } else if (maiaUnavailable.length > 0) {
+          setAnalysisMaiaNotice({ kind: 'error', text: `Maia-3 nie została użyta: ${maiaUnavailable[0].maiaUnavailableReason ?? 'model nie zwrócił wyniku'}` });
+        } else {
+          setAnalysisMaiaNotice({ kind: 'info', text: 'Maia-3 nie była potrzebna: screening Stockfisha nie wybrał pozycji do dodatkowej analizy.' });
+        }
+      }
       setGameAnalysisReport((prev) => prev?.gameKey === gameKey
         ? { ...prev, status: wasCancelled ? 'cancelled' : 'complete' }
         : prev);
       if (!wasCancelled) setShowAnalysisReport(true);
-    } catch {
+    } catch (error) {
+      setAnalysisMaiaNotice({ kind: 'error', text: `Analiza nie została ukończona: ${error instanceof Error ? error.message : String(error)}` });
       setGameAnalysisReport((prev) => prev?.gameKey === gameKey ? { ...prev, status: 'error' } : prev);
       setShowAnalysisReport(true);
     } finally {
@@ -8088,6 +8135,11 @@ function App() {
                         {analysisGameProgress.liveScoreText && <b>{analysisGameProgress.liveScoreText}</b>}
                       </div>
                       <progress value={analysisGameProgress.done} max={Math.max(1, analysisGameProgress.total)} aria-label="Game analysis progress" />
+                    </div>
+                  )}
+                  {isAnalysisMode && analysisMaiaNotice && (
+                    <div className={`analysis-maia-notice ${analysisMaiaNotice.kind}`} role={analysisMaiaNotice.kind === 'error' ? 'alert' : 'status'}>
+                      {analysisMaiaNotice.text}
                     </div>
                   )}
                   <div className="move-notation-line">

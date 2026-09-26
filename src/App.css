@@ -334,6 +334,21 @@ select {
 .app.theme-dark .maia-load-status { color: #cbd5e1; }
 .app.theme-dark .maia-load-error { color: #fca5a5; }
 
+.analysis-maia-notice {
+  margin: 0.35rem 0;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid #94a3b8;
+  border-radius: 0.45rem;
+  color: #334155;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+.analysis-maia-notice.success { border-color: #16a34a; color: #166534; }
+.analysis-maia-notice.error { border-color: #dc2626; color: #b91c1c; }
+.app.theme-dark .analysis-maia-notice { color: #cbd5e1; }
+.app.theme-dark .analysis-maia-notice.success { color: #86efac; }
+.app.theme-dark .analysis-maia-notice.error { color: #fca5a5; }
+
 .stockfish-controls-right {
   margin-left: auto;
   display: inline-flex;

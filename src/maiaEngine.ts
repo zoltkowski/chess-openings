@@ -6,6 +6,7 @@ export const MAIA_ENGINE_LABEL = `Maia${MAIA_MODEL_VERSION ?? ''}`;
 
 type WorkerRequest = { id: number; params: MaiaEvaluateParams };
 type WorkerResponse = { id: number; result?: MaiaEvaluation; error?: string; phase?: 'evaluating'; loading?: MaiaLoadingStatus };
+export type MaiaEngineStatus = { phase: 'loading' | 'evaluating' | 'ready' | 'error'; detail?: MaiaLoadingStatus | string };
 type PendingRequest = {
   resolve: (evaluation: MaiaEvaluation) => void;
   reject: (error: Error) => void;
@@ -14,12 +15,12 @@ type PendingRequest = {
 };
 
 export type { MaiaLoadingStatus };
-const statusListeners = new Set<(status: { phase: 'loading' | 'evaluating' | 'error'; detail?: MaiaLoadingStatus | string }) => void>();
-function reportStatus(status: { phase: 'loading' | 'evaluating' | 'error'; detail?: MaiaLoadingStatus | string }) {
+const statusListeners = new Set<(status: MaiaEngineStatus) => void>();
+function reportStatus(status: MaiaEngineStatus) {
   for (const listener of statusListeners) listener(status);
 }
 subscribeMaiaProgress((detail) => reportStatus({ phase: 'loading', detail }));
-export function subscribeMaiaStatus(listener: (status: { phase: 'loading' | 'evaluating' | 'error'; detail?: MaiaLoadingStatus | string }) => void) {
+export function subscribeMaiaStatus(listener: (status: MaiaEngineStatus) => void) {
   statusListeners.add(listener);
   return () => { statusListeners.delete(listener); };
 }
@@ -40,12 +41,13 @@ function rejectPending(error: Error) {
   pending.clear();
 }
 
-function stopWorker(error: Error) {
+function stopWorker(error: Error, notify = true) {
   const current = worker;
   worker = null;
   ready = false;
   current?.terminate();
   rejectPending(error);
+  if (notify) reportStatus({ phase: 'error', detail: error.message });
 }
 
 function handleMessage(event: MessageEvent<WorkerResponse>) {
@@ -69,7 +71,7 @@ function handleMessage(event: MessageEvent<WorkerResponse>) {
     request.reject(new Error(response.error));
   } else if (response.result !== undefined) {
     ready = true;
-    reportStatus({ phase: 'evaluating' });
+    reportStatus({ phase: 'ready' });
     request.resolve(response.result);
   } else {
     reportStatus({ phase: 'error', detail: 'Maia worker returned an empty response' });
@@ -129,7 +131,9 @@ export function evaluateMaiaPosition(
     } catch (error) {
       pending.delete(id);
       clearTimeout(timeout);
-      reject(error instanceof Error ? error : new Error(String(error)));
+      const failure = error instanceof Error ? error : new Error(String(error));
+      reportStatus({ phase: 'error', detail: failure.message });
+      reject(failure);
     }
   });
 }
@@ -137,7 +141,7 @@ export function evaluateMaiaPosition(
 export function isMaiaReady() { return ready; }
 
 export function cancelMaiaEvaluations() {
-  stopWorker(new Error('Maia analysis cancelled'));
+  stopWorker(new Error('Maia analysis cancelled'), false);
 }
 
 export type { MaiaEvaluateParams, MaiaEvaluation } from './maiaInference';

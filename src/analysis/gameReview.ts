@@ -47,7 +47,7 @@ export async function runGameReview(options: Options): Promise<Result[]> {
   for (const node of path.slice(1)) histories.push([...histories.at(-1)!, ...(node.moveUci ? [node.moveUci] : [])]);
   const positions = new Map<string, { index: number; best: Evaluation; played: Evaluation }>();
   let done = results.length, total = path.length - 1 + (deep ? config.maxCandidateMoves : 6);
-  let refinements = 0, extraQueries = 0, maiaQueries = 0, maiaFailures = 0;
+  let refinements = 0, maiaQueries = 0, maiaFailures = 0;
   const publish = () => options.publish(path.slice(1).flatMap(n => results.find(r => r.nodeId === n.id) ?? []));
   const progress = (index: number, phase: Phase, score: string | null = null) => {
     const before = path[index - 1], node = path[index];
@@ -119,10 +119,6 @@ export async function runGameReview(options: Options): Promise<Result[]> {
   }
   if (cancelled()) return results;
 
-  // Release the large Stockfish worker before Maia initializes its ONNX/WASM model.
-  await options.releaseStockfish?.();
-  if (cancelled()) return results;
-
   // Optional external evidence has a shared wall-time budget and never blocks offline review.
   const knowledgeController = new AbortController();
   const abortKnowledge = () => knowledgeController.abort();
@@ -172,7 +168,13 @@ export async function runGameReview(options: Options): Promise<Result[]> {
   // Interleave sides so a device budget cannot consume every sample for one player.
   const selected = Array.from({length: Math.max(...pools.map(p => p.length))}, (_,i) => pools.flatMap(p => p[i] ? [p[i]] : [])).flat();
   total = done + selected.length;
+  if (selected.length > 0) {
+    // All Stockfish work is complete. Release its worker before Maia allocates ONNX/WASM memory.
+    await options.releaseStockfish?.();
+    if (cancelled()) return results;
+  }
   let maiaStarted: number | null = null;
+  let lastMaiaError: string | null = null;
   const maiaBudgetMs = deep ? 45000 : 15000, maxQueries = deep ? config.maxTotalPositionEvaluations : 6;
   const policies = new Map<string, Awaited<ReturnType<typeof evaluateMaiaPosition>>>();
   const maia = async (fen: string, self: number, opponent: number, uci?: string) => {
@@ -184,7 +186,11 @@ export async function runGameReview(options: Options): Promise<Result[]> {
       const value = await evaluateMaiaPosition({ fen, eloSelf: clampRating(self), eloOppo: clampRating(opponent), topK: 256, playedMoveUci: uci },
         { timeoutMs: 6000, initializationTimeoutMs: 60000 });
       maiaStarted ??= performance.now(); maiaFailures = 0; policies.set(key, value); return value;
-    } catch { maiaStarted ??= performance.now(); maiaFailures++; return null; }
+    } catch (error) {
+      maiaStarted ??= performance.now(); maiaFailures++;
+      lastMaiaError = error instanceof Error ? error.message : String(error);
+      return null;
+    }
   };
   for (const result of selected) {
     if (cancelled()) break;
@@ -223,7 +229,9 @@ export async function runGameReview(options: Options): Promise<Result[]> {
     if (cancelled()) break;
     if (!policy) {
       result.maiaStatus = maiaQueries >= maxQueries || (maiaStarted !== null && performance.now()-maiaStarted >= maiaBudgetMs) ? 'skipped' : 'unavailable';
-      result.maiaUnavailableReason = result.maiaStatus === 'skipped' ? 'Maia review budget exhausted.' : 'Maia did not return a usable result.';
+      result.maiaUnavailableReason = result.maiaStatus === 'skipped'
+        ? 'Maia review budget exhausted.'
+        : lastMaiaError ?? 'Maia did not return a usable result.';
       done++; publish(); continue;
     }
     Object.assign(result, {maiaStatus:'complete', maiaUnavailableReason:undefined, maiaPlayedProbability:policy.playedMove?.probability ?? null,
@@ -233,18 +241,6 @@ export async function runGameReview(options: Options): Promise<Result[]> {
     for (const c of best.candidates ?? []) { const l = candidateLoss(asCandidate(best),c); if (l !== null) assessed.set(c.uci,l); }
     if (result.lossPoints !== null) assessed.set(node.moveUci!, result.lossPoints);
     const completePolicy = policy.moves.length === new Chess(before.fen).moves().length;
-    if (deep && completePolicy) {
-      for (const choice of policy.moves.filter(p => !assessed.has(p.uci)).slice(0,4)) {
-        if (cancelled() || extraQueries >= config.maxAlternativeQueries) break;
-        const covered = policy.moves.reduce((s,m) => s+(assessed.has(m.uci) ? m.probability : 0),0);
-        if (covered >= 0.9) break;
-        progress(i, 'alternatives'); extraQueries++;
-        const chess = new Chess(root); for(const uci of [...histories[i-1],choice.uci]) chess.move(uci);
-        const candidate = terminal(chess) ?? await evaluate(i-1,result.mover,config.deepScreenMs,1,choice.uci);
-        if (contradicts(best,candidate)) {result.status='uncertain'; result.uncertaintyReason='A candidate scored better than the principal line.';}
-        const l=loss(best,candidate); if(l!==null) assessed.set(choice.uci,l);
-      }
-    }
     if (completePolicy) {
       const known = policy.moves.reduce((s,m)=>s+(assessed.has(m.uci)?m.probability:0),0);
       result.goodMassLower=policy.moves.reduce((s,m)=>s+((assessed.get(m.uci)??Infinity)<config.goodLoss?m.probability:0),0);

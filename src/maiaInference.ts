@@ -19,7 +19,9 @@ export type MaiaEvaluation = {
 };
 type MaiaModelFeeds = Record<string, ort.Tensor>;
 
-export type MaiaLoadingStatus = { phase: 'downloading'; loadedBytes: number; totalBytes: number } | { phase: 'initializing' };
+export type MaiaLoadingStatus = {
+  phase: 'downloading'; loadedBytes: number; totalBytes: number; source?: 'cache' | 'network';
+} | { phase: 'initializing' };
 type MaiaProgressListener = (status: MaiaLoadingStatus) => void;
 const progressListeners = new Set<MaiaProgressListener>();
 function reportProgress(status: MaiaLoadingStatus) { for (const listener of progressListeners) listener(status); }
@@ -33,7 +35,7 @@ let allMovesPromise: Promise<Record<string, number>> | null = null;
 
 async function getCachedModel(manifest: { size: number; parts: { file: string; size: number }[] }) {
   const total = manifest.parts.reduce((sum, part) => sum + part.size, 0);
-  reportProgress({ phase: 'downloading', loadedBytes: 0, totalBytes: manifest.size });
+  reportProgress({ phase: 'downloading', loadedBytes: 0, totalBytes: manifest.size, source: 'cache' });
   const cache = 'caches' in globalThis ? await caches.open(MAIA_CACHE_NAME) : null;
   const chunks: Uint8Array[] = [];
   let loaded = 0;
@@ -43,7 +45,7 @@ async function getCachedModel(manifest: { size: number; parts: { file: string; s
     if (response) {
       const saved = await response.arrayBuffer();
       if (saved.byteLength !== part.size) { await cache?.delete(url); response = undefined; }
-      else { chunks.push(new Uint8Array(saved)); loaded += part.size; reportProgress({ phase: 'downloading', loadedBytes: loaded, totalBytes: total }); }
+      else { chunks.push(new Uint8Array(saved)); loaded += part.size; reportProgress({ phase: 'downloading', loadedBytes: loaded, totalBytes: total, source: 'cache' }); }
     }
     if (!response) {
       const networkResponse = await fetch(url);
@@ -53,9 +55,9 @@ async function getCachedModel(manifest: { size: number; parts: { file: string; s
       chunks.push(bytes); loaded += bytes.length;
       if (cache) {
         try { await cache.put(url, new Response(bytes, { headers: { 'Content-Type': 'application/octet-stream' } })); }
-        catch { reportProgress({ phase: 'downloading', loadedBytes: loaded, totalBytes: total }); }
+        catch { reportProgress({ phase: 'downloading', loadedBytes: loaded, totalBytes: total, source: 'network' }); }
       }
-      reportProgress({ phase: 'downloading', loadedBytes: loaded, totalBytes: total });
+      reportProgress({ phase: 'downloading', loadedBytes: loaded, totalBytes: total, source: 'network' });
     }
   }
   const model = new Uint8Array(manifest.size);
