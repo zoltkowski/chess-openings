@@ -7364,7 +7364,7 @@ function App() {
                             <div className="table-row engine-pv-row" key={line.multipv}>
                               <span className="engine-pv-score">{line.scoreText}</span>
                               <div className="engine-pv-moves">
-                                {buildEnginePvMoves(selectedNode.fen, line.pv).map((move, index) => (
+                                {buildEnginePvMoves(selectedBoardFen, line.pv).map((move, index) => (
                                   <button
                                     type="button"
                                     className="engine-pv-move"
@@ -7387,7 +7387,7 @@ function App() {
                             <div className="table-row engine-pv-row" key={line.multipv}>
                               <span className="engine-pv-score">{line.scoreText}</span>
                               <div className="engine-pv-moves">
-                                {buildEnginePvMoves(selectedNode.fen, line.pv).map((move, index) => (
+                                {buildEnginePvMoves(selectedBoardFen, line.pv).map((move, index) => (
                                   <button
                                     type="button"
                                     className="engine-pv-move"
@@ -7728,7 +7728,7 @@ function App() {
                       <div className="table-row engine-pv-row" key={line.multipv}>
                         <span className="engine-pv-score">{line.scoreText}</span>
                         <div className="engine-pv-moves">
-                          {buildEnginePvMoves(selectedNode.fen, line.pv).map((move, index) => (
+                          {buildEnginePvMoves(selectedBoardFen, line.pv).map((move, index) => (
                             <button
                               type="button"
                               className="engine-pv-move"
@@ -7751,7 +7751,7 @@ function App() {
                       <div className="table-row engine-pv-row" key={line.multipv}>
                         <span className="engine-pv-score">{line.scoreText}</span>
                         <div className="engine-pv-moves">
-                          {buildEnginePvMoves(selectedNode.fen, line.pv).map((move, index) => (
+                          {buildEnginePvMoves(selectedBoardFen, line.pv).map((move, index) => (
                             <button
                               type="button"
                               className="engine-pv-move"
