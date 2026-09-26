@@ -1,10 +1,11 @@
-import { evaluateMaiaPosition, initializeMaia, type MaiaEvaluateParams } from './maiaInference';
+import { evaluateMaiaPosition, initializeMaia, subscribeMaiaProgress, type MaiaEvaluateParams } from './maiaInference';
 
 type MaiaWorkerRequest = { id: number; params: MaiaEvaluateParams };
 type MaiaWorkerResponse = { id: number; result?: Awaited<ReturnType<typeof evaluateMaiaPosition>>; error?: string };
 
 // ONNX Runtime sessions are kept inside this worker and evaluated one at a time.
 let queue = Promise.resolve();
+subscribeMaiaProgress((loading) => self.postMessage({ loading }));
 
 self.addEventListener('message', (event: MessageEvent<MaiaWorkerRequest>) => {
   const { id, params } = event.data;

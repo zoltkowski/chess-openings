@@ -16,6 +16,7 @@ type Options = {
   ratingSource?: 'pgn' | 'manual';
   explorerToken?: string;
   query: ReviewQuery; cancelled: () => boolean; signal: AbortSignal;
+  releaseStockfish?: () => Promise<void>;
   publish: (results: Result[]) => void;
   progress: (value: { done: number; total: number; moveText: string; phase: Phase; liveScoreText: string | null }, nodeId: string) => void;
 };
@@ -116,6 +117,10 @@ export async function runGameReview(options: Options): Promise<Result[]> {
         ? 'Stockfish confirms a forced mating continuation against best defense.' : undefined };
     results.push(result); positions.set(node.id, { index: i, best, played }); done++; publish();
   }
+  if (cancelled()) return results;
+
+  // Release the large Stockfish worker before Maia initializes its ONNX/WASM model.
+  await options.releaseStockfish?.();
   if (cancelled()) return results;
 
   // Optional external evidence has a shared wall-time budget and never blocks offline review.

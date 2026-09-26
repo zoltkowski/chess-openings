@@ -6,6 +6,7 @@ import ortMjsUrl from '../node_modules/onnxruntime-web/dist/ort-wasm-simd-thread
 // Maia-3 browser export and move vocabulary live under public/maia/maia3.
 const MAIA_MODEL_URL = '/maia/maia3/maia3-79m.fp16.onnx';
 const MAIA_MOVES_URL = '/maia/maia3/all_moves.json';
+const MAIA_CACHE_NAME = 'maia3-model-v1';
 const MAIA_MODEL_VERSION = MAIA_MODEL_URL.match(/\/maia(\d+)\//i)?.[1];
 export const MAIA_ENGINE_LABEL = `Maia${MAIA_MODEL_VERSION ?? ''}`;
 
@@ -18,8 +19,50 @@ export type MaiaEvaluation = {
 };
 type MaiaModelFeeds = Record<string, ort.Tensor>;
 
+export type MaiaLoadingStatus = { phase: 'downloading'; loadedBytes: number; totalBytes: number } | { phase: 'initializing' };
+type MaiaProgressListener = (status: MaiaLoadingStatus) => void;
+const progressListeners = new Set<MaiaProgressListener>();
+function reportProgress(status: MaiaLoadingStatus) { for (const listener of progressListeners) listener(status); }
+export function subscribeMaiaProgress(listener: MaiaProgressListener) {
+  progressListeners.add(listener);
+  return () => { progressListeners.delete(listener); };
+}
+
 let sessionPromise: Promise<ort.InferenceSession> | null = null;
 let allMovesPromise: Promise<Record<string, number>> | null = null;
+
+async function getCachedModel(manifest: { size: number; parts: { file: string; size: number }[] }) {
+  const total = manifest.parts.reduce((sum, part) => sum + part.size, 0);
+  reportProgress({ phase: 'downloading', loadedBytes: 0, totalBytes: manifest.size });
+  const cache = 'caches' in globalThis ? await caches.open(MAIA_CACHE_NAME) : null;
+  const chunks: Uint8Array[] = [];
+  let loaded = 0;
+  for (const part of manifest.parts) {
+    const url = `/maia/maia3/${part.file}`;
+    let response = await cache?.match(url);
+    if (response) {
+      const saved = await response.arrayBuffer();
+      if (saved.byteLength !== part.size) { await cache?.delete(url); response = undefined; }
+      else { chunks.push(new Uint8Array(saved)); loaded += part.size; reportProgress({ phase: 'downloading', loadedBytes: loaded, totalBytes: total }); }
+    }
+    if (!response) {
+      const networkResponse = await fetch(url);
+      if (!networkResponse.ok) throw new Error(`Nie udało się pobrać części modelu: ${part.file} (HTTP ${networkResponse.status})`);
+      const bytes = new Uint8Array(await networkResponse.arrayBuffer());
+      if (bytes.length !== part.size) throw new Error(`Niekompletna część modelu: ${part.file}`);
+      chunks.push(bytes); loaded += bytes.length;
+      if (cache) {
+        try { await cache.put(url, new Response(bytes, { headers: { 'Content-Type': 'application/octet-stream' } })); }
+        catch { reportProgress({ phase: 'downloading', loadedBytes: loaded, totalBytes: total }); }
+      }
+      reportProgress({ phase: 'downloading', loadedBytes: loaded, totalBytes: total });
+    }
+  }
+  const model = new Uint8Array(manifest.size);
+  let offset = 0;
+  for (const chunk of chunks) { model.set(chunk, offset); offset += chunk.length; }
+  return model;
+}
 
 function getAllMovesMap() {
   if (!allMovesPromise) {
@@ -48,22 +91,14 @@ function getSession() {
             manifest.parts.reduce((sum, part) => sum + part.size, 0) !== manifest.size) {
           throw new Error('Invalid Maia-3 model manifest');
         }
-        const model = new Uint8Array(manifest.size);
-        let offset = 0;
-        for (const part of manifest.parts) {
-          const result = await fetch(`/maia/maia3/${part.file}`);
-          if (!result.ok) throw new Error(`Failed to fetch Maia-3 model part: ${part.file}`);
-          const bytes = new Uint8Array(await result.arrayBuffer());
-          if (bytes.length !== part.size) throw new Error(`Incomplete Maia-3 model part: ${part.file}`);
-          model.set(bytes, offset);
-          offset += bytes.length;
-        }
-        return model;
+        return getCachedModel(manifest);
       })
-      .then((buffer) => ort.InferenceSession.create(buffer, {
+      .then((buffer) => {
+        reportProgress({ phase: 'initializing' });
+        return ort.InferenceSession.create(buffer, {
         executionProviders: ['wasm'],
         graphOptimizationLevel: 'basic',
-      }))
+      }); })
       .catch((error) => { sessionPromise = null; throw error; });
   }
   return sessionPromise;

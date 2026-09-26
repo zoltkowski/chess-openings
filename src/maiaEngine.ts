@@ -1,17 +1,28 @@
-import type { MaiaEvaluateParams, MaiaEvaluation } from './maiaInference';
+import { subscribeMaiaProgress, type MaiaEvaluateParams, type MaiaEvaluation, type MaiaLoadingStatus } from './maiaInference';
 
 const MAIA_MODEL_URL = '/maia/maia3/maia3-79m.fp16.onnx';
 const MAIA_MODEL_VERSION = MAIA_MODEL_URL.match(/\/maia(\d+)\//i)?.[1];
 export const MAIA_ENGINE_LABEL = `Maia${MAIA_MODEL_VERSION ?? ''}`;
 
 type WorkerRequest = { id: number; params: MaiaEvaluateParams };
-type WorkerResponse = { id: number; result?: MaiaEvaluation; error?: string; phase?: 'evaluating' };
+type WorkerResponse = { id: number; result?: MaiaEvaluation; error?: string; phase?: 'evaluating'; loading?: MaiaLoadingStatus };
 type PendingRequest = {
   resolve: (evaluation: MaiaEvaluation) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
   evaluationTimeoutMs: number;
 };
+
+export type { MaiaLoadingStatus };
+const statusListeners = new Set<(status: { phase: 'loading' | 'evaluating' | 'error'; detail?: MaiaLoadingStatus | string }) => void>();
+function reportStatus(status: { phase: 'loading' | 'evaluating' | 'error'; detail?: MaiaLoadingStatus | string }) {
+  for (const listener of statusListeners) listener(status);
+}
+subscribeMaiaProgress((detail) => reportStatus({ phase: 'loading', detail }));
+export function subscribeMaiaStatus(listener: (status: { phase: 'loading' | 'evaluating' | 'error'; detail?: MaiaLoadingStatus | string }) => void) {
+  statusListeners.add(listener);
+  return () => { statusListeners.delete(listener); };
+}
 
 const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_CACHED_EVALUATIONS = 256;
@@ -39,10 +50,12 @@ function stopWorker(error: Error) {
 
 function handleMessage(event: MessageEvent<WorkerResponse>) {
   const response = event.data;
+  if (response.loading) { reportStatus({ phase: 'loading', detail: response.loading }); return; }
   const request = pending.get(response.id);
   if (!request) return;
   if (response.phase === 'evaluating') {
     ready = true;
+    reportStatus({ phase: 'evaluating' });
     clearTimeout(request.timeout);
     request.timeout = setTimeout(() => {
       if (pending.has(response.id)) stopWorker(new Error(`Maia evaluation timed out after ${request.evaluationTimeoutMs} ms`));
@@ -52,11 +65,14 @@ function handleMessage(event: MessageEvent<WorkerResponse>) {
   pending.delete(response.id);
   clearTimeout(request.timeout);
   if (response.error !== undefined) {
+    reportStatus({ phase: 'error', detail: response.error });
     request.reject(new Error(response.error));
   } else if (response.result !== undefined) {
     ready = true;
+    reportStatus({ phase: 'evaluating' });
     request.resolve(response.result);
   } else {
+    reportStatus({ phase: 'error', detail: 'Maia worker returned an empty response' });
     request.reject(new Error('Maia worker returned an empty response'));
   }
 }
@@ -89,6 +105,7 @@ export function evaluateMaiaPosition(
   const initializationTimeoutMs = options.initializationTimeoutMs ?? timeoutMs;
   const id = nextRequestId++;
   return new Promise((resolve, reject) => {
+    reportStatus({ phase: 'loading', detail: { phase: 'downloading', loadedBytes: 0, totalBytes: 0 } });
     const timeout = setTimeout(() => {
       if (!pending.has(id)) return;
       stopWorker(new Error(`Maia loading or queue wait timed out after ${initializationTimeoutMs} ms`));

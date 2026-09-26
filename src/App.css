@@ -320,6 +320,20 @@ select {
   margin: 0.1rem 0 0.25rem;
 }
 
+.maia-load-status {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.55rem 0.65rem;
+  color: #334155;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.maia-load-status progress { width: 100%; min-height: 0.55rem; }
+.maia-load-error { padding: 0.55rem 0.65rem; color: #b91c1c; font-size: 0.85rem; overflow-wrap: anywhere; }
+.app.theme-dark .maia-load-status { color: #cbd5e1; }
+.app.theme-dark .maia-load-error { color: #fca5a5; }
+
 .stockfish-controls-right {
   margin-left: auto;
   display: inline-flex;

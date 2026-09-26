@@ -18,7 +18,7 @@ import type { Api as ChessgroundApi } from '@lichess-org/chessground/api';
 import type { Key } from '@lichess-org/chessground/types';
 import type { DrawShape } from '@lichess-org/chessground/draw';
 import type { DrawBrushes } from '@lichess-org/chessground/draw';
-import { evaluateMaiaPosition, cancelMaiaEvaluations, MAIA_ENGINE_LABEL } from './maiaEngine';
+import { evaluateMaiaPosition, cancelMaiaEvaluations, MAIA_ENGINE_LABEL, subscribeMaiaStatus, type MaiaLoadingStatus } from './maiaEngine';
 import { STOCKFISH_ENGINE_LABEL, STOCKFISH_ENGINE_NAME } from './engineVersions';
 import '@lichess-org/chessground/assets/chessground.base.css';
 import '@lichess-org/chessground/assets/chessground.brown.css';
@@ -146,6 +146,7 @@ type GameAnalysisProgress = {
   moveText: string;
   phase: 'book' | 'maia' | 'best' | 'played' | 'refine' | 'alternatives' | 'profile';
   liveScoreText: string | null;
+  detail?: string;
 };
 
 type LichessMove = {
@@ -1907,6 +1908,20 @@ function Board(props: {
   return <div ref={containerRef} className="board" />;
 }
 
+function MaiaStatusView({ status }: { status: MaiaLoadingStatus | null }) {
+  if (status?.phase === 'initializing') return <div className="maia-load-status" role="status">Inicjalizacja Maia-3 w WebAssembly…</div>;
+  if (status?.phase === 'downloading') {
+    const percent = status.totalBytes > 0 ? Math.floor(status.loadedBytes / status.totalBytes * 100) : 0;
+    const loaded = (status.loadedBytes / (1024 * 1024)).toFixed(1);
+    const total = (status.totalBytes / (1024 * 1024)).toFixed(1);
+    return <div className="maia-load-status" role="status">
+      <span>Pobieranie modelu Maia-3: {status.totalBytes ? `${percent}% (${loaded} / ${total} MB)` : 'łączenie…'}</span>
+      <progress max={status.totalBytes || 1} value={status.loadedBytes} aria-label="Postęp pobierania Maia-3" />
+    </div>;
+  }
+  return <div className="maia-load-status" role="status">Uruchamianie Maia-3…</div>;
+}
+
 function App() {
   const initialThemeMode: ThemeMode = 'light';
   const initialLichessSource: LichessSource = 'lichess';
@@ -1975,6 +1990,17 @@ function App() {
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
   const [engineStatus, setEngineStatus] = useState('stopped');
+  const [maiaLoadingStatus, setMaiaLoadingStatus] = useState<MaiaLoadingStatus | null>(null);
+  const [maiaError, setMaiaError] = useState('');
+  const [maiaTreeStatus, setMaiaTreeStatus] = useState('');
+  useEffect(() => subscribeMaiaStatus((status) => {
+    if (status.phase === 'loading' && status.detail && typeof status.detail !== 'string') {
+      setMaiaLoadingStatus(status.detail);
+      setMaiaError('');
+    } else if (status.phase === 'error') {
+      setMaiaError(typeof status.detail === 'string' ? status.detail : 'Nieznany błąd Maia');
+    }
+  }), []);
   const [engineRunning, setEngineRunning] = useState(false);
   const [lichessData, setLichessData] = useState<LichessResponse | null>(null);
   const [lichessDataFen, setLichessDataFen] = useState<string | null>(null);
@@ -2875,6 +2901,7 @@ function App() {
       const requestId = maiaAnalysisRequestRef.current + 1;
       maiaAnalysisRequestRef.current = requestId;
       setEngineStatus('analyzing');
+      setMaiaError('');
       setEngineLines([]);
 
       void (async () => {
@@ -2895,9 +2922,11 @@ function App() {
           }));
           setEngineLines(lines);
           setEngineStatus('done');
-        } catch {
+        } catch (error) {
           if (requestId !== maiaAnalysisRequestRef.current) return;
-          setEngineStatus(`${MAIA_ENGINE_LABEL} error`);
+          const message = error instanceof Error ? error.message : String(error);
+          setMaiaError(message);
+          setEngineStatus(`${MAIA_ENGINE_LABEL}: ${message}`);
           setEngineLines([]);
         }
       })();
@@ -3788,6 +3817,20 @@ function App() {
     engineRunningRef.current = false;
     pendingAnalysisRef.current = null;
     stockfishRef.current?.postMessage('stop');
+    const releaseStockfishForMaia = async () => {
+      setAnalysisGameProgress((prev) => prev ? { ...prev, detail: 'Zamykanie Stockfish i zwalnianie pamięci przed Maia-3…' } : prev);
+      const worker = stockfishRef.current;
+      if (worker) {
+        worker.postMessage('stop');
+        worker.terminate();
+        stockfishRef.current = null;
+      }
+      engineReadyRef.current = false;
+      isSearchingRef.current = false;
+      pendingAnalysisRef.current = null;
+      lineCacheRef.current.clear();
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
+    };
 
     try {
       if (bookMoveCount === gamePath.length - 1) {
@@ -3811,6 +3854,7 @@ function App() {
         ratings: ratingMetadata, ratingSystem: analysisContext.ratingSystem, ratingPool: analysisContext.ratingPool,
         ratingSource: analysisContextSource,
         explorerToken: lichessApiToken,
+        releaseStockfish: releaseStockfishForMaia,
         query: runStockfishSingleQuery, cancelled: () => analysisGameCancelRef.current,
         signal: reviewAbort.signal,
         publish: (results) => setGameAnalysisReport(prev => prev?.gameKey === gameKey ? { ...prev, results: [...results] } : prev),
@@ -6535,7 +6579,8 @@ function App() {
               topK: 1,
             });
             scoreText = formatSignedCp(winProbabilityToCp(maiaEval.winProbability));
-          } catch {
+          } catch (error) {
+            setMaiaTreeStatus(error instanceof Error ? error.message : String(error));
             scoreText = null;
           }
         } else {
@@ -7287,6 +7332,8 @@ function App() {
                               </div>
                             </div>
                           ))}
+                          {engineLines.length === 0 && engineStatus === 'analyzing' && <MaiaStatusView status={maiaLoadingStatus} />}
+                          {engineLines.length === 0 && maiaError && <div className="maia-load-error" role="alert">Maia: {maiaError}</div>}
                         </div>
                       )}
                       {selectedEngine === 'maia' && (
@@ -7649,6 +7696,8 @@ function App() {
                         </div>
                       </div>
                     ))}
+                    {engineLines.length === 0 && engineStatus === 'analyzing' && <MaiaStatusView status={maiaLoadingStatus} />}
+                    {engineLines.length === 0 && maiaError && <div className="maia-load-error" role="alert">Maia: {maiaError}</div>}
                   </div>
                 )}
                 {selectedEngine === 'maia' && (
@@ -8034,7 +8083,7 @@ function App() {
                   {isAnalysisMode && analysisGameProgress && (
                     <div className="game-analysis-progress-inline" aria-live="polite">
                       <div className="game-analysis-progress-label">
-                        <span>{analysisGameProgress.moveText} · {analysisGameProgress.phase === 'refine' ? 'Checking critical position' : analysisGameProgress.phase === 'alternatives' ? 'Checking human alternatives' : analysisGameProgress.phase === 'profile' ? 'Comparing Maia rating profiles' : analysisGameProgress.phase === 'maia' ? `${MAIA_ENGINE_LABEL} · ${gameAnalysisReport?.maiaElo ?? maiaStrengthElo} Elo` : analysisGameProgress.phase === 'book' ? 'book move' : analysisGameProgress.phase === 'best' ? 'best move' : 'played move'}</span>
+                        <span>{analysisGameProgress.detail ?? `${analysisGameProgress.moveText} · ${analysisGameProgress.phase === 'refine' ? 'Checking critical position' : analysisGameProgress.phase === 'alternatives' ? 'Checking human alternatives' : analysisGameProgress.phase === 'profile' ? `${MAIA_ENGINE_LABEL}: comparing rating profiles` : analysisGameProgress.phase === 'maia' ? `${MAIA_ENGINE_LABEL} · ${gameAnalysisReport?.maiaElo ?? maiaStrengthElo} Elo` : analysisGameProgress.phase === 'book' ? 'Book lookup' : analysisGameProgress.phase === 'best' ? 'Stockfish screening: best move' : 'Stockfish screening: played move'}`}</span>
                         <span>{analysisGameProgress.done}/{analysisGameProgress.total}</span>
                         {analysisGameProgress.liveScoreText && <b>{analysisGameProgress.liveScoreText}</b>}
                       </div>
@@ -8596,6 +8645,7 @@ function App() {
             <div className="eval-manager-summary">
               {`Nodes with evals: ${treeEvalScopeStats.total - treeEvalScopeStats.missing}/${treeEvalScopeStats.total}`}
             </div>
+            {maiaTreeStatus && <div className="maia-load-error" role="alert">Maia: {maiaTreeStatus}</div>}
             <div className="eval-manager-actions">
               <button
                 type="button"
