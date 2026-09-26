@@ -38,10 +38,27 @@ function getSession() {
     ort.env.wasm.numThreads = 1;
     ort.env.wasm.proxy = false;
     ort.env.wasm.wasmPaths = { wasm: ortWasmUrl, mjs: ortMjsUrl };
-    sessionPromise = fetch(MAIA_MODEL_URL)
+    sessionPromise = fetch(`${MAIA_MODEL_URL}.json`)
       .then(async (response) => {
         if (!response.ok) throw new Error('Failed to fetch Maia-3 model');
-        return response.arrayBuffer();
+        const manifest = await response.json() as { size: number; parts: { file: string; size: number }[] };
+        if (!Number.isSafeInteger(manifest.size) || manifest.size <= 0 ||
+            !Array.isArray(manifest.parts) || manifest.parts.length === 0 ||
+            manifest.parts.some((part) => !Number.isSafeInteger(part.size) || part.size <= 0 || !/^maia3-79m\.fp16\.onnx\.part-\d+$/.test(part.file)) ||
+            manifest.parts.reduce((sum, part) => sum + part.size, 0) !== manifest.size) {
+          throw new Error('Invalid Maia-3 model manifest');
+        }
+        const model = new Uint8Array(manifest.size);
+        let offset = 0;
+        for (const part of manifest.parts) {
+          const result = await fetch(`/maia/maia3/${part.file}`);
+          if (!result.ok) throw new Error(`Failed to fetch Maia-3 model part: ${part.file}`);
+          const bytes = new Uint8Array(await result.arrayBuffer());
+          if (bytes.length !== part.size) throw new Error(`Incomplete Maia-3 model part: ${part.file}`);
+          model.set(bytes, offset);
+          offset += bytes.length;
+        }
+        return model;
       })
       .then((buffer) => ort.InferenceSession.create(buffer, {
         executionProviders: ['wasm'],

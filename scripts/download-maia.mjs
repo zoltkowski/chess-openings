@@ -7,9 +7,19 @@ const assets = [
 ];
 const outDir = resolve(process.cwd(), 'public', 'maia', 'maia3');
 await mkdir(outDir, { recursive: true });
+const modelFile = assets[0][0];
+const cacheDir = resolve(process.cwd(), 'node_modules', '.cache', 'maia3');
+await mkdir(cacheDir, { recursive: true });
+// Keep the full model outside public: Pages limits each deployed file to 25 MiB.
+const assetPath = (file) => resolve(file.endsWith('.onnx') ? cacheDir : outDir, file);
+try {
+  await rename(resolve(outDir, modelFile), assetPath(modelFile));
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
 
 async function isReady(file) {
-  const target = resolve(outDir, file);
+  const target = assetPath(file);
   try {
     if (file.endsWith('.json')) return Object.keys(JSON.parse(await readFile(target, 'utf8'))).length === 4352;
     return (await stat(target)).size > 100_000_000;
@@ -19,7 +29,7 @@ async function isReady(file) {
 }
 
 for (const [file, url] of assets) {
-  const target = resolve(outDir, file);
+  const target = assetPath(file);
   if (await isReady(file)) {
     console.log(`Already prepared ${file}`);
     continue;
@@ -46,3 +56,15 @@ for (const [file, url] of assets) {
     throw error;
   }
 }
+
+const model = await readFile(assetPath(modelFile));
+const chunkSize = 20 * 1024 * 1024;
+const parts = [];
+for (let offset = 0; offset < model.length; offset += chunkSize) {
+  const file = `${modelFile}.part-${parts.length}`;
+  const chunk = model.subarray(offset, offset + chunkSize);
+  await writeFile(resolve(outDir, file), chunk);
+  parts.push({ file, size: chunk.length });
+}
+await writeFile(resolve(outDir, `${modelFile}.json`), JSON.stringify({ size: model.length, parts }));
+console.log(`Prepared Maia model as ${parts.length} parts (at most 20 MiB each)`);

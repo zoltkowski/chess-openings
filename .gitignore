@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 public/maia/maia3/*.onnx
+public/maia/maia3/*.onnx.part-*
+public/maia/maia3/*.onnx.json
 output/playwright/
 .playwright-cli/
 *.local
