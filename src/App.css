@@ -2242,6 +2242,10 @@ select {
     display: block;
   }
 
+  .analysis-mode .move-list.portrait-pane:not(.active) {
+    display: none;
+  }
+
   .analysis-mode .move-list.portrait-pane.active {
     display: flex;
     flex-direction: column;

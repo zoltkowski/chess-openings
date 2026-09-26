@@ -7379,8 +7379,6 @@ function App() {
                               </div>
                             </div>
                           ))}
-                          {engineLines.length === 0 && engineStatus === 'analyzing' && <MaiaStatusView status={maiaLoadingStatus} />}
-                          {engineLines.length === 0 && maiaError && <div className="maia-load-error" role="alert">Maia: {maiaError}</div>}
                         </div>
                       )}
                       {selectedEngine === 'maia' && (
@@ -7404,6 +7402,8 @@ function App() {
                               </div>
                             </div>
                           ))}
+                          {engineLines.length === 0 && engineStatus === 'analyzing' && <MaiaStatusView status={maiaLoadingStatus} />}
+                          {engineLines.length === 0 && maiaError && <div className="maia-load-error" role="alert">Maia: {maiaError}</div>}
                         </div>
                       )}
                       {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
@@ -7743,8 +7743,6 @@ function App() {
                         </div>
                       </div>
                     ))}
-                    {engineLines.length === 0 && engineStatus === 'analyzing' && <MaiaStatusView status={maiaLoadingStatus} />}
-                    {engineLines.length === 0 && maiaError && <div className="maia-load-error" role="alert">Maia: {maiaError}</div>}
                   </div>
                 )}
                 {selectedEngine === 'maia' && (
@@ -7768,6 +7766,8 @@ function App() {
                         </div>
                       </div>
                     ))}
+                    {engineLines.length === 0 && engineStatus === 'analyzing' && <MaiaStatusView status={maiaLoadingStatus} />}
+                    {engineLines.length === 0 && maiaError && <div className="maia-load-error" role="alert">Maia: {maiaError}</div>}
                   </div>
                 )}
                 {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
