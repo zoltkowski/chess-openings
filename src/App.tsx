@@ -4522,7 +4522,6 @@ function App() {
         fen: chess.fen(),
         lastMove: [move.from as Key, move.to as Key],
       });
-      setEngineRunning(false);
       return;
     }
 
@@ -4572,7 +4571,6 @@ function App() {
       setGameAnalysisReport(null);
       void idbSet(APP_GAME_ANALYSIS_REPORT_KEY, null).catch(() => setStatus('Game analysis save failed'));
       setShowAnalysisReport(false);
-      setEngineRunning(false);
       return;
     }
 
