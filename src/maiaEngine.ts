@@ -107,7 +107,11 @@ export function evaluateMaiaPosition(
   const initializationTimeoutMs = options.initializationTimeoutMs ?? timeoutMs;
   const id = nextRequestId++;
   return new Promise((resolve, reject) => {
-    reportStatus({ phase: 'loading', detail: { phase: 'downloading', loadedBytes: 0, totalBytes: 0 } });
+    if (!ready) {
+      reportStatus({ phase: 'loading', detail: { phase: 'downloading', loadedBytes: 0, totalBytes: 0 } });
+    } else {
+      reportStatus({ phase: 'evaluating' });
+    }
     const timeout = setTimeout(() => {
       if (!pending.has(id)) return;
       stopWorker(new Error(`Maia loading or queue wait timed out after ${initializationTimeoutMs} ms`));

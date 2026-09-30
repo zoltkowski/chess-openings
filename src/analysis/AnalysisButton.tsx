@@ -6,6 +6,7 @@ import './AnalysisButton.css';
 type Props = {
   onQuick: () => void;
   onDeep: () => void;
+  onReport?: () => void;
   benchmark: number;
   onBenchmarkChange: (value: number) => void;
   context?: AnalysisContext;
@@ -13,10 +14,11 @@ type Props = {
   running: boolean;
   disabled?: boolean;
   className?: string;
+  dark?: boolean;
   children: ReactNode;
 };
 
-export function AnalysisButton({ onQuick, onDeep, benchmark, onBenchmarkChange, context, onContextChange, running, disabled, className, children }: Props) {
+export function AnalysisButton({ onQuick, onDeep, onReport, benchmark, onBenchmarkChange, context, onContextChange, running, disabled, className, dark = false, children }: Props) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -87,16 +89,16 @@ export function AnalysisButton({ onQuick, onDeep, benchmark, onBenchmarkChange, 
   }, [open]);
 
   const choose = (action: () => void) => { longPressRef.current = false; suppressClickRef.current = false; setOpen(false); action(); requestAnimationFrame(() => triggerRef.current?.focus()); };
-  const triggerClassName = ['analysis-button-trigger', className].filter(Boolean).join(' ');
-  const isDark = triggerRef.current?.closest('.app')?.classList.contains('theme-dark') ?? false;
+  const triggerClassName = ['analysis-button-trigger', 'has-submenu-dot', className].filter(Boolean).join(' ');
+  const triggerLabel = running ? 'Stop analysis' : onReport ? 'Open game analysis report; hold for options' : 'Analysis options';
   return <>
-    <button ref={triggerRef} type="button" className={triggerClassName} title={running ? 'Stop analysis' : 'Quick analysis; hold for options'} aria-label={running ? 'Stop analysis' : 'Quick analysis; hold for options'} aria-haspopup="dialog" disabled={disabled} onPointerDown={startPress} onPointerMove={movePress} onPointerUp={finishPress} onPointerCancel={cancelPress} onPointerLeave={cancelPress} onContextMenu={(event) => { event.preventDefault(); if (!running && !disabled) { longPressRef.current = true; suppressClickRef.current = true; setOpen(true); } }} onKeyDown={handleKeyDown} onClick={(event) => { if (longPressRef.current || suppressClickRef.current) { longPressRef.current = false; suppressClickRef.current = false; event.preventDefault(); return; } onQuick(); }}>{children}</button>
-    {open && createPortal(<div className={`modal-backdrop analysis-button-backdrop${isDark ? ' analysis-button-dark' : ''}`} onClick={close}>
+    <button ref={triggerRef} type="button" className={triggerClassName} title={triggerLabel} aria-label={triggerLabel} aria-haspopup="dialog" disabled={disabled} onPointerDown={startPress} onPointerMove={movePress} onPointerUp={finishPress} onPointerCancel={cancelPress} onPointerLeave={cancelPress} onContextMenu={(event) => { event.preventDefault(); if (!running && !disabled) { longPressRef.current = true; suppressClickRef.current = true; setOpen(true); } }} onKeyDown={handleKeyDown} onClick={(event) => { if (longPressRef.current || suppressClickRef.current) { longPressRef.current = false; suppressClickRef.current = false; event.preventDefault(); return; } if (running) onQuick(); else if (onReport) onReport(); else setOpen(true); }}>{children}</button>
+    {open && createPortal(<div className={`modal-backdrop analysis-button-backdrop${dark ? ' analysis-button-dark' : ''}`} onClick={close}>
       <section className="modal-card analysis-button-dialog" role="dialog" aria-modal="true" aria-labelledby="analysis-button-title" onClick={(event) => event.stopPropagation()}>
         <header className="analysis-button-header"><h2 id="analysis-button-title">Analyze game</h2><button ref={closeRef} type="button" className="analysis-button-close" aria-label="Close" onClick={close}>×</button></header>
         <div className="analysis-button-benchmark"><label htmlFor="analysis-benchmark">Maia benchmark <output>{benchmark}</output></label><input id="analysis-benchmark" type="range" min="1100" max="3000" step="100" value={benchmark} onChange={(event) => onBenchmarkChange(Number(event.currentTarget.value))} /><p>Reference strength used to compare human choices; not estimated Elo</p></div>
         {context && onContextChange && <AnalysisContextEditor value={context} onChange={onContextChange} />}
-        <div className="analysis-button-actions"><button type="button" onClick={() => choose(onQuick)}>Quick<span>Faster review of key decisions</span></button><button type="button" onClick={() => choose(onDeep)}>More detail<span>Deeper review with Maia comparisons</span></button></div>
+        <div className="analysis-button-actions"><button type="button" onClick={() => choose(onQuick)}>Quick<span>Faster review of key decisions</span></button><button type="button" onClick={() => choose(onDeep)}>More detail<span>Most non-obvious decisions · wider Elo profiles · verified human alternatives</span></button></div>
       </section>
     </div>, document.body)}
   </>;

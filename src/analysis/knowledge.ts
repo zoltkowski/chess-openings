@@ -160,7 +160,7 @@ export async function lookupOpening(
     };
     remember(key, result);
     return result;
-  } catch (error) {
+  } catch {
     if (signal?.aborted) throw abortError();
     remember(key, null);
     return null;

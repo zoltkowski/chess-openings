@@ -2,12 +2,14 @@ import { Chess } from 'chess.js';
 import { expectedScore, moveLoss, obviousDecision, isMateScore } from './reportModel';
 
 export const ANALYSIS_CONFIG = {
-  minDecisionWeightForMaia: 0.35, maxCandidateMoves: 12, maxLevelsPerMove: 4,
-  maxTotalPositionEvaluations: 32, maiaSentinelDelta: 400, maiaRefinementStep: 200,
+  minDecisionWeightForMaia: 0.35, maxLevelsPerMove: 7,
+  maxTotalPositionEvaluations: 1200, maiaSentinelDelta: 600, maiaRefinementStep: 200,
   minAbsoluteProbabilityDelta: 0.1, minProbabilityRatio: 1.8,
   goodLoss: 2, meaningfulLoss: 5, onlyMoveGap: 12, winningThreshold: 90,
-  quickScreenMs: 180, deepScreenMs: 400, quickRefineMs: 600, deepRefineMs: 1400,
-  maxDeepPositions: 12, maxAlternativeQueries: 24, maxOpeningQueries: 8, maxTablebaseQueries: 4,
+  quickScreenMs: 180, deepScreenMs: 600, quickRefineMs: 600, deepRefineMs: 1800,
+  maxDeepPositions: 60, deepMultiPv: 8, deepAlternativeMs: 800,
+  maxAlternativeQueries: 240, maxAlternativesPerMove: 8, targetPolicyCoverage: 0.9,
+  deepMaiaBudgetMs: 600_000, maxOpeningQueries: 8, maxTablebaseQueries: 4,
 };
 export type CandidateEvaluation = { uci: string; scoreText: string; evalCp: number; wdl?: [number, number, number] | null; depth: number; pv?: string };
 export type DecisionMetrics = {
@@ -19,9 +21,8 @@ export type DecisionMetrics = {
 const clamp = (n: number) => Math.max(0, Math.min(1, n));
 export function profileLevels(anchor: number) {
   if (anchor < 1100 || anchor > 3000 || !Number.isFinite(anchor)) return [];
-  if (anchor === 1100) return [1100, 1300, 1500];
-  if (anchor === 3000) return [2600, 2800, 3000];
-  return [Math.max(1100, anchor - ANALYSIS_CONFIG.maiaSentinelDelta), anchor, Math.min(3000, anchor + ANALYSIS_CONFIG.maiaSentinelDelta)];
+  return [...new Set([-600, -400, -200, 0, 200, 400, 600]
+    .map(delta => Math.max(1100, Math.min(3000, anchor + delta))))].sort((a, b) => a - b);
 }
 export function candidateLoss(best: CandidateEvaluation, played: CandidateEvaluation) {
   return moveLoss(best.scoreText, best.evalCp, played.scoreText, played.evalCp, best.wdl, played.wdl);

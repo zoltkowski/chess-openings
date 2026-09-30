@@ -1,6 +1,6 @@
 /** Experimental, uncalibrated performance signal from Maia rating profiles. */
 
-export type MaiaRatingSample = { rating: number; probability: number };
+export type MaiaRatingSample = { rating: number; probability: number; goodMassLower?: number; goodMassUpper?: number };
 export type PerformanceDirection = 'upward' | 'downward' | 'invariant' | 'non-monotonic' | 'insufficient';
 export type RatingSignal = {
   direction: PerformanceDirection;
@@ -33,7 +33,7 @@ export function classifyRatingSignal(samples: MaiaRatingSample[], anchor: number
   const hasAnchorSample = distinctPoints.some(p => p.rating === anchor);
   const oneSided = anchor === 1100 || anchor === 3000;
   if ((oneSided && (!hasAnchorSample || (anchor === 1100 ? below !== 0 || above < 2 : above !== 0 || below < 2))) ||
-    (!oneSided && (!below || !above))) return {
+    (!oneSided && (!hasAnchorSample || !below || !above))) return {
     direction: 'insufficient', strength: 0, confidence: 0, decisionWeight: 0, significant: false, logOddsDelta: 0,
   };
   const relevant = distinctPoints;
@@ -43,8 +43,10 @@ export function classifyRatingSignal(samples: MaiaRatingSample[], anchor: number
   const diffs = logits.slice(1).map((v, i) => v - logits[i]);
   const monotoneUp = diffs.every(d => d >= -0.12);
   const monotoneDown = diffs.every(d => d <= 0.12);
-  const isInvariant = Math.abs(points.at(-1)!.p - points[0].p) < 0.10 && Math.abs(delta) < 0.35;
-  const significant = Math.abs(delta) >= 0.35 && Math.abs(probDelta) >= 0.10;
+  const probabilityRange = Math.max(...relevant.map(p => p.p)) - Math.min(...relevant.map(p => p.p));
+  const isInvariant = probabilityRange < 0.04 && Math.max(...logits) - Math.min(...logits) < 0.35;
+  const significant = Math.abs(delta) >= 0.5 && (Math.abs(probDelta) >= 0.06 ||
+    Math.abs(probDelta) >= 0.025 && Math.max(relevant[0].p, relevant.at(-1)!.p) >= 0.03);
   let direction: PerformanceDirection;
   if (isInvariant) direction = 'invariant';
   else if (monotoneUp && significant) direction = 'upward';
@@ -79,62 +81,52 @@ export type PerformanceDecision = {
   goodMoveCount?: number;
   candidateCount?: number;
   legalMoveCount?: number;
+  stableWin?: boolean;
   winChanceLoss?: number | null;
   drawChanceLoss?: number | null;
   lossChanceIncrease?: number | null;
 };
-export type PerformanceEstimate = {
-  side: 'white' | 'black';
-  anchor: number;
-  rating: number | null;
-  interval: [number, number] | null;
-  confidence: number;
-  informativeDecisions: number;
-  signals: RatingSignal[];
-  experimental: true;
-  reason?: string;
-};
-
-/** Aggregate decision evidence around a known player Elo or explicit benchmark. */
-export function analyzePerformance(results: PerformanceDecision[], side: 'white' | 'black', anchor: number): PerformanceEstimate {
-  const eligible = results.filter(r => (r.mover ?? r.side) === side && r.informative !== false &&
-    r.status === 'complete' && r.maiaStatus === 'complete' && !r.forced && !r.book && !r.obvious &&
-    Number.isFinite(r.decisionWeight) && Number.isFinite(r.significanceScore));
-  const signals: RatingSignal[] = [];
-  for (const row of eligible) {
-    const samples = row.profileProbabilities ?? row.samples ?? [];
+/** Relative fit to tested Maia levels, without a rating prior or a fabricated confidence interval. */
+export function compareMaiaLevels(results: PerformanceDecision[], side: 'white' | 'black', anchor: number) {
+  const counts = { upward: 0, downward: 0, invariant: 0, style: 0 };
+  const evidence: { samples: MaiaRatingSample[]; weight: number }[] = [];
+  for (const row of results) {
+    if ((row.mover ?? row.side) !== side || row.status !== 'complete' || row.maiaStatus !== 'complete' ||
+        row.obvious || row.forced || row.book || row.stableWin) continue;
+    const samples = (row.profileProbabilities ?? row.samples ?? [])
+      .filter(s => Number.isFinite(s.rating) && Number.isFinite(s.probability))
+      .map(s => ({ ...s, probability: clamp(s.probability, 0, 1) }));
     const signal = classifyRatingSignal(samples, anchor);
     const loss = row.lossPoints ?? row.decisionLoss;
-    // Missing quality is not evidence. Downward evidence also requires an actual objective miss.
-    if (loss === null || loss === undefined || !Number.isFinite(loss) ||
-      (signal.direction === 'upward' && loss >= 5)) {
-      signals.push({ ...signal, direction: 'invariant', decisionWeight: 0, significant: false });
-    } else {
-      const decisionWeight = clamp(row.decisionWeight!, 0, 1);
-      const significance = clamp(row.significanceScore!, 0, 1);
-      signals.push({ ...signal, decisionWeight: signal.decisionWeight * decisionWeight * significance });
-    }
+    if (loss === null || loss === undefined || !Number.isFinite(loss)) continue;
+    const aligned = signal.direction === 'upward' && loss < 2 || signal.direction === 'downward' && loss >= 5;
+    if (aligned) {
+      counts[signal.direction === 'upward' ? 'upward' : 'downward']++;
+    } else if (signal.direction === 'invariant') counts.invariant++;
+    else if (signal.direction !== 'insufficient') counts.style++;
+    // Fit all usable choices, including mistakes and style patterns. Selecting only
+    // quality-aligned monotone signals would systematically favor the grid edges.
+    const weight = clamp(row.decisionWeight ?? 0, 0, 1) * clamp(row.significanceScore ?? 0, 0, 1);
+    if (signal.direction !== 'insufficient' && Number.isFinite(weight) && weight > 0)
+      evidence.push({ samples, weight });
   }
-  const usable = signals.filter(s => s.significant && s.decisionWeight > 0 &&
-    (s.direction === 'upward' || s.direction === 'downward'));
-  const evidenceMass = usable.reduce((sum, s) => sum + s.decisionWeight * s.confidence, 0);
-  if (usable.length < 3 || evidenceMass <= 0) return {
-    side, anchor, rating: null, interval: null, confidence: 0, informativeDecisions: usable.length,
-    signals, experimental: true, reason: 'Insufficient weighted evidence: at least three informative decisions with meaningful combined weight are required; this heuristic is not calibrated.',
+  const levels = evidence.length ? evidence[0].samples.map(s => s.rating)
+    .filter((rating, index, all) => all.indexOf(rating) === index && evidence.every(e => e.samples.some(s => s.rating === rating)))
+    .sort((a, b) => a - b) : [];
+  const totalWeight = evidence.reduce((sum, e) => sum + e.weight, 0);
+  const logFits = levels.map(rating => ({ rating, value: evidence.reduce((sum, e) => {
+    const p = e.samples.find(s => s.rating === rating)!.probability;
+    return sum + e.weight * Math.log(Math.max(0.0001, p));
+  }, 0) / Math.max(0.0001, totalWeight) }));
+  const best = [...logFits].sort((a, b) => b.value - a.value)[0];
+  const spread = best ? best.value - Math.min(...logFits.map(s => s.value)) : 0;
+  const enough = evidence.length >= 8 && counts.upward + counts.downward >= 3 && totalWeight >= 1 && levels.length >= 3 && spread >= 0.15;
+  return {
+    rating: enough ? best.rating : null,
+    levels: logFits.map(point => ({ rating: point.rating, fit: Math.exp(point.value - best!.value) })),
+    count: evidence.length, signalCounts: counts,
+    atBoundary: enough && (best.rating === levels[0] || best.rating === levels.at(-1)),
+    reason: enough ? 'Closest tested Maia choice profile across assessed decisions, including mistakes and style patterns. This is not a calibrated Elo estimate.'
+      : 'Too few profiled decisions, quality-supported signals or too little separation between tested levels for a strength estimate.',
   };
-
-  const net = usable.reduce((sum, s) => sum + (s.direction === 'upward' ? 1 : -1) * s.strength * s.decisionWeight * s.confidence, 0) /
-    usable.reduce((sum, s) => sum + s.decisionWeight * s.confidence, 0);
-  // Saturate the heuristic adjustment and keep it bounded to ±500 points.
-  const shift = 500 * Math.tanh(net / 0.55);
-  const rating = Math.round((anchor + shift) / 50) * 50;
-  const meanConfidence = usable.reduce((sum, s) => sum + s.confidence, 0) / usable.length;
-  const meanWeight = evidenceMass / usable.reduce((sum, s) => sum + s.confidence, 0);
-  const confidence = clamp(meanConfidence * Math.min(1, evidenceMass / 5) * meanWeight, 0.05, 0.75);
-  // Deliberately broad, especially at the minimum sample count; not a calibrated CI.
-  const weightPenalty = 1 / Math.sqrt(Math.max(0.15, meanWeight));
-  const halfWidth = Math.round(clamp(500 * (1 - confidence) * weightPenalty / Math.sqrt(Math.min(usable.length, 8) / 3), 180, 500));
-  return { side, anchor, rating, interval: [rating - halfWidth, rating + halfWidth], confidence,
-    informativeDecisions: usable.length, signals, experimental: true,
-    reason: 'Experimental Maia heuristic; interval is a broad uncertainty range, not a calibrated confidence interval.' };
 }

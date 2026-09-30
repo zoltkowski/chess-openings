@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { buildReport, type ReportMove } from './reportModel';
+import { MaiaProfileChart } from './MaiaProfileChart';
 import './GameReport.css';
 
 type Props = {
@@ -13,11 +14,9 @@ const clampScore = (value: number) => Math.tanh(value / 40);
 
 export function GameReport({ results, positions, onSelect, mode }: Props) {
   const report = useMemo(() => buildReport(results, positions), [results, positions]);
-  const [selectedNodeId, setSelectedNodeId] = useState(report.points[0]?.nodeId ?? '');
-  useEffect(() => {
-    if (!report.points.some((point) => point.nodeId === selectedNodeId))
-      setSelectedNodeId(report.points[0]?.nodeId ?? '');
-  }, [report.points, selectedNodeId]);
+  const [requestedNodeId, setSelectedNodeId] = useState('');
+  const selectedNodeId = report.points.some(point => point.nodeId === requestedNodeId)
+    ? requestedNodeId : report.points[0]?.nodeId ?? '';
   const plotted = report.points.map((point, index) => ({
     ...point,
     x: report.points.length <= 1 ? 50 : 36 + (index / (report.points.length - 1)) * 928,
@@ -51,14 +50,16 @@ export function GameReport({ results, positions, onSelect, mode }: Props) {
       <section className="gr-player-grid" aria-label="Player performance">
         {report.players.map((player) => (
           <article className={`gr-player-card ${player.side}`} key={player.side}>
-            <div className="gr-player-top"><span>{player.side === 'white' ? 'WHITE' : 'BLACK'}</span><span className="gr-profile-rating">{mode === 'quick' ? `Maia ${player.profile.anchorSource === 'pgn' ? 'player rating' : 'benchmark'} · ${player.profile.anchor}` : player.profile.rating === null ? 'Profile unavailable' : `Experimental performance · ≈${player.profile.rating}`}</span></div>
+            <div className="gr-player-top"><span>{player.side === 'white' ? 'WHITE' : 'BLACK'}</span><span className="gr-profile-rating">Maia reference · {player.profile.anchor}</span></div>
+            <div className="gr-rating-main">{player.qualityScore === null ? '—' : player.qualityScore.toFixed(0)}<small>/100 decision quality · Stockfish index</small></div>
             {mode === 'quick' ? <>
               <div className="gr-rating-main">{player.sound}/{player.count}<small> sound decisions · Stockfish</small></div>
               <p className="gr-profile-reason">Anchor: {player.profile.anchorSource === 'pgn' ? 'raw PGN player rating' : 'chosen benchmark'} ({player.profile.anchor}). Maia model queries use levels 1100–3000{player.profile.anchor < 1100 || player.profile.anchor > 3000 ? `; this anchor is outside that range, so the model uses ${Math.max(1100, Math.min(3000, player.profile.anchor))} and no performance estimate is available` : ''}. {player.maiaCount} selected decisions; this is not an estimated player rating.</p>
             </> : <>
-              <div className="gr-rating-main">{player.profile.rating === null ? 'Not enough evidence' : `≈${player.profile.rating}`}<small> experimental game performance · anchor {player.profile.anchor} · range {player.profile.interval}</small></div>
-              <p className="gr-profile-reason">{player.profile.reason} · {player.profile.count} informative decisions. {player.profile.anchorSource === 'pgn' ? `Raw PGN anchor: ${player.profile.anchor}${player.profile.ratingSystem ? ` · ${player.profile.ratingSystem}` : ''}${player.profile.ratingPool ? ` · ${player.profile.ratingPool}` : ''}` : player.profile.anchorSource === 'manual' ? `Manual rating anchor: ${player.profile.anchor}${player.profile.ratingSystem ? ` · ${player.profile.ratingSystem}` : ''}${player.profile.ratingPool ? ` · ${player.profile.ratingPool}` : ''}` : `Benchmark anchor: ${player.profile.anchor}`}</p>
-              {player.profile.signalCounts && <p className="gr-profile-reason">Maia signals: ↑ {player.profile.signalCounts.upward} · ↓ {player.profile.signalCounts.downward} · invariant {player.profile.signalCounts.invariant}</p>}
+              <div className="gr-model-match">{player.profile.rating === null ? 'Strength profile: not enough evidence' : `Closest Maia level: ${player.profile.rating}${player.profile.atBoundary ? ' · edge of tested range' : ''}`}</div>
+              <MaiaProfileChart levels={player.profile.levels} anchor={player.profile.anchor} />
+              <p className="gr-profile-reason">{player.profile.reason} {player.profile.count} profiled decisions. Reference: {player.profile.anchor} ({player.profile.anchorSource === 'pgn' ? 'PGN rating' : player.profile.anchorSource === 'manual' ? 'chosen player rating' : 'benchmark'}).</p>
+              <p className="gr-profile-reason">{player.profile.signalCounts.upward} accurate choices associated with higher levels · {player.profile.signalCounts.downward} errors associated with lower levels. {player.profile.signalCounts.style} other choice patterns; these alone do not establish strength.</p>
             </>}
             <div className="gr-impact">{player.averageLoss === null ? '—' : player.averageLoss.toFixed(1)}<small> average impact</small></div>
             <div className="gr-stats">
@@ -66,8 +67,15 @@ export function GameReport({ results, positions, onSelect, mode }: Props) {
               <span><b>{player.missed}</b> missed chances</span>
               <span><b>{player.held}</b> strong defenses</span>
               <span><b>{player.count}</b> moves assessed</span>
-              {mode !== 'quick' && <span><b>{player.profile.count}</b> Maia profile samples</span>}
+              {mode !== 'quick' && <span><b>{player.profileCount}</b> decisions compared across Elo</span>}
               <span><b>{player.sound}/{player.count}</b> sound decisions</span>
+              <span><b>{player.maiaCount}/{player.maiaEligible || player.maiaCount}</b> Maia coverage</span>
+            </div>
+            <div className="gr-opponent-context">
+              <b>What the opponent gave you</b>
+              <p>{player.opportunities.available} opportunities after opponent errors: {player.opportunities.taken} exploited, {player.opportunities.missed} substantially missed.</p>
+              <p>{player.pressure.faced} demanding replies faced; {player.pressure.held} handled accurately. Maia predicts at most 30% sound-response mass for these positions, including unassessed alternatives.</p>
+              <p>You offered {player.opportunities.offered} opportunities; the opponent missed {player.opportunities.escaped} of them.</p>
             </div>
             {[...player.strengths, ...player.weaknesses].map(insight => <button type="button" className="gr-insight" key={insight.text} onClick={() => onSelect(insight.nodeId)}>{insight.text} ↗</button>)}
           </article>
@@ -122,8 +130,10 @@ export function GameReport({ results, positions, onSelect, mode }: Props) {
         {report.tablebase && <p><b>Tablebase</b> · {report.tablebase.category === 'cursed-win' ? 'the position is a win except for the 50-move rule; practical result is a draw' : report.tablebase.category === 'blessed-loss' ? 'the position is a loss except that the 50-move rule permits a draw' : report.tablebase.category} <button type="button" onClick={() => onSelect(report.tablebase!.nodeId)}>Open position ↗</button></p>}
       </section>}
       <details className="gr-method"><summary>How to read this report</summary>
-        <p>Impact uses the difference in Stockfish expected score (WDL, percentage points) when available; otherwise it uses the bounded cp-based comparison index. It is not calibrated against game outcomes. Sound decisions lose fewer than 5 impact points; serious errors lose at least 10. Uncertain, unavailable and repertoire moves are excluded from quality averages.</p>
-        <p>Phases are estimated from material and development, not fixed move numbers. Maia profile samples compare three ratings (the benchmark and nearby sentinels), excluding obvious and already decided positions. Any performance estimate is experimental and uncalibrated; it describes this game’s choices, not an official rating. Phase scores describe decision quality, not phase Elo. Missing data is never counted as a good move.</p>
+        <p>Impact uses the difference in Stockfish expected score (WDL, percentage points) when available; otherwise it uses the bounded cp-based comparison index. It is not calibrated against game outcomes. Sound decisions lose fewer than 5 impact points; serious errors lose at least 10. Uncertain and unavailable evaluations are excluded from quality averages. Quick review also skips repertoire moves; detailed review checks them.</p>
+        <p>Decision quality is our own 0–100 index: the importance-weighted mean of max(0, 1 − impact/35), excluding obvious and already decided positions. It is not Lichess accuracy or Elo. Phases are estimated from material and development.</p>
+        <p>Detailed review compares up to seven Maia levels over ±600 points with the opponent’s rating fixed. The closest level uses weighted move likelihoods on all usable profiles, including mistakes and style patterns, without a rating prior. It requires at least eight profiled decisions, three quality-supported signals and separation between levels. Style alone does not establish strength. This is an experimental model resemblance, not a calibrated Elo estimate; no confidence interval is claimed. Budget limits and missing samples reduce coverage.</p>
+        <p>An opportunity is linked to the immediately preceding opponent error. Accurate replies exploit it; losses of at least half the benefit (and five impact points) count as substantially missed. These events are not added a second time to quality loss. Demanding replies require a conservative Maia upper bound of 30% for sound responses.</p>
       </details>
     </div>
   );

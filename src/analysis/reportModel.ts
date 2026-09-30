@@ -1,17 +1,19 @@
 import { Chess } from 'chess.js';
-import { analyzePerformance } from './performanceModel';
+import { compareMaiaLevels } from './performanceModel';
+import { linkOpportunities, type HumanReviewDetails } from './humanEvidence';
 
-export type ReportMove = {
+export type ReportMove = HumanReviewDetails & {
   nodeId: string; moveNumber: number; moveSan: string; mover: 'white' | 'black';
   bestScoreCp: number | null; playedScoreCp: number | null;
   bestScoreText: string | null; playedScoreText: string | null;
+  bestPv?: string;
   bestWdl?: [number, number, number] | null; playedWdl?: [number, number, number] | null;
   lossPoints: number | null; status: string; category: string;
   terminalOutcome: 'checkmate' | 'draw' | null;
-  profileProbabilities?: { rating: number; probability: number }[];
   profileOpponentElo?: number;
   goodMassUpper?: number; goodMassLower?: number;
   obvious?: boolean; greatFind?: boolean;
+  stableWin?: boolean;
   attackEvidence?: string;
   checkedOpponent?: boolean;
   answeredCheck?: boolean;
@@ -106,31 +108,44 @@ function phaseOf(fen?: string) {
 }
 
 const average = (values: number[]) => values.length ? values.reduce((a,b) => a+b, 0) / values.length : null;
+const meaningfulDecision = (r: ReportMove) => r.status === 'complete' && r.lossPoints !== null &&
+  Number.isFinite(r.lossPoints) && !r.obvious && !r.stableWin;
+function decisionQuality(rows: ReportMove[]) {
+  const weighted = rows.filter(meaningfulDecision).map(r => ({
+    loss: r.lossPoints!, weight: Number.isFinite(r.decisionWeight) ? Math.max(0, Math.min(1, r.decisionWeight!)) : 1,
+  }));
+  const totalWeight = weighted.reduce((sum, r) => sum + r.weight, 0);
+  return totalWeight ? 100 * weighted.reduce((sum, r) => sum + r.weight * Math.max(0, 1 - r.loss / 35), 0) / totalWeight : null;
+}
 export const moveLabel = (r: ReportMove) => `${r.moveNumber}${r.mover === 'white' ? '.' : '…'} ${r.moveSan}`;
 const sideName = (s: string) => s === 'white' ? 'White' : 'Black';
+
+function continuation(r: ReportMove) {
+  if (!r.beforeFen || !r.bestPv) return '';
+  try {
+    const chess = new Chess(r.beforeFen), moves: string[] = [];
+    for (const uci of r.bestPv.split(/\s+/).slice(0, 6)) {
+      const move = chess.move(uci);
+      if (!move) break;
+      moves.push(move.san);
+    }
+    return moves.length ? ` Best continuation: ${moves.join(' ')}.` : '';
+  } catch { return ''; }
+}
 
 function profile(rows: ReportMove[], side: 'white' | 'black') {
   const anchor = rows.find(r => r.maiaAnchorElo !== undefined)?.maiaAnchorElo ?? rows.find(r => r.maiaElo !== undefined)?.maiaElo ?? 1800;
   const anchorSource = rows.find(r => r.maiaRatingSource)?.maiaRatingSource ?? 'benchmark';
   const ratingSystem = rows.find(r => r.ratingSystem)?.ratingSystem;
   const ratingPool = rows.find(r => r.ratingPool)?.ratingPool;
-  if (anchor < 1100 || anchor > 3000) return { rating: null, anchor, anchorSource, ratingSystem, ratingPool, signalCounts: { upward: 0, downward: 0, invariant: 0 }, interval: 'unavailable', confidence: 0, count: 0,
+  if (anchor < 1100 || anchor > 3000) return { rating: null, anchor, anchorSource, ratingSystem, ratingPool, signalCounts: { upward: 0, downward: 0, invariant: 0, style: 0 }, levels: [], atBoundary: false, count: 0,
     reason: `The ${anchorSource === 'manual' ? 'manual' : anchorSource === 'pgn' ? 'PGN' : 'benchmark'} rating ${anchor} is outside Maia's supported range (1100–3000); performance cannot be estimated without extrapolation.` };
-  const estimate = analyzePerformance(rows, side, anchor);
-  const interval = estimate.interval ? `${estimate.interval[0]}–${estimate.interval[1]}` : 'unavailable';
-  const signalCounts = estimate.signals.reduce((counts, signal) => {
-    if (signal.significant && signal.decisionWeight > 0) {
-      if (signal.direction === 'upward') counts.upward++;
-      else if (signal.direction === 'downward') counts.downward++;
-      else if (signal.direction === 'invariant') counts.invariant++;
-    }
-    return counts;
-  }, { upward: 0, downward: 0, invariant: 0 });
-  return { rating: estimate.rating, anchor, anchorSource, ratingSystem, ratingPool, interval, confidence: estimate.confidence, count: estimate.informativeDecisions,
-    signalCounts, reason: estimate.reason ?? `Experimental Maia performance around the ${anchor} benchmark.` };
+  return { ...compareMaiaLevels(rows, side, anchor), anchor, anchorSource, ratingSystem, ratingPool };
 }
 
 export function buildReport(results: ReportMove[], positions: Record<string, string>) {
+  results = results.map(result => ({ ...result }));
+  linkOpportunities(results);
   let lastPhase = 0;
   const phaseNames = ['Opening', 'Middlegame', 'Endgame'];
   const points = results.map(r => {
@@ -147,24 +162,41 @@ export function buildReport(results: ReportMove[], positions: Record<string, str
     const outcome = mateSide ? `${sideName(mateSide)} ${r.terminalOutcome === 'checkmate' ? 'delivered checkmate' : 'has a forced mate'}` : undefined;
     return { nodeId: r.nodeId, label: moveLabel(r), value, source: value === null ? 'unavailable' : hasWdl ? 'WDL' : 'cp index', outcome, mateSide, phase: detected === 'Unclassified' ? detected : phaseNames[lastPhase] };
   });
-  const valid = (r: ReportMove) => r.status === 'complete' && r.lossPoints !== null;
+  const valid = (r: ReportMove) => r.status === 'complete' && r.lossPoints !== null && Number.isFinite(r.lossPoints);
   const players = (['white', 'black'] as const).map(side => {
     const rows = results.filter(r => r.mover === side);
     const measured = rows.filter(valid);
     const find = measured.find(r => r.greatFind);
     const steady = measured.filter(r => !r.obvious && r.lossPoints! < 2);
     const worst = [...measured].sort((a,b) => b.lossPoints! - a.lossPoints!)[0];
+    const qualityScore = decisionQuality(rows);
+    const chances = measured.filter(r => r.opportunityAvailable !== undefined);
+    const pressure = measured.flatMap(r => {
+      const index = results.indexOf(r), previous = results[index - 1];
+      return previous?.status === 'complete' && previous.mover !== side && previous.practicalGoodMassUpper !== undefined &&
+        previous.practicalGoodMassUpper <= 0.3 ? [{ nodeId: r.nodeId, sourceNodeId: previous.nodeId, held: r.lossPoints! < 2 }] : [];
+    });
     const strengths = find ? [{ nodeId: find.nodeId, text: `Found a difficult resource at ${moveLabel(find)}. Inspect the alternatives.` }]
       : steady.length >= 3 ? [{ nodeId: steady[0].nodeId, text: `${steady.length} non-forced decisions preserved the engine evaluation (impact below 2).` }] : [];
     const weaknesses = worst && worst.lossPoints! >= 5 ? [{ nodeId: worst.nodeId,
       text: `Revisit ${moveLabel(worst)} first: the largest missed improvement (${worst.lossPoints!.toFixed(1)} impact points).` }] : [];
-    return { side, count: measured.length, averageLoss: average(measured.map(r => r.lossPoints!)),
+    const missed = chances.find(r => r.opportunityMissed);
+    if (missed && missed.nodeId !== worst?.nodeId) weaknesses.push({ nodeId: missed.nodeId, text: `At ${moveLabel(missed)}, the opponent offered a chance but much of the benefit was returned.${continuation(missed)}` });
+    const pressureHeld = pressure.find(r => r.held);
+    if (pressureHeld && strengths.length < 2) strengths.push({ nodeId: pressureHeld.nodeId, text: 'Handled a demanding reply accurately: Maia gives few sound responses even allowing for unassessed alternatives.' });
+    return { side, count: measured.length, averageLoss: average(measured.map(r => r.lossPoints!)), qualityScore,
       strengths, weaknesses,
       sound: measured.filter(r => r.lossPoints! < 5).length,
       maiaCount: rows.filter(r => r.maiaStatus === 'complete').length,
+      maiaEligible: rows.filter(r => r.maiaEligible).length,
+      profileCount: rows.filter(r => (r.profileProbabilities?.length ?? 0) >= 3).length,
+      opportunities: { available: chances.length, taken: chances.filter(r => r.opportunityTaken).length, missed: chances.filter(r => r.opportunityMissed).length,
+        offered: rows.filter(r => r.opponentMissedPunishment !== undefined).length,
+        escaped: rows.filter(r => r.opponentMissedPunishment).length },
+      pressure: { faced: pressure.length, held: pressure.filter(r => r.held).length, positions: pressure },
       benchmark: rows.find(r => r.maiaAnchorElo !== undefined)?.maiaAnchorElo ?? rows.find(r => r.maiaElo !== undefined)?.maiaElo,
       errors: measured.filter(r => r.lossPoints! >= 10).length,
-      missed: measured.filter(r => r.lossPoints! >= 5 && (r.bestScoreCp ?? 0) >= 150).length,
+      missed: chances.filter(r => r.opportunityMissed).length,
       held: measured.filter(r => r.greatFind && (r.bestScoreCp ?? 0) < 50).length,
       profile: profile(rows, side) };
   });
@@ -187,51 +219,53 @@ export function buildReport(results: ReportMove[], positions: Record<string, str
         : 'Attack and defense evidence is unavailable in this older report.';
     const edge = (v: number | null) => v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(0)} expected-score points`;
     const transition = `White’s expected score: ${edge(points[indexes[0]].value)} → ${edge(points[indexes.at(-1)!].value)}`;
-    const phaseQuality = (playerSide: 'white' | 'black') => {
-      const eligible = rows.filter(r => r.mover === playerSide && valid(r) && !r.obvious && !r.openingEvidence &&
-        Number.isFinite(r.decisionWeight) && Number.isFinite(r.significanceScore) &&
-        r.decisionWeight! >= 0.25 && r.significanceScore! >= 0.25);
-      return average(eligible.map(r => Math.max(0, 100 - Math.min(r.lossPoints!, 100))));
-    };
+    const phaseQuality = (playerSide: 'white' | 'black') => decisionQuality(rows.filter(r => r.mover === playerSide));
     const whiteLoss = average(rows.filter(r => r.mover === 'white' && valid(r)).map(r => r.lossPoints!));
     const blackLoss = average(rows.filter(r => r.mover === 'black' && valid(r)).map(r => r.lossPoints!));
-    const decisionQuality = phaseQuality('white');
+    const whiteDecisionQuality = phaseQuality('white');
     const blackDecisionQuality = phaseQuality('black');
-    const reviewed = rows.filter(r => valid(r) && !r.obvious && Number.isFinite(r.decisionWeight) && Number.isFinite(r.significanceScore) && r.decisionWeight! >= 0.25 && r.significanceScore! >= 0.25).length;
+    const reviewed = rows.filter(meaningfulDecision).length;
     const confidence = reviewed >= 8 ? 'Moderate' : reviewed >= 3 ? 'Low' : 'Very low';
     return { name, start: points[indexes[0]].label, end: points[indexes.at(-1)!].label,
       activity, transition,
-      decisionQuality, blackDecisionQuality, confidence, qualityEvidence: reviewed,
+      decisionQuality: whiteDecisionQuality, blackDecisionQuality, confidence, qualityEvidence: reviewed,
       advantage: `${advantage} · ${measured.length}/${rows.length} positions evaluated`,
       whiteLoss,
       blackLoss };
   });
-  type Moment = { nodeId: string; label: string; title: string; description: string; kind: 'mistake' | 'defense' | 'turning' | 'conversion'; priority: number };
+  type Moment = { nodeId: string; label: string; title: string; description: string; kind: 'mistake' | 'defense' | 'turning' | 'conversion'; priority: number; moveOrder: number };
   const candidates: Moment[] = [];
   results.forEach((r, i) => {
     if (!valid(r)) return;
     const who = sideName(r.mover), loss = r.lossPoints!;
     const before = r.bestScoreCp, after = r.playedScoreCp;
     const add = (title: string, description: string, kind: Moment['kind'], priority: number) =>
-      candidates.push({ nodeId: r.nodeId, label: moveLabel(r), title, description, kind, priority });
+      candidates.push({ nodeId: r.nodeId, label: moveLabel(r), title, description, kind, priority, moveOrder: r.moveNumber * 2 + (r.mover === 'black' ? 1 : 0) });
     if (r.terminalOutcome === 'checkmate') add(`${who} delivered checkmate`, 'The final position ends the game. Open it on the board.', 'conversion', 25);
     else if (loss >= 5) {
       const changed = before !== null && after !== null && before >= -50 && after < -150;
       add(changed ? `${who} handed over the advantage` : before !== null && before >= 150 ? `${who} missed an opportunity` : `${who} lost ground`,
-        `${r.bestScoreText ?? '—'} → ${r.playedScoreText ?? '—'} from ${who.toLowerCase()}’s perspective. Impact: ${loss.toFixed(1)} points. Compare the engine continuation on the board.`, 'mistake', loss + (changed ? 10 : 0));
+        `${r.bestScoreText ?? '—'} → ${r.playedScoreText ?? '—'} from ${who.toLowerCase()}’s perspective. Impact: ${loss.toFixed(1)} points.${continuation(r)}`, 'mistake', loss + (changed ? 10 : 0));
     } else if (r.greatFind) {
       add(before !== null && before < 50 ? `${who} found a difficult defense` : `${who} found a difficult move`,
-        r.goodMassUpper !== undefined ? `Opponent good replies (<2 loss): estimated probability ${(r.goodMassLower === undefined ? '—' : (r.goodMassLower * 100).toFixed(0) + '%')}–${(r.goodMassUpper * 100).toFixed(0)}%. This describes refutation accessibility, not practical advantage.` : 'Stockfish checked the alternatives; Maia evidence supports this as an unusually accurate choice.', 'defense', 30);
+        r.goodMassUpper !== undefined ? `Sound choices for ${who.toLowerCase()}: Maia estimate ${(r.goodMassLower === undefined ? '—' : (r.goodMassLower * 100).toFixed(0) + '%')}–${(r.goodMassUpper * 100).toFixed(0)}%, including unassessed alternatives.${continuation(r)}` : 'Stockfish checked the alternatives; Maia evidence supports this as a difficult accurate choice.', 'defense', 30);
     } else if (before !== null && after !== null && before >= 500 && after >= 500 && positions[r.nodeId] && i > 0) {
       const count = (fen: string) => (fen.split(' ')[0].match(/[nbrqNBRQ]/g) ?? []).length;
       if (positions[results[i-1].nodeId] && count(positions[r.nodeId]) < count(positions[results[i-1].nodeId]))
         add(`${who} exchanged material while winning`, `The advantage stayed at ${r.playedScoreText}. This is not penalized merely for reducing a large engine score.`, 'conversion', 8);
     }
     if (r.attackEvidence) add(`${who} created a mating threat`, r.attackEvidence, 'turning', 32);
+    if (r.opportunitySourceNodeId) {
+      const source = results.find(n => n.nodeId === r.opportunitySourceNodeId)!;
+      if (r.opportunityMissed) add(`${who} missed the opponent's gift`, `After ${moveLabel(source)}, a stronger reply could preserve the opportunity. This move returned a substantial part of the benefit.${continuation(r)}`, 'mistake', loss + 22);
+      else if (r.opportunityTaken) add(`${who} exploited an opponent error`, `The chance came from ${moveLabel(source)}. ${who} preserved it with less than two impact points lost.${continuation(r)}`, 'conversion', 20 + Math.min(15, r.opportunityAvailable ?? 0));
+    }
+    if (r.ratingSignal === 'above' && !r.obvious && loss < 2) add(`${who} played above the reference profile`, 'An accurate decision that becomes more likely at higher Maia levels. This is a strength signal, not a claim of brilliance.' + continuation(r), 'turning', 19);
+    if (r.ratingSignal === 'below' && loss >= 5) add(`${who} made a below-reference decision`, 'Maia predicts this objective miss more often at lower levels. Inspect the attainable improvement.' + continuation(r), 'mistake', loss + 14);
     if (r.maiaStatus === 'complete' && r.maiaPlayedProbability !== null && r.maiaPlayedProbability !== undefined) {
       const likelihood = `${(r.maiaPlayedProbability * 100).toFixed(1)}% choice likelihood at the Maia ${r.maiaElo ?? 'selected'} benchmark`;
       if (loss >= 5 && r.maiaPlayedProbability >= 0.15)
-        add(`${who} fell for a natural choice`, `${likelihood}. A plausible human choice, but Stockfish finds a stronger continuation. Compare the lines on the board.`, 'mistake', loss + 12);
+        add(`${who} fell for a natural choice`, `${likelihood}. A plausible human choice, but Stockfish finds a stronger continuation.${continuation(r)}`, 'mistake', loss + 12);
       else if (!r.obvious && loss < 2 && r.maiaPlayedProbability <= 0.1)
         add(`${who} chose an unusual, accurate idea`, `${likelihood}. Stockfish confirms low impact. This alone does not prove the move was difficult or deserving of !.`, 'turning', 18);
     }
@@ -242,6 +276,7 @@ export function buildReport(results: ReportMove[], positions: Record<string, str
     picked.add(m.nodeId); return true;
   }).slice(0,5);
   const headline = moments[0]?.title ?? 'Your game, move by move';
+  moments.sort((a, b) => a.moveOrder - b.moveOrder);
   const openingRow = results.find(r => r.openingEvidence);
   const opening = openingRow?.openingEvidence ? {
     nodeId: openingRow.nodeId,

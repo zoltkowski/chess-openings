@@ -18,7 +18,7 @@ import type { Api as ChessgroundApi } from '@lichess-org/chessground/api';
 import type { Key } from '@lichess-org/chessground/types';
 import type { DrawShape } from '@lichess-org/chessground/draw';
 import type { DrawBrushes } from '@lichess-org/chessground/draw';
-import { evaluateMaiaPosition, cancelMaiaEvaluations, MAIA_ENGINE_LABEL, subscribeMaiaStatus, type MaiaLoadingStatus } from './maiaEngine';
+import { evaluateMaiaPosition, cancelMaiaEvaluations, isMaiaReady, MAIA_ENGINE_LABEL, subscribeMaiaStatus, type MaiaLoadingStatus } from './maiaEngine';
 import { STOCKFISH_ENGINE_LABEL, STOCKFISH_ENGINE_NAME } from './engineVersions';
 import '@lichess-org/chessground/assets/chessground.base.css';
 import '@lichess-org/chessground/assets/chessground.brown.css';
@@ -29,6 +29,10 @@ import { AnalysisButton } from './analysis/AnalysisButton';
 import { runGameReview } from './analysis/gameReview';
 import type { CandidateEvaluation, DecisionMetrics } from './analysis/decisionMetrics';
 import type { AnalysisContext } from './analysis/AnalysisContextEditor';
+import type { HumanReviewDetails } from './analysis/humanEvidence';
+import { HumanMoveDetails } from './analysis/HumanMoveDetails';
+import { MaiaPopularityChart, MaiaPopularityControls } from './MaiaPopularity';
+import { useMaiaPopularity } from './useMaiaPopularity';
 
 type Side = 'white' | 'black';
 type LichessSource = 'lichess' | 'masters' | 'player';
@@ -66,7 +70,7 @@ export type StockfishEvaluationResult = {
   candidates?: CandidateEvaluation[];
 };
 
-export type GameAnalysisMoveResult = Partial<DecisionMetrics> & {
+export type GameAnalysisMoveResult = Partial<DecisionMetrics> & HumanReviewDetails & {
   nodeId: string;
   moveNumber: number;
   moveSan: string;
@@ -99,7 +103,6 @@ export type GameAnalysisMoveResult = Partial<DecisionMetrics> & {
   maiaOpponentElo?: number;
   maiaRatingSource?: 'pgn' | 'manual' | 'benchmark';
   maiaBaselineTag?: 'above' | 'below' | null;
-  profileProbabilities?: { rating: number; probability: number }[];
   profileOpponentElo?: number;
   goodMassLower?: number;
   goodMassUpper?: number;
@@ -968,17 +971,13 @@ function findBookMovesForGame(gamePath: MoveNode[], repertoires: BookRepertoireI
 function AnalysisIcon() {
   return (
     <TabIconBase>
-      <path d="M5 18.5h14M7.5 16V12M12 16V7.5M16.5 16v-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-      <circle cx="7.5" cy="9" r="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <circle cx="16.5" cy="7" r="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    </TabIconBase>
-  );
-}
-
-function ReportIcon() {
-  return (
-    <TabIconBase>
-      <path d="M6 4.5h12v15H6zM9 8h6M9 11.5h6M9 15h3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="10" cy="10" r="7.3" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="m15.5 15.5 5.7 5.7" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+      <g fill="currentColor">
+        <circle cx="10" cy="7" r="1.8" />
+        <path d="M8.8 9.7h2.4c-.25 1.5.15 2.6 1.45 3.8h-5.3c1.3-1.2 1.7-2.3 1.45-3.8Z" />
+        <rect x="6.8" y="14" width="6.4" height="1.3" rx=".65" />
+      </g>
     </TabIconBase>
   );
 }
@@ -1439,6 +1438,34 @@ function exportTreeToPgn(tree: MoveTree, side: Side, repertoireName?: string): s
   return `${headerBlock}\n\n${moveText}`;
 }
 
+function exportGameToPgn(tree: MoveTree, perspective: Side, playerHandle: string): string {
+  const root = tree.nodes[tree.rootId];
+  const chess = fenToChess(root.fen);
+  const headers: Array<[string, string]> = [
+    ['Event', 'Review game'],
+    ['Site', 'Local'],
+  ];
+  const handle = playerHandle.trim();
+  if (handle) headers.push([perspective === 'white' ? 'White' : 'Black', handle]);
+  if (chess.fen() !== START_POS_FEN) {
+    headers.push(['SetUp', '1'], ['FEN', chess.fen()]);
+  }
+  const tokens: string[] = [];
+  for (const node of buildMainLinePath(tree).slice(1)) {
+    const input = node.moveUci ? uciToMoveInput(node.moveUci) : null;
+    if (!input) throw new Error('The game contains an invalid move.');
+    const prefix = formatMovePrefix(chess);
+    const move = chess.move(input);
+    tokens.push(prefix, move.san);
+  }
+  const result = chess.isCheckmate() ? (chess.turn() === 'w' ? '0-1' : '1-0') : chess.isDraw() ? '1/2-1/2' : '*';
+  headers.push(['Result', result]);
+  const headerBlock = headers.map(([key, value]) =>
+    `[${key} "${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]+/g, ' ')}"]`,
+  ).join('\n');
+  return `${headerBlock}\n\n${[...tokens, result].join(' ')}\n`;
+}
+
 function buildDests(fen: string): Map<Key, Key[]> {
   const chess = fenToChess(fen);
   const map = new Map<Key, Key[]>();
@@ -1745,7 +1772,7 @@ function buildEnginePvMoves(fen: string, pv: string) {
 }
 
 function MaiaMoveSummary({ result, positionFen }: { result: GameAnalysisMoveResult; positionFen?: string }) {
-  if (!result.maiaStatus) return null;
+  if (!result.maiaStatus || result.maiaStatus === 'skipped') return null;
   const topMove = result.maiaTopMoveUci && positionFen
     ? uciToFigurineSan(positionFen, result.maiaTopMoveUci)
     : result.maiaTopMoveUci;
@@ -1753,9 +1780,7 @@ function MaiaMoveSummary({ result, positionFen }: { result: GameAnalysisMoveResu
   return (
     <span className="game-analysis-maia-stat">
       <strong>{MAIA_ENGINE_LABEL} · {eloLabel}</strong>
-      {result.maiaStatus === 'skipped'
-        ? <span> Maia skipped this position: {result.maiaUnavailableReason || 'analysis is reserved for selected critical decisions'}.</span>
-        : result.maiaStatus === 'unavailable'
+      {result.maiaStatus === 'unavailable'
         ? <span> Maia statistics are unavailable for this position{result.maiaUnavailableReason ? `: ${result.maiaUnavailableReason}` : '.'}</span>
         : <span>
             {result.maiaPlayedProbability === null || result.maiaPlayedProbability === undefined
@@ -1770,6 +1795,7 @@ function MaiaMoveSummary({ result, positionFen }: { result: GameAnalysisMoveResu
             {result.maiaBaselineTag === 'above' ? ' Difficult find: Stockfish checked the alternatives and Maia predicts few good choices.' : ''}
             {result.maiaBaselineTag === 'below' ? ' Missed an accessible move: Maia strongly favors alternatives that Stockfish confirms are good.' : ''}
           </span>}
+      {result.maiaStatus === 'complete' && <HumanMoveDetails result={result} formatMove={uci => positionFen ? uciToFigurineSan(positionFen, uci) : uci} />}
     </span>
   );
 }
@@ -1969,6 +1995,8 @@ function App() {
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
   const [selectedEngine, setSelectedEngine] = useState<EngineChoice>(initialEngineChoice);
   const [maiaStrengthElo, setMaiaStrengthElo] = useState(initialMaiaStrengthElo);
+  const [showMaiaPopularity, setShowMaiaPopularity] = useState(false);
+  const [maiaResultKey, setMaiaResultKey] = useState('');
   const [analysisBenchmarkElo, setAnalysisBenchmarkElo] = useState(1800);
   const [analysisContext, setAnalysisContext] = useState<AnalysisContext>(() => {
     try { return JSON.parse(localStorage.getItem('analysis-context') ?? '{}'); } catch { return {}; }
@@ -1990,8 +2018,10 @@ function App() {
   const [engineMultiPv, setEngineMultiPv] = useState(3);
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
+  const [stockfishLinesFen, setStockfishLinesFen] = useState(START_POS_FEN);
   const [engineStatus, setEngineStatus] = useState('stopped');
   const [maiaLoadingStatus, setMaiaLoadingStatus] = useState<MaiaLoadingStatus | null>(null);
+  const [maiaLoaded, setMaiaLoaded] = useState(isMaiaReady);
   const [maiaError, setMaiaError] = useState('');
   const [maiaTreeStatus, setMaiaTreeStatus] = useState('');
   const [engineRunning, setEngineRunning] = useState(false);
@@ -2030,12 +2060,16 @@ function App() {
   });
   const [hasHydratedAppState, setHasHydratedAppState] = useState(false);
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
-  const [isAnalysisMode, setIsAnalysisMode] = useState(false);
   const [analysisGameProgress, setAnalysisGameProgress] = useState<GameAnalysisProgress | null>(null);
+  const analysisGameActiveRef = useRef(false);
+  useEffect(() => {
+    analysisGameActiveRef.current = Boolean(analysisGameProgress);
+  }, [analysisGameProgress]);
   const [analysisMaiaNotice, setAnalysisMaiaNotice] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [gameAnalysisReport, setGameAnalysisReport] = useState<GameAnalysisReport | null>(null);
   const [showAnalysisReport, setShowAnalysisReport] = useState(false);
   useEffect(() => subscribeMaiaStatus((status) => {
+    setMaiaLoaded(isMaiaReady());
     if (status.phase === 'loading' && status.detail && typeof status.detail !== 'string') {
       const detail = status.detail;
       setMaiaLoadingStatus(detail);
@@ -2048,20 +2082,21 @@ function App() {
           ? `Maia-3: ${detail.source === 'network' ? 'pobieranie' : 'wczytywanie z pamięci telefonu'} ${percent}%`
           : 'Maia-3: przygotowanie modelu…';
       setAnalysisGameProgress((prev) => prev ? { ...prev, detail: text } : prev);
-      setAnalysisMaiaNotice({ kind: 'info', text });
+      if (analysisGameActiveRef.current) setAnalysisMaiaNotice(null);
     } else if (status.phase === 'evaluating') {
+      setMaiaLoadingStatus(null);
       const text = 'Maia-3 załadowana. Analizowanie wybranych pozycji…';
       setAnalysisGameProgress((prev) => prev ? { ...prev, detail: text } : prev);
-      setAnalysisMaiaNotice({ kind: 'info', text });
+      if (analysisGameActiveRef.current) setAnalysisMaiaNotice(null);
     } else if (status.phase === 'ready') {
-      const text = 'Maia-3 działa poprawnie. Analiza pozycji trwa.';
-      setAnalysisGameProgress((prev) => prev ? { ...prev, detail: text } : prev);
-      setAnalysisMaiaNotice({ kind: 'success', text });
+      setMaiaLoadingStatus(null);
+      // Successful interactive queries do not leave engine notices in the move list.
+      setMaiaError('');
     } else if (status.phase === 'error') {
       const message = typeof status.detail === 'string' ? status.detail : 'Nieznany błąd Maia';
       setMaiaError(message);
       setAnalysisGameProgress((prev) => prev ? { ...prev, detail: `Błąd Maia-3: ${message}` } : prev);
-      setAnalysisMaiaNotice({ kind: 'error', text: `Błąd Maia-3: ${message}` });
+      if (analysisGameActiveRef.current) setAnalysisMaiaNotice({ kind: 'error', text: `Błąd Maia-3: ${message}` });
     }
   }), []);
   const [analysisScratchPosition, setAnalysisScratchPosition] = useState<{ fen: string; lastMove: [Key, Key] | null } | null>(null);
@@ -2079,7 +2114,7 @@ function App() {
   } | null>(null);
   const [renamingRepertoireId, setRenamingRepertoireId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
-  const [importMode, setImportMode] = useState<'current' | 'db'>('current');
+  const [importMode, setImportMode] = useState<'current' | 'db' | 'review'>('current');
   const [portraitTab, setPortraitTab] = useState<'lichess' | 'stockfish' | 'moves'>('moves');
   const [trainingSession, setTrainingSession] = useState<TrainingSession | null>(null);
   const [trainingStatsBySide, setTrainingStatsBySide] = useState<TrainingStatsState>(createEmptyTrainingStatsState());
@@ -2107,10 +2142,10 @@ function App() {
   const tryStartPendingRef = useRef<(() => void) | null>(null);
   const currentAnalysisRef = useRef(0);
   const lineCacheRef = useRef<Map<number, EngineLine>>(new Map());
-  const previousFenRef = useRef<string>(START_FEN);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const backupImportInputRef = useRef<HTMLInputElement | null>(null);
   const [engineReadyTick, setEngineReadyTick] = useState(0);
+  const [stockfishLoaded, setStockfishLoaded] = useState(false);
   const [stockfishGeneration, setStockfishGeneration] = useState(0);
   const treeEvalAwaiterRef = useRef<{ latestScore: string | null; resolve: (score: string | null) => void } | null>(
     null,
@@ -2146,6 +2181,7 @@ function App() {
   const [isTrainingStatsMenuOpen, setIsTrainingStatsMenuOpen] = useState(false);
   const [isSuddenDeathSettingsOpen, setIsSuddenDeathSettingsOpen] = useState(false);
   const [isMoveToolsOpen, setIsMoveToolsOpen] = useState(false);
+  const [isLichessArrowOptionsOpen, setIsLichessArrowOptionsOpen] = useState(false);
   const dbButtonLongPressTimeoutRef = useRef<number | null>(null);
   const dbButtonLongPressHandledRef = useRef(false);
   const trainButtonLongPressTimeoutRef = useRef<number | null>(null);
@@ -2171,6 +2207,7 @@ function App() {
   const backLongPressHandledRef = useRef(false);
   const backLongPressIsDownRef = useRef(false);
   const backLongPressStageRef = useRef<0 | 1 | 2>(0);
+  const backLongPressActionRef = useRef<(stage: 1 | 2) => void>(() => {});
 
   const activeSide: Side = repertoireSide;
   const activeRepertoireList = repertoiresBySide[activeSide];
@@ -2202,6 +2239,11 @@ function App() {
   const selectedNode = tree.nodes[selectedNodeId] ?? tree.nodes[tree.rootId];
   const analysisScratchFen = analysisScratchPosition?.fen ?? null;
   const selectedBoardFen = analysisScratchFen ?? selectedNode.fen;
+  const enginePvFen = selectedEngine === 'stockfish' ? stockfishLinesFen : selectedBoardFen;
+  const maiaPositionFen = selectedBoardFen === START_FEN ? START_POS_FEN : selectedBoardFen;
+  const maiaPopularity = useMaiaPopularity(maiaPositionFen, maiaStrengthElo,
+    showMaiaPopularity && selectedEngine === 'maia' && engineRunning && !analysisGameProgress &&
+    engineStatus === 'done' && maiaResultKey === `${maiaPositionFen}|${maiaStrengthElo}`);
   const trainingForActive = trainingSession?.side === activeSide && !trainingSession.suddenDeathMode;
   const isTreeEvalRunning = Boolean(treeEvalProgress?.running);
 
@@ -2282,7 +2324,7 @@ function App() {
 
   const repertoiresAtPosition = useMemo(() => {
     const targetFenKey = positionFenKey(selectedNode.fen);
-    return repertoiresBySide[activeSide]
+    return repertoiresBySide[boardOrientation]
       .filter((repertoire) => repertoireHasMoves(repertoire.tree))
       .filter((repertoire) =>
         Object.values(repertoire.tree.nodes).some((node) => positionFenKey(node.fen) === targetFenKey),
@@ -2290,14 +2332,14 @@ function App() {
       .map((repertoire) => ({
         id: repertoire.id,
         name: repertoire.name,
-        isActive: repertoire.id === activeRepertoireIdBySide[activeSide],
+        isActive: boardOrientation === activeSide && repertoire.id === activeRepertoireIdBySide[activeSide],
       }))
       .sort((a, b) => {
         if (a.isActive && !b.isActive) return -1;
         if (!a.isActive && b.isActive) return 1;
         return a.name.localeCompare(b.name);
       });
-  }, [selectedNode.fen, repertoiresBySide, activeSide, activeRepertoireIdBySide]);
+  }, [selectedNode.fen, repertoiresBySide, boardOrientation, activeSide, activeRepertoireIdBySide]);
 
   const autoArrows = useMemo<DrawShape[]>(() => {
     const treeMoveOptionsForUi = !isBrowseMode || isScopedTrainingOnSingleRepertoire
@@ -2310,7 +2352,7 @@ function App() {
           }))
       : mergedTreeMoveOptions;
 
-    const treeArrows = !isAnalysisMode && !analysisScratchFen && showTreeArrows
+    const treeArrows = !analysisScratchFen && showTreeArrows
       ? treeMoveOptionsForUi
           .map((option) => parseUciMove(option.moveUci))
           .filter((value): value is [Key, Key] => Boolean(value))
@@ -2324,7 +2366,7 @@ function App() {
     const positionGames = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
     const thresholdShare = lichessArrowThreshold / 100;
     const lichessArrows =
-      !isAnalysisMode && !analysisScratchFen && showLichessArrows && positionGames > 0
+      !analysisScratchFen && showLichessArrows && positionGames > 0
         ? (() => {
             const allEntries = (lichessData?.moves ?? [])
               .map((move) => {
@@ -2362,7 +2404,7 @@ function App() {
         : [];
 
     const engineArrows =
-      !isAnalysisMode && showStockfishArrows && engineLines.length > 0
+      showStockfishArrows && engineLines.length > 0
         ? (() => {
             const isMaiaEngine = selectedEngine === 'maia';
             const candidates = engineLines
@@ -2422,7 +2464,6 @@ function App() {
     lichessArrowThreshold,
     engineLines,
     selectedEngine,
-    isAnalysisMode,
     showLichessArrows,
     showStockfishArrows,
     showLichessOnTreeMoves,
@@ -2470,10 +2511,9 @@ function App() {
     if (persisted) {
       setRepertoiresBySide(persisted.repertoiresBySide);
       setActiveRepertoireIdBySide({ white: null, black: null });
-      const whiteActive = persisted.repertoiresBySide.white[0];
-      const blackActive = persisted.repertoiresBySide.black[0];
-      const whiteTree = whiteActive?.tree ?? createEmptyTree('white');
-      const blackTree = blackActive?.tree ?? createEmptyTree('black');
+      // Review starts with a fresh working tree, independent of saved repertoires.
+      const whiteTree = createEmptyTree('white');
+      const blackTree = createEmptyTree('black');
       setTrees({
         white: whiteTree,
         black: blackTree,
@@ -2542,10 +2582,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!isAnalysisMode && selectedEngine === 'stockfish' && !stockfishRef.current) {
+    if (selectedEngine === 'stockfish' && !stockfishRef.current) {
       setStockfishGeneration((value) => value + 1);
     }
-  }, [isAnalysisMode, selectedEngine]);
+  }, [selectedEngine]);
 
   useEffect(() => {
     if (!hasHydratedAppState || !gameAnalysisReport) return;
@@ -2751,6 +2791,7 @@ function App() {
       lineCacheRef.current = new Map();
       setEngineLines([]);
       setEngineStatus('analyzing');
+      setStockfishLinesFen(pending.fen);
       engineWhitePerspectiveMultiplierRef.current = whitePerspectiveMultiplierFromFen(pending.fen);
       w.postMessage(`setoption name MultiPV value ${pending.multipv}`);
       w.postMessage('setoption name UCI_LimitStrength value false');
@@ -2769,8 +2810,9 @@ function App() {
 
       if (text === 'readyok') {
         engineReadyRef.current = true;
+        setStockfishLoaded(true);
         setEngineReadyTick((prev) => prev + 1);
-        setEngineStatus((prev) => (prev === 'stopped' ? prev : 'idle'));
+        if (selectedEngineRef.current === 'stockfish') setEngineStatus((prev) => (prev === 'stopped' ? prev : 'idle'));
         tryStartPendingRef.current?.();
         return;
       }
@@ -2858,7 +2900,9 @@ function App() {
             : 0;
 
         lineCacheRef.current.set(multipv, { multipv, scoreText, pv, bestMove, evalValue });
-        setEngineLines(Array.from(lineCacheRef.current.values()).sort((a, b) => a.multipv - b.multipv));
+        if (selectedEngineRef.current === 'stockfish' && engineRunningRef.current) {
+          setEngineLines(Array.from(lineCacheRef.current.values()).sort((a, b) => a.multipv - b.multipv));
+        }
         if (multipv === 1 && treeEvalAwaiterRef.current) {
           treeEvalAwaiterRef.current.latestScore = scoreText;
         }
@@ -2894,7 +2938,7 @@ function App() {
           treeEvalAwaiterRef.current = null;
           resolve(latestScore ?? null);
         }
-        setEngineStatus('done');
+        if (selectedEngineRef.current === 'stockfish' && engineRunningRef.current) setEngineStatus('done');
         tryStartPendingRef.current?.();
       }
     };
@@ -2911,6 +2955,7 @@ function App() {
       worker.terminate();
       stockfishRef.current = null;
       engineReadyRef.current = false;
+      setStockfishLoaded(false);
       isSearchingRef.current = false;
       pendingAnalysisRef.current = null;
     };
@@ -2920,7 +2965,6 @@ function App() {
     if (selectedEngine === 'maia') {
       const worker = stockfishRef.current;
       pendingAnalysisRef.current = null;
-      isSearchingRef.current = false;
       worker?.postMessage('stop');
       if (!engineRunning) {
         setEngineStatus('stopped');
@@ -2940,10 +2984,10 @@ function App() {
             fen,
             eloSelf: maiaStrengthElo,
             eloOppo: maiaStrengthElo,
-            topK: Math.max(1, engineMultiPv),
+            topK: 256,
           });
           if (requestId !== maiaAnalysisRequestRef.current) return;
-          const lines: EngineLine[] = maiaEval.moves.map((entry, index) => ({
+          const lines: EngineLine[] = maiaEval.moves.slice(0, Math.max(1, engineMultiPv)).map((entry, index) => ({
             multipv: index + 1,
             scoreText: `${(entry.probability * 100).toFixed(1)}%`,
             pv: entry.uci,
@@ -2951,6 +2995,7 @@ function App() {
             evalValue: entry.probability * 100000,
           }));
           setEngineLines(lines);
+          setMaiaResultKey(`${fen}|${maiaStrengthElo}`);
           setEngineStatus('done');
         } catch (error) {
           if (requestId !== maiaAnalysisRequestRef.current) return;
@@ -2960,13 +3005,14 @@ function App() {
           setEngineLines([]);
         }
       })();
-      return;
+      return () => {
+        if (maiaAnalysisRequestRef.current === requestId) maiaAnalysisRequestRef.current += 1;
+      };
     }
 
     if (!stockfishRef.current || !engineReadyRef.current) return;
     if (!engineRunning) {
       pendingAnalysisRef.current = null;
-      isSearchingRef.current = false;
       stockfishRef.current.postMessage('stop');
       setEngineStatus('stopped');
       return;
@@ -2986,15 +3032,6 @@ function App() {
     selectedEngine,
     maiaStrengthElo,
   ]);
-
-  useEffect(() => {
-    const fenChanged = previousFenRef.current !== selectedBoardFen;
-    if (!engineRunning && fenChanged) {
-      setEngineLines([]);
-      lineCacheRef.current = new Map();
-    }
-    previousFenRef.current = selectedBoardFen;
-  }, [selectedBoardFen, engineRunning]);
 
   useEffect(() => {
     lichessRateLimitedUntilRef.current = lichessRateLimitedUntil ?? 0;
@@ -3700,7 +3737,13 @@ function App() {
 
       pendingAnalysisRef.current = null;
       worker.postMessage('stop');
-      isSearchingRef.current = false;
+      // Drain the interactive search before a new awaiter can own its bestmove.
+      for (let attempt = 0; attempt < 100 && isSearchingRef.current && stockfishRef.current === worker; attempt++) {
+        await new Promise(resolve => window.setTimeout(resolve, 20));
+      }
+      if (isSearchingRef.current || stockfishRef.current !== worker || !engineReadyRef.current) {
+        return { scoreText: '?', evalCp: 0, bestMove: null, pv: '', depth: 0, nodes: 0, hasScore: false };
+      }
       lineCacheRef.current = new Map();
       setEngineLines([]);
 
@@ -3723,6 +3766,7 @@ function App() {
             if (suddenDeathAwaiterRef.current !== awaiter) return;
             suddenDeathAwaiterRef.current = null;
             engineReadyRef.current = false;
+            setStockfishLoaded(false);
             worker.terminate();
             if (stockfishRef.current === worker) stockfishRef.current = null;
             resolve({ scoreText: '?', evalCp: 0, bestMove: null, pv: '', depth: 0, nodes: 0, hasScore: false });
@@ -3769,6 +3813,7 @@ function App() {
   };
 
   const analyzeCurrentGame = async (deep = false) => {
+    if (!isBrowseMode || isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning) return;
     if (analysisGameProgress) {
       analysisGameCancelRef.current = true;
       analysisReviewAbortRef.current?.abort();
@@ -3828,7 +3873,7 @@ function App() {
       playerRatings: ratingMetadata ? { white: ratingMetadata.white, black: ratingMetadata.black } : undefined,
       depth: engineDepth,
       status: 'running',
-      results: bookResults,
+      results: deep ? [] : bookResults,
     };
     analysisGameCancelRef.current = false;
     const reviewAbort = new AbortController();
@@ -3857,6 +3902,7 @@ function App() {
         stockfishRef.current = null;
       }
       engineReadyRef.current = false;
+      setStockfishLoaded(false);
       isSearchingRef.current = false;
       pendingAnalysisRef.current = null;
       lineCacheRef.current.clear();
@@ -3864,7 +3910,7 @@ function App() {
     };
 
     try {
-      if (bookMoveCount === gamePath.length - 1) {
+      if (!deep && bookMoveCount === gamePath.length - 1) {
         setGameAnalysisReport({ ...initialReport, status: 'complete' });
         setShowAnalysisReport(true);
         return;
@@ -3890,6 +3936,16 @@ function App() {
         ratingSource: analysisContextSource,
         explorerToken: lichessApiToken,
         releaseStockfish: releaseStockfishForMaia,
+        prepareAlternatives: async () => {
+          cancelMaiaEvaluations();
+          setMaiaLoaded(false);
+          setAnalysisGameProgress(prev => prev ? { ...prev, detail: 'SF19: sprawdzanie ruchów wskazanych przez Maię…' } : prev);
+          setStockfishGeneration(value => value + 1);
+          for (let attempt = 0; attempt < 200 && !engineReadyRef.current && !analysisGameCancelRef.current; attempt++) {
+            await new Promise(resolve => window.setTimeout(resolve, 50));
+          }
+          if (!analysisGameCancelRef.current && (!engineReadyRef.current || !stockfishRef.current)) throw new Error('Stockfish is unavailable for checking human alternatives');
+        },
         query: runStockfishSingleQuery, cancelled: () => analysisGameCancelRef.current,
         signal: reviewAbort.signal,
         publish: (results) => setGameAnalysisReport(prev => prev?.gameKey === gameKey ? { ...prev, results: [...results] } : prev),
@@ -3902,14 +3958,11 @@ function App() {
       });
       const wasCancelled = analysisGameCancelRef.current;
       if (!wasCancelled) {
-        const maiaComplete = reviewResults.filter((result) => result.maiaStatus === 'complete').length;
         const maiaUnavailable = reviewResults.filter((result) => result.maiaStatus === 'unavailable');
-        if (maiaComplete > 0) {
-          setAnalysisMaiaNotice({ kind: 'success', text: `Maia-3 załadowana i użyta dla ${maiaComplete} ${maiaComplete === 1 ? 'pozycji' : 'pozycji'}.` });
-        } else if (maiaUnavailable.length > 0) {
+        if (maiaUnavailable.length > 0) {
           setAnalysisMaiaNotice({ kind: 'error', text: `Maia-3 nie została użyta: ${maiaUnavailable[0].maiaUnavailableReason ?? 'model nie zwrócił wyniku'}` });
         } else {
-          setAnalysisMaiaNotice({ kind: 'info', text: 'Maia-3 nie była potrzebna: screening Stockfisha nie wybrał pozycji do dodatkowej analizy.' });
+          setAnalysisMaiaNotice(null);
         }
       }
       setGameAnalysisReport((prev) => prev?.gameKey === gameKey
@@ -4499,10 +4552,8 @@ function App() {
     const currentTree = trees[activeSide];
     const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
     const currentNode = currentTree.nodes[currentSelectedId] ?? currentTree.nodes[currentTree.rootId];
-    const moveSourceFen = analysisScratchPosition && !isAnalysisMode && !isTrainingActive
+    const moveSourceFen = analysisScratchPosition && !isTrainingActive
       ? analysisScratchPosition.fen
-      : isAnalysisMode && analysisScratchPosition
-        ? analysisScratchPosition.fen
       :
       trainingSession &&
       trainingSession.side === activeSide &&
@@ -4515,9 +4566,25 @@ function App() {
 
     if (!move) return;
 
-    // Review and engine-line previews are deliberately ephemeral. Keep moves
-    // played on this board out of the persisted repertoire tree.
-    if (!isTrainingActive && (analysisScratchPosition || (!isAnalysisMode && isBrowseMode))) {
+    if (!engineRunning) {
+      const followsStockfishLine = selectedEngine === 'stockfish' && engineLines.some(line => {
+        let previousFen = stockfishLinesFen;
+        for (const candidate of buildEnginePvMoves(stockfishLinesFen, line.pv)) {
+          if (positionFenKey(previousFen) === positionFenKey(moveSourceFen) &&
+              positionFenKey(candidate.fen) === positionFenKey(chess.fen())) return true;
+          previousFen = candidate.fen;
+        }
+        return false;
+      });
+      if (!followsStockfishLine) {
+        setEngineLines([]);
+        lineCacheRef.current = new Map();
+      }
+    }
+
+    // Engine-line previews stay separate from the move list. Review moves use
+    // the working tree below; without an active repertoire it is not persisted.
+    if (!isTrainingActive && analysisScratchPosition) {
       setAnalysisScratchPosition({
         fen: chess.fen(),
         lastMove: [move.from as Key, move.to as Key],
@@ -4525,7 +4592,7 @@ function App() {
       return;
     }
 
-    if (isAnalysisMode) {
+    if (isBrowseMode && !isTrainingActive) {
       const uci = uciFromMove(move);
       const matchingChildId = currentNode.children.find((id) => currentTree.nodes[id]?.moveUci === uci);
       const existingChildId = currentNode.children[0] === matchingChildId ? matchingChildId : undefined;
@@ -4891,6 +4958,8 @@ function App() {
   };
 
   const setEngineRunningEnabled = (enabled: boolean) => {
+    if (analysisGameProgress) return;
+    engineRunningRef.current = enabled;
     if (enabled) {
       setEngineRunning(true);
       return;
@@ -4900,8 +4969,23 @@ function App() {
     setEngineRunning(false);
   };
 
+  const selectEngine = (engine: EngineChoice) => {
+    if (engine === selectedEngine || analysisGameProgress) return;
+    selectedEngineRef.current = engine;
+    maiaAnalysisRequestRef.current += 1;
+    pendingAnalysisRef.current = null;
+    stockfishRef.current?.postMessage('stop');
+    lineCacheRef.current = new Map();
+    setEngineLines([]);
+    setMaiaResultKey('');
+    setMaiaError('');
+    setMaiaLoadingStatus(null);
+    setEngineStatus(engineRunning ? 'analyzing' : 'stopped');
+    setSelectedEngine(engine);
+  };
+
   const jumpToNextMissingLichessMove = async () => {
-    if (isTrainingActive || isSuddenDeathActive || isFindMissingSearchRunning) return;
+    if (isBrowseMode || isTrainingActive || isSuddenDeathActive || isFindMissingSearchRunning) return;
 
     const sideTree = tree;
     const baseNodeId =
@@ -5003,6 +5087,26 @@ function App() {
       } else {
         setStatus(`PGN export failed: ${errorMessage}`);
         window.alert(`PGN export failed.\n\n${errorMessage}`);
+      }
+    } finally {
+      setIsBackupIoRunning(false);
+    }
+  };
+
+  const saveCurrentGamePgn = async () => {
+    if (isBackupIoRunning || mainLinePath.length < 2) return;
+    setIsBackupIoRunning(true);
+    try {
+      await savePgn(exportGameToPgn(tree, boardOrientation, playerHandle), 'game.pgn');
+      setStatus('Saved game PGN');
+      setIsOptionsOpen(false);
+    } catch (error) {
+      const errorMessage = getErrorMessage(error, 'Unknown error');
+      if (errorMessage.toLowerCase().includes('abort')) {
+        setStatus('PGN save cancelled');
+      } else {
+        setStatus(`PGN save failed: ${errorMessage}`);
+        window.alert(`PGN save failed.\n\n${errorMessage}`);
       }
     } finally {
       setIsBackupIoRunning(false);
@@ -5411,10 +5515,24 @@ function App() {
   };
 
   const enterBrowseMode = (side: Side = activeSide) => {
+    const emptyTree = createEmptyTree(side);
+    if (analysisGameProgress) {
+      analysisGameCancelRef.current = true;
+      analysisReviewAbortRef.current?.abort();
+      cancelMaiaEvaluations();
+      stockfishRef.current?.postMessage('stop');
+    }
     setActiveRepertoireIdBySide((prev) => ({
       ...prev,
       [side]: null,
     }));
+    setTrees((prev) => ({ ...prev, [side]: emptyTree }));
+    setSelectedNodeBySide((prev) => ({ ...prev, [side]: emptyTree.rootId }));
+    setUndoStackBySide((prev) => ({ ...prev, [side]: [] }));
+    setTrainingSession((prev) => (prev?.side === side ? null : prev));
+    setAnalysisScratchPosition(null);
+    setShowAnalysisReport(false);
+    setAnalysisMaiaNotice(null);
     setIsOptionsOpen(false);
   };
 
@@ -5445,39 +5563,17 @@ function App() {
     setStatus(`Created repertoire "${next.name}" (${side})`);
   };
 
-  const toggleAnalysisMode = () => {
-    if (isAnalysisMode) {
-      if (analysisGameProgress) {
-        analysisGameCancelRef.current = true;
-      cancelMaiaEvaluations();
-        stockfishRef.current?.postMessage('stop');
-      }
-      setIsAnalysisMode(false);
-      setAnalysisScratchPosition(null);
-      setShowAnalysisReport(false);
-      return;
-    }
-    if (isTrainingActive || isSuddenDeathActive || isExampleReplayActive) return;
-    setIsAnalysisMode(true);
-    setAnalysisScratchPosition(null);
-    setShowAnalysisReport(false);
-    setEngineRunning(false);
-    setPortraitTab('moves');
-    setIsOptionsOpen(false);
-  };
-
   const loadRepertoire = (repertoireId: string, side: Side = activeSide, preservePosition = false) => {
     const entry = repertoiresBySide[side].find((item) => item.id === repertoireId);
     if (!entry) return;
-    const currentSideTree = trees[side];
-    const currentSelectedId = selectedNodeBySide[side] ?? currentSideTree.rootId;
-    const currentSelectedNode = currentSideTree.nodes[currentSelectedId] ?? currentSideTree.nodes[currentSideTree.rootId];
-    const currentFenKey = positionFenKey(currentSelectedNode.fen);
+    const currentFenKey = positionFenKey(selectedNode.fen);
     const preservedNodeId =
       preservePosition
         ? Object.values(entry.tree.nodes).find((node) => positionFenKey(node.fen) === currentFenKey)?.id ?? null
         : null;
     const nextSelectedId = preservedNodeId ?? (entry.tree.nodes[entry.selectedNodeId] ? entry.selectedNodeId : entry.tree.rootId);
+    setRepertoireSide(side);
+    setIsTempBoardFlipped(false);
     setActiveRepertoireIdBySide((prev) => ({
       ...prev,
       [side]: entry.id,
@@ -5640,7 +5736,7 @@ function App() {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      if (isAnalysisMode) {
+      if (importMode === 'review') {
         await loadAnalysisGamePgn(file);
       } else {
         await importPgnFile(file, importMode);
@@ -5745,6 +5841,9 @@ function App() {
   }, [isTrainingActive, trainingSession]);
   const canGoBack = Boolean(selectedNode.parentId);
   const isEngineEnabled = engineRunning;
+  const selectedEngineLoaded = selectedEngine === 'maia' ? maiaLoaded : stockfishLoaded;
+  const canToggleEngineArrows = selectedEngineLoaded && engineRunning;
+  const selectedEngineLabel = selectedEngine === 'maia' ? MAIA_ENGINE_LABEL : STOCKFISH_ENGINE_LABEL;
   const visibleEngineStatus =
     engineStatus === 'done' || engineStatus === 'stopped' || engineStatus === 'analyzing' ? '' : engineStatus;
   const currentEngineEvalRaw = engineLines[0]?.scoreText ?? selectedNode.stockfishEval ?? null;
@@ -5910,7 +6009,7 @@ function App() {
     (findMissingSearchBaseNodeId ? tree.nodes[findMissingSearchBaseNodeId] : null) ?? selectedNode;
   const canRunFindMissingSearch =
     activeFindMissingBaseNode.children.length > 0 && !isFindMissingSearchRunning && !isSuddenDeathActive;
-  const displayedMovePath = isAnalysisMode ? mainLinePath : path;
+  const displayedMovePath = isBrowseMode && !isTrainingActive ? mainLinePath : path;
   const displayedBookMoves = useMemo(
     () => findBookMovesForGame(displayedMovePath, bookRepertoireIndex),
     [displayedMovePath, bookRepertoireIndex],
@@ -5920,7 +6019,7 @@ function App() {
       displayedMovePath.slice(1).map((node, index) => {
         const result = gameAnalysisReportMatchesLine ? gameAnalysisReport?.results.find((entry) => entry.nodeId === node.id) : undefined;
         const bookMove = displayedBookMoves.get(node.id);
-        const annotation = result?.status === 'book' || bookMove
+        const annotation = result?.status === 'book'
           ? ''
           : result?.status === 'uncertain'
           ? ''
@@ -5933,22 +6032,23 @@ function App() {
                   : result.category === 'blunder'
                     ? '??'
                     : '';
-        const categoryClass = result?.status === 'book' || bookMove
+        const categoryClass = result?.status === 'book' || (!result && bookMove)
           ? 'book'
           : result?.status === 'complete'
             ? (result.greatFind ? 'excellent' : result.category === 'excellent' ? 'good' : result.category)
             : result?.status === 'uncertain'
               ? 'provisional'
               : '';
-        const annotationTitle = result?.status === 'book' || bookMove
-          ? `Book move from ${result?.bookRepertoireName ?? bookMove?.repertoireName}`
+        const annotationTitle = result?.status === 'book'
+          ? undefined
           : result
             ? `${result.status === 'uncertain' ? 'Classification uncertain' : result.category}${result.lossPoints === null ? '' : ` — ${result.lossPoints.toFixed(1)} evaluation-impact points lost`}`
             : undefined;
         return {
         id: node.id,
         san: toFigurineSan(node.moveSan ?? ''),
-        prefix: index % 2 === 0 ? `${Math.floor(index / 2) + 1}.` : '',
+        prefix: fenToChess(displayedMovePath[index].fen).turn() === 'w' || index === 0
+          ? formatMovePrefix(fenToChess(displayedMovePath[index].fen)) : '',
         hasAlternatives: (node.children?.length ?? 0) > 1,
         annotation,
         annotationTitle,
@@ -5959,13 +6059,10 @@ function App() {
       }),
     [displayedMovePath, displayedBookMoves, gameAnalysisReportMatchesLine, gameAnalysisReport, selectedNode.id],
   );
-  const selectedReportResult = isAnalysisMode && gameAnalysisReportMatchesLine
+  const selectedReportResult = isBrowseMode && gameAnalysisReportMatchesLine
     ? gameAnalysisReport?.results.find((result) => result.nodeId === selectedNode.id) ?? null
     : null;
-  const selectedBookMoveName = selectedReportResult?.status === 'book'
-    ? selectedReportResult.bookRepertoireName
-    : displayedBookMoves.get(selectedNode.id)?.repertoireName;
-  const selectedAnalysisResult = selectedBookMoveName ? null : selectedReportResult;
+  const selectedAnalysisResult = selectedReportResult?.status === 'book' ? null : selectedReportResult;
   const selectedReportParent = selectedReportResult?.nodeId
     ? tree.nodes[selectedReportResult.nodeId]?.parentId
       ? tree.nodes[tree.nodes[selectedReportResult.nodeId].parentId as string]
@@ -6187,7 +6284,6 @@ function App() {
   };
 
   const deleteTreeOptionBranch = () => {
-    if (isAnalysisMode) return;
     const popup = treeOptionDeletePopup;
     if (!popup) return;
     const nodeId = popup.nodeId;
@@ -6831,11 +6927,25 @@ function App() {
     });
   }, [activeSide, isBrowseMode, lichessData, lichessStatus, selectedNodeBySide]);
 
-  const goBackOneMove = () => {
+  const rewindToNode = (targetId: string, deleteContinuation = true) => {
     if (isTrainingActive || isSuddenDeathActive) return;
-    const parentId = selectedNode.parentId;
-    if (!parentId) return;
-    navigateToNode(activeSide, parentId);
+    if (selectedNode.id === targetId) return;
+    let branchRoot = selectedNode;
+    while (branchRoot.parentId && branchRoot.parentId !== targetId) {
+      branchRoot = tree.nodes[branchRoot.parentId];
+    }
+    if (branchRoot.parentId !== targetId) return;
+    navigateToNode(activeSide, targetId);
+    if (deleteContinuation) {
+      setTrees((prev) => ({
+        ...prev,
+        [activeSide]: removeBranch(prev[activeSide], branchRoot.id),
+      }));
+    }
+  };
+
+  const goBackOneMove = () => {
+    if (selectedNode.parentId) rewindToNode(selectedNode.parentId, isBrowseMode);
   };
 
   const goBackToPreviousBranchMove = () => {
@@ -6845,15 +6955,23 @@ function App() {
       const node = tree.nodes[cursorId];
       if (!node) break;
       if (node.children.length > 1) {
-        navigateToNode(activeSide, node.id);
+        rewindToNode(node.id);
         return;
       }
       cursorId = node.parentId;
     }
     if (selectedNode.id !== tree.rootId) {
-      navigateToNode(activeSide, tree.rootId);
+      rewindToNode(tree.rootId);
     }
   };
+
+  useEffect(() => {
+    // Each hold stage uses the position and tree left by the previous stage.
+    backLongPressActionRef.current = (stage) => {
+      if (stage === 1) goBackToPreviousBranchMove();
+      else rewindToNode(tree.rootId);
+    };
+  });
 
   const clearBackLongPress = () => {
     if (backLongPressTimeoutRef.current !== null) {
@@ -6870,7 +6988,7 @@ function App() {
         if (!backLongPressIsDownRef.current) return;
         backLongPressHandledRef.current = true;
         backLongPressStageRef.current = 1;
-        goBackToPreviousBranchMove();
+        backLongPressActionRef.current(1);
         scheduleBackLongPressStage();
       }, 450);
       return;
@@ -6880,9 +6998,7 @@ function App() {
         if (!backLongPressIsDownRef.current) return;
         backLongPressHandledRef.current = true;
         backLongPressStageRef.current = 2;
-        if (selectedNode.id !== tree.rootId) {
-          navigateToNode(activeSide, tree.rootId);
-        }
+        backLongPressActionRef.current(2);
       }, 800);
     }
   };
@@ -6992,29 +7108,27 @@ function App() {
     }
   };
 
-  const handlePortraitMovesPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
+  const handleLichessArrowPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     clearMovesButtonLongPress();
     movesButtonLongPressHandledRef.current = false;
     movesButtonLongPressTimeoutRef.current = window.setTimeout(() => {
       movesButtonLongPressHandledRef.current = true;
-      setPortraitTab('moves');
-      setIsMoveToolsOpen(true);
-      setIsTrainingStatsMenuOpen(false);
+      setIsLichessArrowOptionsOpen(true);
     }, 420);
   };
 
-  const handlePortraitMovesPointerEnd = () => {
+  const handleLichessArrowPointerEnd = () => {
     clearMovesButtonLongPress();
   };
 
-  const handlePortraitMovesClick: MouseEventHandler<HTMLButtonElement> = (event) => {
+  const handleLichessArrowClick: MouseEventHandler<HTMLButtonElement> = (event) => {
     if (movesButtonLongPressHandledRef.current) {
       event.preventDefault();
       movesButtonLongPressHandledRef.current = false;
       return;
     }
-    setPortraitTab('moves');
+    setShowLichessArrows((prev) => !prev);
   };
 
   const clearDbButtonLongPress = () => {
@@ -7091,28 +7205,11 @@ function App() {
     [],
   );
 
-  const deleteLastMove = () => {
-    if (isAnalysisMode) return;
-    if (isTrainingActive || isSuddenDeathActive) return;
-    const branchRootId = selectedNode.id;
-    const parentId = selectedNode.parentId;
-    if (!parentId) return;
-
-    setUndoStackBySide((prev) => ({
-      ...prev,
-      [activeSide]: [...prev[activeSide], { tree, selectedNodeId: selectedNode.id }].slice(-200),
-    }));
-    setTrees((prev) => {
-      const currentTree = prev[activeSide];
-      const nextTree = removeBranch(currentTree, branchRootId);
-      return { ...prev, [activeSide]: nextTree };
-    });
-
-    setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: parentId }));
-  };
-
   const navigateToNode = (side: Side, nextId: string) => {
     if (trainingSession && trainingSession.side === side) return;
+    setAnalysisScratchPosition(null);
+    setEngineLines([]);
+    lineCacheRef.current = new Map();
     const currentId = selectedNodeBySide[side] ?? trees[side].rootId;
     if (currentId === nextId) return;
     setUndoStackBySide((prev) => ({
@@ -7137,7 +7234,7 @@ function App() {
   };
 
   return (
-    <div className={`app ${themeMode === 'dark' ? 'theme-dark' : ''} ${isAnalysisMode ? 'analysis-mode' : ''}`}>
+    <div className={`app ${themeMode === 'dark' ? 'theme-dark' : ''}`}>
       <header className="topbar">
         <div className="topbar-row" />
       </header>
@@ -7278,14 +7375,16 @@ function App() {
                           <button
                             type="button"
                             className={`ai-engine-tab ${selectedEngine === 'stockfish' ? 'active' : ''}`}
-                            onClick={() => setSelectedEngine('stockfish')}
+                            disabled={Boolean(analysisGameProgress)}
+                            onClick={() => selectEngine('stockfish')}
                           >
                             {STOCKFISH_ENGINE_LABEL}
                           </button>
                           <button
                             type="button"
                             className={`ai-engine-tab ${selectedEngine === 'maia' ? 'active' : ''}`}
-                            onClick={() => setSelectedEngine('maia')}
+                            disabled={Boolean(analysisGameProgress)}
+                            onClick={() => selectEngine('maia')}
                           >
                             {MAIA_ENGINE_LABEL}
                           </button>
@@ -7295,6 +7394,7 @@ function App() {
                           role="switch"
                           aria-checked={isEngineEnabled}
                           className={`ai-switch ${isEngineEnabled ? 'on' : 'off'}`}
+                          disabled={Boolean(analysisGameProgress)}
                           onClick={() => setEngineRunningEnabled(!isEngineEnabled)}
                         >
                           <span className="ai-switch-track" aria-hidden="true">
@@ -7362,13 +7462,13 @@ function App() {
                             <div className="table-row engine-pv-row" key={line.multipv}>
                               <span className="engine-pv-score">{line.scoreText}</span>
                               <div className="engine-pv-moves">
-                                {buildEnginePvMoves(selectedBoardFen, line.pv).map((move, index) => (
+                                {buildEnginePvMoves(enginePvFen, line.pv).map((move, index) => (
                                   <button
                                     type="button"
                                     className="engine-pv-move"
                                     key={`${line.multipv}-${index}-${move.san}`}
                                     title={`Show position after ${move.san}`}
-                                    onClick={() => previewEnginePvMove(selectedBoardFen, line.pv, index)}
+                                    onClick={() => previewEnginePvMove(enginePvFen, line.pv, index)}
                                   >
                                     {move.san}
                                   </button>
@@ -7381,26 +7481,28 @@ function App() {
                       )}
                       {selectedEngine === 'maia' && (
                         <div className="table ai-eval-table">
+                          <MaiaPopularityControls checked={showMaiaPopularity} onChange={setShowMaiaPopularity} profile={maiaPopularity} />
                           {engineLines.map((line) => (
-                            <div className="table-row engine-pv-row" key={line.multipv}>
+                            <div className={`table-row engine-pv-row ${showMaiaPopularity ? 'maia-popularity-row' : ''}`} key={line.multipv}>
                               <span className="engine-pv-score">{line.scoreText}</span>
                               <div className="engine-pv-moves">
-                                {buildEnginePvMoves(selectedBoardFen, line.pv).map((move, index) => (
+                                {buildEnginePvMoves(enginePvFen, line.pv).map((move, index) => (
                                   <button
                                     type="button"
                                     className="engine-pv-move"
                                     key={`${line.multipv}-${index}-${move.san}`}
                                     title={`Show position after ${move.san}`}
-                                    onClick={() => previewEnginePvMove(selectedBoardFen, line.pv, index)}
+                                    onClick={() => previewEnginePvMove(enginePvFen, line.pv, index)}
                                   >
                                     {move.san}
                                   </button>
                                 ))}
                                 {line.pv.trim() === '' && <span>-</span>}
                               </div>
+                              {showMaiaPopularity && <MaiaPopularityChart uci={line.bestMove} elo={maiaStrengthElo} profile={maiaPopularity} />}
                             </div>
                           ))}
-                          {engineLines.length === 0 && engineStatus === 'analyzing' && <MaiaStatusView status={maiaLoadingStatus} />}
+                          {engineLines.length === 0 && engineStatus === 'analyzing' && (maiaLoadingStatus ? <MaiaStatusView status={maiaLoadingStatus} /> : <span className="maia-popularity-pending" role="status">Obliczanie ruchów…</span>)}
                           {engineLines.length === 0 && maiaError && <div className="maia-load-error" role="alert">Maia: {maiaError}</div>}
                         </div>
                       )}
@@ -7414,8 +7516,8 @@ function App() {
             <div className="board-center">
               <div className="board-meta">
                 <div className="board-head-row">
-                  <div className="opening-title" title={isAnalysisMode ? '' : openingFullTitle}>
-                    {!isAnalysisMode && openingTitleContent}
+                  <div className="opening-title" title={openingFullTitle}>
+                    {openingTitleContent}
                   </div>
                   <button className="hamburger-btn board-options-btn" aria-label="Options menu" onClick={() => setIsOptionsOpen(true)}>
                     &#9776;
@@ -7522,41 +7624,16 @@ function App() {
                     </button>
                     <button
                       type="button"
-                      className={`long-pressable-btn ${portraitTab === 'moves' ? 'active' : ''}`}
-                      onClick={handlePortraitMovesClick}
-                      onPointerDown={handlePortraitMovesPointerDown}
-                      onPointerUp={handlePortraitMovesPointerEnd}
-                      onPointerCancel={handlePortraitMovesPointerEnd}
-                      onPointerLeave={handlePortraitMovesPointerEnd}
+                      className={portraitTab === 'moves' ? 'active' : ''}
+                      onClick={() => setPortraitTab('moves')}
                       aria-label="Moves"
-                      title="Moves (long press: options)"
+                      title="Moves"
                     >
                       <MoveIcon />
                     </button>
                   </>
                 )}
-                {isAnalysisMode && !isExampleReplayActive && !isTrainingActive && (
-                  <AnalysisButton
-                    className={`analysis-game-btn mode-icon-btn ${analysisGameProgress ? 'active' : ''}`}
-                    onQuick={() => { void analyzeCurrentGame(); }} onDeep={() => { void analyzeCurrentGame(true); }}
-                    benchmark={analysisBenchmarkElo} onBenchmarkChange={setAnalysisBenchmarkElo}
-                    context={analysisContext} onContextChange={updateAnalysisContext}
-                    running={Boolean(analysisGameProgress)} disabled={!analysisGameProgress && mainLinePath.length < 2}>
-                    {analysisGameProgress ? <StopIcon /> : <AnalysisIcon />}
-                  </AnalysisButton>
-                )}
-                {isAnalysisMode && !analysisGameProgress && gameAnalysisReport && gameAnalysisReportMatchesLine && (
-                  <button
-                    type="button"
-                    className="analysis-report-btn mode-icon-btn"
-                    onClick={() => setShowAnalysisReport(true)}
-                    aria-label="Open game analysis report"
-                    title="Open game analysis report"
-                  >
-                    <ReportIcon />
-                  </button>
-                )}
-                {(!isExampleReplayActive || isTrainingActive) && !isAnalysisMode && (
+                {(!isExampleReplayActive || isTrainingActive) && (
                   <button
                     type="button"
                     className={`${isTrainingActive ? 'active training-stop-btn' : ''} long-pressable-btn`}
@@ -7572,7 +7649,7 @@ function App() {
                     {isTrainingActive ? 'Stop training' : <TrainIcon />}
                   </button>
                 )}
-                {!isTrainingActive && !isExampleReplayActive && !isAnalysisMode && (
+                {!isTrainingActive && !isExampleReplayActive && (
                   <button
                     type="button"
                     className={
@@ -7647,14 +7724,16 @@ function App() {
                     <button
                       type="button"
                       className={`ai-engine-tab ${selectedEngine === 'stockfish' ? 'active' : ''}`}
-                      onClick={() => setSelectedEngine('stockfish')}
+                      disabled={Boolean(analysisGameProgress)}
+                      onClick={() => selectEngine('stockfish')}
                     >
                       {STOCKFISH_ENGINE_LABEL}
                     </button>
                     <button
                       type="button"
                       className={`ai-engine-tab ${selectedEngine === 'maia' ? 'active' : ''}`}
-                      onClick={() => setSelectedEngine('maia')}
+                      disabled={Boolean(analysisGameProgress)}
+                      onClick={() => selectEngine('maia')}
                     >
                       {MAIA_ENGINE_LABEL}
                     </button>
@@ -7664,6 +7743,7 @@ function App() {
                     role="switch"
                     aria-checked={isEngineEnabled}
                     className={`ai-switch ${isEngineEnabled ? 'on' : 'off'}`}
+                    disabled={Boolean(analysisGameProgress)}
                     onClick={() => setEngineRunningEnabled(!isEngineEnabled)}
                   >
                     <span className="ai-switch-track" aria-hidden="true">
@@ -7726,13 +7806,13 @@ function App() {
                       <div className="table-row engine-pv-row" key={line.multipv}>
                         <span className="engine-pv-score">{line.scoreText}</span>
                         <div className="engine-pv-moves">
-                          {buildEnginePvMoves(selectedBoardFen, line.pv).map((move, index) => (
+                          {buildEnginePvMoves(enginePvFen, line.pv).map((move, index) => (
                             <button
                               type="button"
                               className="engine-pv-move"
                               key={`${line.multipv}-${index}-${move.san}`}
                               title={`Show position after ${move.san}`}
-                              onClick={() => previewEnginePvMove(selectedBoardFen, line.pv, index)}
+                              onClick={() => previewEnginePvMove(enginePvFen, line.pv, index)}
                             >
                               {move.san}
                             </button>
@@ -7745,26 +7825,28 @@ function App() {
                 )}
                 {selectedEngine === 'maia' && (
                   <div className="table ai-eval-table">
+                          <MaiaPopularityControls checked={showMaiaPopularity} onChange={setShowMaiaPopularity} profile={maiaPopularity} />
                     {engineLines.map((line) => (
-                      <div className="table-row engine-pv-row" key={line.multipv}>
+                      <div className={`table-row engine-pv-row ${showMaiaPopularity ? 'maia-popularity-row' : ''}`} key={line.multipv}>
                         <span className="engine-pv-score">{line.scoreText}</span>
                         <div className="engine-pv-moves">
-                          {buildEnginePvMoves(selectedBoardFen, line.pv).map((move, index) => (
+                          {buildEnginePvMoves(enginePvFen, line.pv).map((move, index) => (
                             <button
                               type="button"
                               className="engine-pv-move"
                               key={`${line.multipv}-${index}-${move.san}`}
                               title={`Show position after ${move.san}`}
-                              onClick={() => previewEnginePvMove(selectedBoardFen, line.pv, index)}
+                              onClick={() => previewEnginePvMove(enginePvFen, line.pv, index)}
                             >
                               {move.san}
                             </button>
                           ))}
                           {line.pv.trim() === '' && <span>-</span>}
                         </div>
+                              {showMaiaPopularity && <MaiaPopularityChart uci={line.bestMove} elo={maiaStrengthElo} profile={maiaPopularity} />}
                       </div>
                     ))}
-                    {engineLines.length === 0 && engineStatus === 'analyzing' && <MaiaStatusView status={maiaLoadingStatus} />}
+                    {engineLines.length === 0 && engineStatus === 'analyzing' && (maiaLoadingStatus ? <MaiaStatusView status={maiaLoadingStatus} /> : <span className="maia-popularity-pending" role="status">Obliczanie ruchów…</span>)}
                     {engineLines.length === 0 && maiaError && <div className="maia-load-error" role="alert">Maia: {maiaError}</div>}
                   </div>
                 )}
@@ -8028,27 +8110,35 @@ function App() {
                         >
                           <BackIcon />
                         </button>
-                        <button
-                          className="danger"
-                          onClick={deleteLastMove}
-                          disabled={!canGoBack || isBrowseMode || isAnalysisMode}
-                          aria-label="Delete last move"
-                          title="Delete last move"
-                        >
-                          ✕
-                        </button>
+                        {isBrowseMode ? <AnalysisButton
+                          dark={themeMode === 'dark'}
+                          className={`analysis-game-btn mode-icon-btn ${analysisGameProgress ? 'active' : ''}`}
+                          onQuick={() => { void analyzeCurrentGame(); }} onDeep={() => { void analyzeCurrentGame(true); }}
+                          onReport={gameAnalysisReport && gameAnalysisReportMatchesLine ? () => setShowAnalysisReport(true) : undefined}
+                          benchmark={analysisBenchmarkElo} onBenchmarkChange={setAnalysisBenchmarkElo}
+                          context={analysisContext} onContextChange={updateAnalysisContext}
+                          running={Boolean(analysisGameProgress)}
+                          disabled={isTrainingActive || isSuddenDeathActive || isTreeEvalRunning || (!analysisGameProgress && mainLinePath.length < 2)}>
+                          {analysisGameProgress ? <StopIcon /> : <AnalysisIcon />}
+                        </AnalysisButton> : (
+                          <button
+                            type="button"
+                            className="next-missing-btn mode-icon-btn"
+                            onClick={jumpToNextMissingLichessMove}
+                            disabled={!canRunFindMissingSearch}
+                            aria-label="Find missing popular opponent move"
+                            title={`Find missing popular opponent move (${lichessArrowThreshold}%+)`}
+                          >
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                              <circle cx="12" cy="12" r="4.2" />
+                              <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
+                              <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2" />
+                            </svg>
+                          </button>
+                        )}
                         <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
                           Undo
                         </button>
-                        {isAnalysisMode ? (
-                          <AnalysisButton className="desktop-only"
-                            onQuick={() => { void analyzeCurrentGame(); }} onDeep={() => { void analyzeCurrentGame(true); }}
-                            benchmark={analysisBenchmarkElo} onBenchmarkChange={setAnalysisBenchmarkElo}
-                            context={analysisContext} onContextChange={updateAnalysisContext}
-                            running={Boolean(analysisGameProgress)} disabled={!analysisGameProgress && mainLinePath.length < 2}>
-                            {analysisGameProgress ? `Stop ${analysisGameProgress.done}/${analysisGameProgress.total}` : 'Analyze game'}
-                          </AnalysisButton>
-                        ) : (
                           <>
                             <button
                               className="desktop-only"
@@ -8070,38 +8160,27 @@ function App() {
                               <SuddenDeathIcon />
                             </button>
                           </>
-                        )}
                         <span className="controls-row-break" aria-hidden="true" />
-                        {!isAnalysisMode && (
-                          <button
-                            type="button"
-                            className="next-missing-btn"
-                            onClick={jumpToNextMissingLichessMove}
-                            disabled={!canRunFindMissingSearch}
-                            aria-label="Find missing popular opponent move"
-                            title={`Find missing popular opponent move (${lichessArrowThreshold}%+)`}
-                          >
-                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                              <circle cx="12" cy="12" r="4.2" />
-                              <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
-                              <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2" />
-                            </svg>
-                          </button>
-                        )}
                         <div className="arrow-toggle-group">
                           <button
                             type="button"
-                            className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-lichess ${showLichessArrows ? 'active' : ''}`}
-                            onClick={() => setShowLichessArrows((prev) => !prev)}
+                            className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-lichess arrow-options-dot ${showLichessArrows ? 'active' : ''}`}
+                            onClick={handleLichessArrowClick}
+                            onPointerDown={handleLichessArrowPointerDown}
+                            onPointerUp={handleLichessArrowPointerEnd}
+                            onPointerCancel={handleLichessArrowPointerEnd}
+                            onPointerLeave={handleLichessArrowPointerEnd}
+                            onContextMenu={(event) => { event.preventDefault(); movesButtonLongPressHandledRef.current = true; clearMovesButtonLongPress(); setIsLichessArrowOptionsOpen(true); }}
                             aria-label="Toggle Lichess arrows"
-                            title="Toggle Lichess arrows"
+                            title="Toggle Lichess arrows (hold for options)"
                           />
                           <button
                             type="button"
-                            className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-stockfish ${showStockfishArrows ? 'active' : ''}`}
+                            className={`icon-toggle-btn with-diagonal-arrow only-arrow ${selectedEngine === 'maia' ? 'arrow-maia' : 'arrow-stockfish'} ${showStockfishArrows && canToggleEngineArrows ? 'active' : ''}`}
                             onClick={() => setShowStockfishArrows((prev) => !prev)}
-                            aria-label={`Toggle ${STOCKFISH_ENGINE_NAME} arrows`}
-                            title={`Toggle ${STOCKFISH_ENGINE_NAME} arrows`}
+                            disabled={!canToggleEngineArrows}
+                            aria-label={`Toggle ${selectedEngineLabel} arrows`}
+                            title={`Toggle ${selectedEngineLabel} arrows`}
                           />
                           <button
                             type="button"
@@ -8125,7 +8204,7 @@ function App() {
                       ).toFixed(2)})`}</span>
                     </div>
                   )}
-                  {isAnalysisMode && analysisGameProgress && (
+                  {isBrowseMode && analysisGameProgress && (
                     <div className="game-analysis-progress-inline" aria-live="polite">
                       <div className="game-analysis-progress-label">
                         <span>{analysisGameProgress.detail ?? `${analysisGameProgress.moveText} · ${analysisGameProgress.phase === 'refine' ? 'Checking critical position' : analysisGameProgress.phase === 'alternatives' ? 'Checking human alternatives' : analysisGameProgress.phase === 'profile' ? `${MAIA_ENGINE_LABEL}: comparing rating profiles` : analysisGameProgress.phase === 'maia' ? `${MAIA_ENGINE_LABEL} · ${gameAnalysisReport?.maiaElo ?? maiaStrengthElo} Elo` : analysisGameProgress.phase === 'book' ? 'Book lookup' : analysisGameProgress.phase === 'best' ? 'Stockfish screening: best move' : 'Stockfish screening: played move'}`}</span>
@@ -8135,12 +8214,12 @@ function App() {
                       <progress value={analysisGameProgress.done} max={Math.max(1, analysisGameProgress.total)} aria-label="Game analysis progress" />
                     </div>
                   )}
-                  {isAnalysisMode && analysisMaiaNotice && (
+                  {isBrowseMode && analysisMaiaNotice && !analysisGameProgress && (
                     <div className={`analysis-maia-notice ${analysisMaiaNotice.kind}`} role={analysisMaiaNotice.kind === 'error' ? 'alert' : 'status'}>
                       {analysisMaiaNotice.text}
                     </div>
                   )}
-                  <div className="move-notation-line">
+                  {!analysisGameProgress && <div className="move-notation-line">
                     <div className="move-inline-wrap">
                       {inlineMoves.map((move) => (
                         <button
@@ -8168,13 +8247,9 @@ function App() {
                         </button>
                       ))}
                     </div>
-                  </div>
+                  </div>}
                   {selectedAnalysisResult && (
                     <div className={`game-analysis-comment ${selectedAnalysisResult.greatFind ? 'excellent' : selectedAnalysisResult.category === 'excellent' ? 'good' : selectedAnalysisResult.category}`} aria-live="polite">
-                      {selectedAnalysisResult.status === 'book' ? (
-                        <strong>Book move · {selectedAnalysisResult.bookRepertoireName}</strong>
-                      ) : (
-                        <>
                           <strong>
                             {selectedAnalysisResult.moveNumber}{selectedAnalysisResult.mover === 'black' ? '…' : '.'} {toFigurineSan(selectedAnalysisResult.moveSan)}
                             {' '}{selectedAnalysisResult.status === 'uncertain' ? ' (provisional)' : selectedAnalysisResult.greatFind ? '!' : selectedAnalysisResult.category === 'inaccuracy' ? '?!' : selectedAnalysisResult.category === 'mistake' ? '?' : selectedAnalysisResult.category === 'blunder' ? '??' : ''}
@@ -8184,7 +8259,9 @@ function App() {
                         : selectedAnalysisResult.status === 'unavailable'
                           ? <span>Stockfish could not provide a reliable evaluation for this move.</span>
                           : <span>{selectedAnalysisResult.lossPoints === null ? 'No comparable score was available.' : `${selectedAnalysisResult.lossPoints.toFixed(1)} evaluation-impact points lost.`}
-                            {selectedAnalysisBestMove ? ` Engine preferred ${selectedAnalysisBestMove}.` : ''}
+                            {selectedAnalysisResult.bestMoveUci && selectedAnalysisResult.bestMoveUci === selectedNode.moveUci
+                              ? ''
+                              : selectedAnalysisBestMove ? ` Engine preferred ${selectedAnalysisBestMove}.` : ''}
                           </span>}
                           {selectedAnalysisResult.bestPv && selectedAnalysisParent && (
                             <span className="analysis-comment-line">
@@ -8213,17 +8290,9 @@ function App() {
                               ))}
                             </span>
                           )}
-                        </>
-                      )}
                     </div>
                   )}
-                  {!selectedAnalysisResult && selectedBookMoveName && (
-                    <div className="game-analysis-comment book" aria-live="polite">
-                      <strong>Book move · {selectedBookMoveName}</strong>
-                      {selectedReportResult && <MaiaMoveSummary result={selectedReportResult} positionFen={selectedReportParent?.fen} />}
-                    </div>
-                  )}
-                  {optionRows.length > 0 && (
+                  {!analysisGameProgress && optionRows.length > 0 && (
                     <div className="tree-options-wrap">
                       {optionRows.map(({ node, leaves }) => (
                         <div key={node.id} className="tree-option">
@@ -8254,7 +8323,7 @@ function App() {
                       ))}
                     </div>
                   )}
-                  {repertoiresAtPosition.length === 0 && (
+                  {!analysisGameProgress && repertoiresAtPosition.length === 0 && (
                     <div className="repertoire-hit-block move-tools-only desktop-only">
                       <div className="repertoire-hit-head">
                         <span />
@@ -8273,7 +8342,7 @@ function App() {
                       </div>
                     </div>
                   )}
-                  {repertoiresAtPosition.length > 0 && (
+                  {!analysisGameProgress && repertoiresAtPosition.length > 0 && (
                     <div className="repertoire-hit-block">
                       <div className="repertoire-hit-head">
                         <strong>Repertoires with this position</strong>
@@ -8301,7 +8370,7 @@ function App() {
                                 enterBrowseMode(activeSide);
                                 return;
                               }
-                              loadRepertoire(item.id, activeSide, true);
+                              loadRepertoire(item.id, boardOrientation, true);
                             }}
                           >
                             {item.name}
@@ -8362,7 +8431,7 @@ function App() {
             style={{ left: `${treeOptionDeletePopup.x}px`, top: `${treeOptionDeletePopup.y}px` }}
             onClick={(event) => event.stopPropagation()}
           >
-            <button type="button" className="danger" onClick={deleteTreeOptionBranch} disabled={isAnalysisMode}>
+            <button type="button" className="danger" onClick={deleteTreeOptionBranch}>
               Delete branch
             </button>
           </div>
@@ -8412,17 +8481,20 @@ function App() {
         </div>
       )}
 
+      {isLichessArrowOptionsOpen && (
+        <div className="modal-backdrop" onClick={() => setIsLichessArrowOptionsOpen(false)}>
+          <div className="modal-card stockfish-quick-modal" role="dialog" aria-modal="true" aria-label="Lichess arrow options" onClick={(event) => event.stopPropagation()}>
+            <label className="inline-check">
+              <input type="checkbox" checked={showLichessOnTreeMoves} onChange={(event) => setShowLichessOnTreeMoves(event.target.checked)} />
+              Show Lichess arrows for tree moves
+            </label>
+          </div>
+        </div>
+      )}
+
       {isMoveToolsOpen && (
         <div className="modal-backdrop" onClick={() => setIsMoveToolsOpen(false)}>
           <div className="modal-card stockfish-quick-modal move-tools-modal" onClick={(e) => e.stopPropagation()}>
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={showLichessOnTreeMoves}
-                onChange={(e) => setShowLichessOnTreeMoves(e.target.checked)}
-              />
-              Show Lichess arrows for tree moves
-            </label>
             <div className="desktop-only">
               <h3 className="eval-manager-title">Sudden death settings</h3>
               <div className="slider-stack single-column">
@@ -8784,32 +8856,9 @@ function App() {
             </div>
             <div className="options-grid">
               <button
-                className={isAnalysisMode ? 'active' : ''}
-                disabled={!isAnalysisMode && (isTreeEvalRunning || isTrainingActive || isSuddenDeathActive || isExampleReplayActive)}
-                onClick={toggleAnalysisMode}
-              >
-                {isAnalysisMode ? 'Exit analysis mode' : 'Analysis mode'}
-              </button>
-              {isAnalysisMode && (
-                <button
-                  disabled={isBackupIoRunning || Boolean(analysisGameProgress)}
-                  onClick={() => {
-                    setIsOptionsOpen(false);
-                    importInputRef.current?.click();
-                  }}
-                >
-                  Load PGN
-                </button>
-              )}
-              <button
                 disabled={isTreeEvalRunning}
                 onClick={() => {
-                  if (isBrowseMode) {
-                    setRepertoireSide((prev) => (prev === 'white' ? 'black' : 'white'));
-                    setIsTempBoardFlipped(false);
-                  } else {
-                    setIsTempBoardFlipped((prev) => !prev);
-                  }
+                  setIsTempBoardFlipped((prev) => !prev);
                   setIsOptionsOpen(false);
                 }}
               >
@@ -8835,10 +8884,20 @@ function App() {
                 Load repertoire ({loadRepertoireSide})
               </button>
               <button
-                disabled={isTreeEvalRunning}
-                onClick={() => enterBrowseMode(activeSide)}
+                disabled={isTreeEvalRunning || isBackupIoRunning || Boolean(analysisGameProgress)}
+                onClick={() => {
+                  setIsOptionsOpen(false);
+                  setImportMode('review');
+                  importInputRef.current?.click();
+                }}
               >
-                Review mode
+                Load PGN
+              </button>
+              <button
+                disabled={isTreeEvalRunning || isBackupIoRunning || mainLinePath.length < 2}
+                onClick={() => { void saveCurrentGamePgn(); }}
+              >
+                Save PGN
               </button>
               <button
                 disabled={isBrowseMode || isTreeEvalRunning}

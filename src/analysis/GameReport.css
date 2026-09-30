@@ -18,6 +18,11 @@
 .gr-impact { font-size: 1rem; font-weight: 750; margin: .45rem 0 .55rem; }
 .gr-impact small { color: var(--gr-muted); font-size: .73rem; font-weight: 600; }
 .gr-profile-reason { color: var(--gr-muted); font-size: .74rem; min-height: 1.2em; margin: 0 0 .45rem; }
+.gr-model-match { font-weight: 750; font-size: .85rem; margin: .7rem 0 .35rem; }
+.gr-profile-chart { display: block; width: 100%; max-height: 100px; }
+.gr-profile-point { fill: #5879bf; }
+.gr-opponent-context { margin-top: .7rem; padding-top: .65rem; border-top: 1px solid var(--gr-line); font-size: .78rem; }
+.gr-opponent-context p { color: var(--gr-muted); font-size: .75rem; line-height: 1.45; margin: .35rem 0; }
 .gr-stats { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .4rem .65rem; border-top: 1px solid var(--gr-line); padding-top: .65rem; color: var(--gr-muted); font-size: .74rem; }
 .gr-stats b { color: var(--gr-ink); font-size: .9rem; margin-right: .16rem; }
 .gr-section { border: 1px solid var(--gr-line); background: var(--gr-panel); border-radius: 13px; padding: .9rem 1rem; }

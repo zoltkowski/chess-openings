@@ -1,0 +1,16 @@
+.maia-popularity-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .7rem; margin: .4rem 0 .6rem; font-size: .78rem; }
+.maia-popularity-controls label { display: flex; align-items: center; gap: .4rem; cursor: pointer; }
+.maia-popularity-controls input { accent-color: #2563eb; }
+.maia-popularity-note, .maia-popularity-pending { color: #64748b; font-size: .7rem; }
+.engine-pv-row.maia-popularity-row { display: grid; grid-template-columns: 3.8rem minmax(0, 1fr); align-items: center; }
+.maia-popularity-row .maia-popularity-chart, .maia-popularity-row > .maia-popularity-pending { grid-column: 1 / -1; }
+.maia-popularity-chart { width: 100%; height: 78px; display: block; color: #2563eb; }
+.maia-chart-grid { stroke: #94a3b8; stroke-width: .5; opacity: .45; fill: none; }
+.maia-chart-selected { stroke: currentColor; stroke-width: 1; stroke-dasharray: 2 2; opacity: .4; fill: none; }
+.maia-chart-line { stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+.maia-chart-dot { fill: currentColor; }
+.maia-chart-dot.selected { stroke: #fff; stroke-width: 1.2; }
+.maia-chart-label { fill: #64748b; font-size: 7px; }
+.maia-chart-label.selected { fill: currentColor; font-weight: 700; }
+.theme-dark .maia-popularity-chart { color: #93c5fd; }
+.theme-dark .maia-chart-label, .theme-dark .maia-popularity-note, .theme-dark .maia-popularity-pending { fill: #94a3b8; color: #94a3b8; }
