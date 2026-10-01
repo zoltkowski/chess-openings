@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -2211,6 +2212,8 @@ function App() {
   const lichessResponseCacheLoadPromiseRef = useRef<Promise<void> | null>(null);
   const trainingStatsMenuRef = useRef<HTMLDivElement | null>(null);
   const movePaneRef = useRef<HTMLElement | null>(null);
+  const moveNotationRef = useRef<HTMLDivElement | null>(null);
+  const selectedMoveButtonRef = useRef<HTMLButtonElement | null>(null);
   const backLongPressTimeoutRef = useRef<number | null>(null);
   const backLongPressHandledRef = useRef(false);
   const backLongPressIsDownRef = useRef(false);
@@ -6072,6 +6075,47 @@ function App() {
       }),
     [displayedMovePath, displayedBookMoves, gameAnalysisReportMatchesLine, gameAnalysisReport, selectedNode.id],
   );
+  useLayoutEffect(() => {
+    if (!isBrowseMode || isTrainingActive || analysisGameProgress) return;
+    const container = moveNotationRef.current;
+    if (!container) return;
+
+    const revealSelectedMove = () => {
+      if (container.clientHeight === 0) return;
+      const selected = selectedMoveButtonRef.current;
+      if (!selected) {
+        if (selectedNode.id === tree.rootId) container.scrollTop = 0;
+        return;
+      }
+
+      const selectedRect = selected.getBoundingClientRect();
+      const moveRects = Array.from(container.querySelectorAll<HTMLButtonElement>('.move-inline-item'),
+        (button) => button.getBoundingClientRect());
+      // Flex rows can contain several moves; keep one complete row on each side.
+      const previousRow = moveRects.filter((rect) => rect.top < selectedRect.top - 1).at(-1);
+      const nextRow = moveRects.find((rect) => rect.top > selectedRect.top + 1);
+      const contextTop = (previousRow?.top ?? selectedRect.top) - 4;
+      const contextBottom = (nextRow?.bottom ?? selectedRect.bottom) + 4;
+      const viewportTop = container.getBoundingClientRect().top + container.clientTop;
+      const viewportBottom = viewportTop + container.clientHeight;
+
+      if (contextBottom - contextTop > container.clientHeight) {
+        // A short list viewport may only fit the selected row and partial context.
+        container.scrollTop += (selectedRect.top + selectedRect.bottom - viewportTop - viewportBottom) / 2;
+      } else if (contextTop < viewportTop) {
+        container.scrollTop += contextTop - viewportTop;
+      } else if (contextBottom > viewportBottom) {
+        container.scrollTop += contextBottom - viewportBottom;
+      }
+    };
+
+    revealSelectedMove();
+    const observer = new ResizeObserver(revealSelectedMove);
+    observer.observe(container);
+    if (container.firstElementChild) observer.observe(container.firstElementChild);
+    return () => observer.disconnect();
+  }, [isBrowseMode, isTrainingActive, analysisGameProgress, inlineMoves, selectedNode.id, tree.rootId]);
+
   const selectedReportResult = isBrowseMode && gameAnalysisReportMatchesLine
     ? gameAnalysisReport?.results.find((result) => result.nodeId === selectedNode.id) ?? null
     : null;
@@ -6940,7 +6984,7 @@ function App() {
     });
   }, [activeSide, isBrowseMode, lichessData, lichessStatus, selectedNodeBySide]);
 
-  const rewindToNode = (targetId: string, deleteContinuation = true) => {
+  const rewindToNode = (targetId: string) => {
     if (isTrainingActive || isSuddenDeathActive) return;
     if (selectedNode.id === targetId) return;
     let branchRoot = selectedNode;
@@ -6949,16 +6993,10 @@ function App() {
     }
     if (branchRoot.parentId !== targetId) return;
     navigateToNode(activeSide, targetId);
-    if (deleteContinuation) {
-      setTrees((prev) => ({
-        ...prev,
-        [activeSide]: removeBranch(prev[activeSide], branchRoot.id),
-      }));
-    }
   };
 
   const goBackOneMove = () => {
-    if (selectedNode.parentId) rewindToNode(selectedNode.parentId, isBrowseMode);
+    if (selectedNode.parentId) rewindToNode(selectedNode.parentId);
   };
 
   const goBackToPreviousBranchMove = () => {
@@ -8291,11 +8329,12 @@ function App() {
                       {analysisMaiaNotice.text}
                     </div>
                   )}
-                  {!analysisGameProgress && <div className="move-notation-line">
+                  {!analysisGameProgress && <div ref={moveNotationRef} className="move-notation-line">
                     <div className="move-inline-wrap">
                       {inlineMoves.map((move) => (
                         <button
                           key={move.id}
+                          ref={move.selected ? selectedMoveButtonRef : undefined}
                           type="button"
                           className={`move-inline-item ${move.hasAlternatives ? 'has-alternatives' : ''} ${move.categoryClass ? `analysis-${move.categoryClass}` : ''} ${move.selected ? 'analysis-selected' : ''}`}
                           title={move.annotationTitle}
