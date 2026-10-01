@@ -1005,6 +1005,14 @@ function BackIcon() {
   );
 }
 
+function ForwardIcon() {
+  return (
+    <TabIconBase>
+      <path d="M6 12h11m-3.5-3.2L17 12l-3.5 3.2" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+    </TabIconBase>
+  );
+}
+
 function PlayIcon() {
   return (
     <TabIconBase>
@@ -2208,6 +2216,8 @@ function App() {
   const backLongPressIsDownRef = useRef(false);
   const backLongPressStageRef = useRef<0 | 1 | 2>(0);
   const backLongPressActionRef = useRef<(stage: 1 | 2) => void>(() => {});
+  const forwardLongPressTimeoutRef = useRef<number | null>(null);
+  const forwardLongPressHandledRef = useRef(false);
 
   const activeSide: Side = repertoireSide;
   const activeRepertoireList = repertoiresBySide[activeSide];
@@ -6010,6 +6020,9 @@ function App() {
   const canRunFindMissingSearch =
     activeFindMissingBaseNode.children.length > 0 && !isFindMissingSearchRunning && !isSuddenDeathActive;
   const displayedMovePath = isBrowseMode && !isTrainingActive ? mainLinePath : path;
+  const selectedMoveIndex = displayedMovePath.findIndex((node) => node.id === selectedNode.id);
+  const canGoForward = isBrowseMode && !isTrainingActive && !isSuddenDeathActive &&
+    selectedMoveIndex >= 0 && selectedMoveIndex < displayedMovePath.length - 1;
   const displayedBookMoves = useMemo(
     () => findBookMovesForGame(displayedMovePath, bookRepertoireIndex),
     [displayedMovePath, bookRepertoireIndex],
@@ -7024,6 +7037,43 @@ function App() {
       return;
     }
     goBackOneMove();
+  };
+
+  const goForward = (toEnd = false) => {
+    if (!canGoForward || isTreeEvalRunning) return;
+    const nextNode = displayedMovePath[toEnd ? displayedMovePath.length - 1 : selectedMoveIndex + 1];
+    navigateToNode(activeSide, nextNode.id);
+  };
+
+  const clearForwardLongPress = () => {
+    if (forwardLongPressTimeoutRef.current !== null) {
+      window.clearTimeout(forwardLongPressTimeoutRef.current);
+      forwardLongPressTimeoutRef.current = null;
+    }
+  };
+
+  useEffect(() => clearForwardLongPress, [activeSide, selectedNode.id, tree, isTreeEvalRunning, canGoForward]);
+
+  const handleForwardPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    clearForwardLongPress();
+    forwardLongPressHandledRef.current = false;
+    forwardLongPressTimeoutRef.current = window.setTimeout(() => {
+      forwardLongPressTimeoutRef.current = null;
+      forwardLongPressHandledRef.current = true;
+      goForward(true);
+    }, 450);
+  };
+
+  const handleForwardClick: MouseEventHandler<HTMLButtonElement> = (event) => {
+    if (forwardLongPressHandledRef.current) {
+      forwardLongPressHandledRef.current = false;
+      if (event.detail !== 0) {
+        event.preventDefault();
+        return;
+      }
+    }
+    goForward();
   };
 
   const clearTrainButtonLongPress = () => {
@@ -8139,6 +8189,28 @@ function App() {
                         <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
                           Undo
                         </button>
+                        {canGoForward && (
+                          <button
+                            type="button"
+                            className="review-forward-btn mode-icon-btn has-submenu-dot"
+                            onClick={handleForwardClick}
+                            onPointerDown={handleForwardPointerDown}
+                            onPointerUp={clearForwardLongPress}
+                            onPointerCancel={clearForwardLongPress}
+                            onPointerLeave={clearForwardLongPress}
+                            onKeyDown={(event) => {
+                              if (event.key === 'End') {
+                                event.preventDefault();
+                                goForward(true);
+                              }
+                            }}
+                            disabled={isTreeEvalRunning}
+                            aria-label="Forward 1 move"
+                            title="Forward 1 move (long press: end of game)"
+                          >
+                            <ForwardIcon />
+                          </button>
+                        )}
                           <>
                             <button
                               className="desktop-only"
