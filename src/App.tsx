@@ -312,6 +312,7 @@ type PersistedSettingsState = {
   themeMode: ThemeMode;
   selectedEngine: EngineChoice;
   bothEngines: boolean;
+  mobileMixedEngines: boolean;
   maiaStrengthElo: number;
   analysisBenchmarkElo: number;
   suddenDeathEngine: EngineChoice;
@@ -699,6 +700,7 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
     themeMode: normalizedThemeMode,
     selectedEngine: normalizedSelectedEngine,
     bothEngines: normalizedSelectedEngine === 'maia' && parsed.bothEngines === true,
+    mobileMixedEngines: parsed.mobileMixedEngines === true,
     analysisBenchmarkElo: clampInt((parsed as Partial<PersistedSettingsState>).analysisBenchmarkElo, 1100, 3000, 1800),
     maiaStrengthElo: clampInt(
       (parsed as Partial<PersistedSettingsState>).maiaStrengthElo,
@@ -2181,6 +2183,7 @@ function App() {
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
   const [selectedEngine, setSelectedEngine] = useState<EngineChoice>(initialEngineChoice);
   const [bothEngines, setBothEngines] = useState(false);
+  const [mobileMixedEngines, setMobileMixedEngines] = useState(false);
   const [maiaStrengthElo, setMaiaStrengthElo] = useState(initialMaiaStrengthElo);
   const [showMaiaPopularity, setShowMaiaPopularity] = useState(false);
   const [maiaResultKey, setMaiaResultKey] = useState('');
@@ -2455,7 +2458,8 @@ function App() {
   const maiaPositionFen = selectedBoardFen === START_FEN ? START_POS_FEN : selectedBoardFen;
   const currentMaiaKey = `${maiaPositionFen}|${maiaStrengthElo}`;
   const maiaComparisonKey = `${currentMaiaKey}|${engineMultiPv}`;
-  const showMixedEngines = desktopEngineComparison && bothEngines && selectedEngine === 'maia';
+  const mixedEnginesAvailable = desktopEngineComparison || mobileMixedEngines;
+  const showMixedEngines = mixedEnginesAvailable && bothEngines && selectedEngine === 'maia';
   const isGameReviewRunning = Boolean(analysisGameProgress);
   const maiaPopularity = useMaiaPopularity(maiaPositionFen, maiaStrengthElo,
     showMaiaPopularity && selectedEngine === 'maia' && engineRunning && !analysisGameProgress &&
@@ -2719,6 +2723,7 @@ function App() {
     setThemeMode(persistedSettings.themeMode);
     setSelectedEngine(persistedSettings.selectedEngine);
     setBothEngines(persistedSettings.bothEngines);
+    setMobileMixedEngines(persistedSettings.mobileMixedEngines);
     setMaiaStrengthElo(persistedSettings.maiaStrengthElo);
     setAnalysisBenchmarkElo(persistedSettings.analysisBenchmarkElo ?? 1800);
     setRepertoireSide(persistedSettings.repertoireSide);
@@ -2904,6 +2909,7 @@ function App() {
       themeMode,
       selectedEngine,
       bothEngines,
+      mobileMixedEngines,
       maiaStrengthElo,
       analysisBenchmarkElo,
       suddenDeathEngine,
@@ -2946,6 +2952,7 @@ function App() {
     themeMode,
     selectedEngine,
     bothEngines,
+    mobileMixedEngines,
     maiaStrengthElo,
     analysisBenchmarkElo,
     suddenDeathEngine,
@@ -5198,7 +5205,7 @@ function App() {
     if (analysisGameProgress || isTreeEvalRunning || playerAssessmentJobRef.current) return;
     let engine = clicked;
     let mixed = false;
-    if (allowMixed && desktopEngineComparison) {
+    if (allowMixed && mixedEnginesAvailable) {
       if (bothEngines) engine = clicked === 'stockfish' ? 'maia' : 'stockfish';
       else if (clicked !== selectedEngine) {
         engine = 'maia';
@@ -5487,6 +5494,7 @@ function App() {
       themeMode,
       selectedEngine,
       bothEngines,
+      mobileMixedEngines,
       maiaStrengthElo,
       analysisBenchmarkElo,
       suddenDeathEngine,
@@ -8335,17 +8343,19 @@ function App() {
                   <span className="ai-engine-select">
                     <button
                       type="button"
-                      className={`ai-engine-tab ${selectedEngine === 'stockfish' ? 'active' : ''}`}
+                      className={`ai-engine-tab ${selectedEngine === 'stockfish' || showMixedEngines ? 'active' : ''}`}
+                      aria-pressed={selectedEngine === 'stockfish' || showMixedEngines}
                       disabled={Boolean(analysisGameProgress)}
-                      onClick={() => selectEngine('stockfish')}
+                      onClick={() => selectEngine('stockfish', true)}
                     >
                       {STOCKFISH_ENGINE_LABEL}
                     </button>
                     <button
                       type="button"
                       className={`ai-engine-tab ${selectedEngine === 'maia' ? 'active' : ''}`}
+                      aria-pressed={selectedEngine === 'maia'}
                       disabled={Boolean(analysisGameProgress)}
-                      onClick={() => selectEngine('maia')}
+                      onClick={() => selectEngine('maia', true)}
                     >
                       {MAIA_ENGINE_LABEL}
                     </button>
@@ -9011,6 +9021,11 @@ function App() {
         <div className="modal-backdrop" onClick={() => setIsStockfishQuickOpen(false)}>
           <div className="modal-card stockfish-quick-modal" onClick={(e) => e.stopPropagation()}>
             <div className="slider-stack single-column">
+              <label className="inline-check">
+                <input type="checkbox" checked={mobileMixedEngines}
+                  onChange={event => setMobileMixedEngines(event.target.checked)} />
+                Enable Maia and Stockfish together on mobile
+              </label>
               <label>
                 {`${STOCKFISH_ENGINE_NAME} depth: ${engineDepth}`}
                 <span className="slider-field">
