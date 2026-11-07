@@ -20,7 +20,7 @@ import type { Key } from '@lichess-org/chessground/types';
 import type { DrawShape } from '@lichess-org/chessground/draw';
 import type { DrawBrushes } from '@lichess-org/chessground/draw';
 import { evaluateMaiaPosition, cancelMaiaEvaluations, isMaiaReady, MAIA_ENGINE_LABEL, subscribeMaiaStatus, type MaiaLoadingStatus } from './maiaEngine';
-import { STOCKFISH_ENGINE_LABEL, STOCKFISH_ENGINE_NAME } from './engineVersions';
+import { STOCKFISH_ENGINE_LABEL, STOCKFISH_ENGINE_NAME, STOCKFISH_VERSION } from './engineVersions';
 import '@lichess-org/chessground/assets/chessground.base.css';
 import '@lichess-org/chessground/assets/chessground.brown.css';
 import '@lichess-org/chessground/assets/chessground.cburnett.css';
@@ -34,9 +34,22 @@ import type { HumanReviewDetails } from './analysis/humanEvidence';
 import { HumanMoveDetails } from './analysis/HumanMoveDetails';
 import { MaiaPopularityChart, MaiaPopularityControls } from './MaiaPopularity';
 import { useMaiaPopularity } from './useMaiaPopularity';
+import { PlayerRepertoireTable, type PlayerMoveRow } from './analysis/PlayerRepertoireTable';
+import {
+  PLAYER_MISTAKE_LOSS,
+  hasPlayedMistake,
+  playerAssessmentKey,
+  playerMistakePattern,
+  playerMistakePriority,
+  playerPositionLoss,
+  playerTrainingBonus,
+  type PlayerAssessment,
+  type PlayerAssessments,
+} from './analysis/playerRepertoire';
 
 type Side = 'white' | 'black';
 type LichessSource = 'lichess' | 'masters' | 'player';
+type PlayerHistoryWindow = 'recent' | 'earlier';
 type DateRange = '1m' | '2m' | '3m' | '6m' | '1y' | '3y' | '5y' | '10y' | '20y' | '30y' | '50y' | null;
 type ThemeMode = 'light' | 'dark';
 type EngineChoice = 'stockfish' | 'maia';
@@ -63,6 +76,13 @@ type EngineLine = {
   pv: string;
   bestMove: string;
   evalValue: number;
+};
+
+type MaiaStockfishComparison = {
+  key: string;
+  scores: Map<string, CandidateEvaluation>;
+  alternatives: CandidateEvaluation[];
+  pending: boolean;
 };
 
 export type StockfishEvaluationResult = {
@@ -188,11 +208,22 @@ type LichessResponse = {
   moves: LichessMove[];
   topGames?: LichessExampleGame[];
   recentGames?: LichessExampleGame[];
+  queuePosition?: number;
 };
 
 type LichessResponseCacheEntry = {
   expiresAt: number;
   data: LichessResponse;
+};
+
+type FoundPlayerMistake = {
+  key: string;
+  san: string;
+  score: string;
+  recent: number;
+  earlier: number;
+  recentGames: number;
+  earlierGames: number;
 };
 
 type UndoSnapshot = {
@@ -280,6 +311,7 @@ type PersistedSettingsState = {
   version: 1;
   themeMode: ThemeMode;
   selectedEngine: EngineChoice;
+  bothEngines: boolean;
   maiaStrengthElo: number;
   analysisBenchmarkElo: number;
   suddenDeathEngine: EngineChoice;
@@ -288,6 +320,7 @@ type PersistedSettingsState = {
   isTempBoardFlipped: boolean;
   lichessSource: LichessSource;
   playerHandle: string;
+  playerSpeeds: string[];
   lichessApiToken: string;
   dateRange: DateRange;
   lichessArrowThreshold: MoveThreshold;
@@ -325,6 +358,7 @@ const FIXED_SOURCE = 'analysis';
 const MOVE_THRESHOLD_OPTIONS = [0, 1, 2, 3, 4, 5, 10, 20] as const;
 type MoveThreshold = (typeof MOVE_THRESHOLD_OPTIONS)[number];
 const SPEEDS = ['bullet', 'blitz', 'rapid', 'classical', 'correspondence'] as const;
+const PLAYER_SPEEDS = ['ultraBullet', ...SPEEDS] as const;
 const MODES = ['casual', 'rated'] as const;
 const RATINGS = [1200, 1400, 1600, 1800, 2000, 2200, 2500];
 const FIGURINES: Record<string, string> = {
@@ -354,6 +388,7 @@ const APP_SETTINGS_KEY = 'settings-v1';
 const APP_TRAINING_STATS_KEY = 'training-stats-v1';
 const APP_TRAINING_LEAF_LAST_SHOWN_KEY = 'training-leaf-last-shown-v1';
 const APP_LICHESS_RESPONSE_CACHE_KEY = 'lichess-response-cache-v1';
+const APP_PLAYER_ASSESSMENTS_KEY = `player-assessments-v1-${STOCKFISH_VERSION}`;
 const APP_GAME_ANALYSIS_REPORT_KEY = 'game-analysis-report-v1';
 const BACKUP_FILE_PREFIX = 'opening-prep-backup-';
 const BACKUP_FILE_EXTENSION = '.json';
@@ -380,6 +415,7 @@ const MAIA_STRENGTH_ELO_VALUES = Array.from(
 const LICHESS_API_MIN_INTERVAL_MS = 2000;
 const LICHESS_API_COOLDOWN_FALLBACK_MS = 120000;
 const LICHESS_CACHE_PLAYER_TTL_MS = 24 * 60 * 60 * 1000;
+const LICHESS_CACHE_PLAYER_LIMIT = 1500;
 const LICHESS_CACHE_DEFAULT_TTL_MS = 10 * 24 * 60 * 60 * 1000;
 const LICHESS_CACHE_DEFAULT_JITTER_MS = 5 * 24 * 60 * 60 * 1000;
 function maxTopGamesForSource(source: LichessSource) {
@@ -392,6 +428,42 @@ function maxRecentGamesForSource(source: LichessSource) {
   if (source === 'player') return 8;
   if (source === 'lichess') return 4;
   return 0;
+}
+
+function explorerDateFilter(source: LichessSource, range: DateRange) {
+  if (!range) return null;
+  const months = { '1m': 0, '2m': 1, '3m': 2, '6m': 5 } as const;
+  const years = { '1y': 1, '3y': 3, '5y': 5, '10y': 10 } as const;
+  const now = new Date();
+  const since = new Date(now.getFullYear(), now.getMonth(), 1);
+  if (range in months && source === 'player') {
+    since.setMonth(since.getMonth() - months[range as keyof typeof months]);
+  } else if (range in years && !(source === 'player' && (range === '5y' || range === '10y'))) {
+    since.setFullYear(since.getFullYear() - years[range as keyof typeof years]);
+  } else {
+    return null;
+  }
+  const format = (date: Date) => source === 'masters'
+    ? String(date.getFullYear())
+    : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+  return { since: format(since), until: format(now) };
+}
+
+function isPlayerExplorerUrl(url: string) {
+  return url.startsWith('https://explorer.lichess.ovh/player?');
+}
+
+function playerHistoryDates(window: PlayerHistoryWindow) {
+  const now = new Date();
+  const month = (offset: number) => {
+    const date = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+  };
+  return window === 'recent' ? { since: month(-2), until: month(0) } : { until: month(-3) };
+}
+
+function explorerGameCount(value: { white: number; draws: number; black: number }) {
+  return value.white + value.draws + value.black;
 }
 const CLOUD_EVAL_MIN_INTERVAL_MS = 1400;
 const CLOUD_EVAL_RETRY_FALLBACK_MS = 4000;
@@ -488,6 +560,34 @@ async function idbSet<T>(key: string, value: T): Promise<void> {
     tx.oncomplete = () => db.close();
     tx.onerror = () => db.close();
     tx.onabort = () => db.close();
+  });
+}
+
+async function idbUpdate<T>(key: string, update: (previous: T | undefined) => T) {
+  const db = await openAppDb();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(APP_DB_STORE, 'readwrite');
+    const store = tx.objectStore(APP_DB_STORE);
+    const request = store.get(key);
+    request.onsuccess = () => {
+      store.put(update(request.result as T | undefined), key);
+    };
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onabort = () => { db.close(); reject(tx.error); };
+  });
+}
+
+function savePlayerAssessment(key: string, assessment: PlayerAssessment) {
+  return idbUpdate<PlayerAssessments>(APP_PLAYER_ASSESSMENTS_KEY, (assessments = {}) => {
+    const existing = assessments[key];
+    const observed = { ...existing?.observed };
+    for (const [uci, count] of Object.entries(assessment.observed)) {
+      observed[uci] = Math.max(observed[uci] ?? 0, count);
+    }
+    return {
+      ...assessments,
+      [key]: { ...assessment, moves: { ...existing?.moves, ...assessment.moves }, observed },
+    };
   });
 }
 
@@ -598,6 +698,7 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
     ...parsed,
     themeMode: normalizedThemeMode,
     selectedEngine: normalizedSelectedEngine,
+    bothEngines: normalizedSelectedEngine === 'maia' && parsed.bothEngines === true,
     analysisBenchmarkElo: clampInt((parsed as Partial<PersistedSettingsState>).analysisBenchmarkElo, 1100, 3000, 1800),
     maiaStrengthElo: clampInt(
       (parsed as Partial<PersistedSettingsState>).maiaStrengthElo,
@@ -624,6 +725,8 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
       MODES.includes(mode as (typeof MODES)[number]),
     ),
     playerHandle: typeof parsed.playerHandle === 'string' ? parsed.playerHandle : '',
+    playerSpeeds: Array.isArray(parsed.playerSpeeds)
+      ? PLAYER_SPEEDS.filter(speed => parsed.playerSpeeds.includes(speed)) : [...PLAYER_SPEEDS],
     lichessApiToken: typeof (parsed as Partial<PersistedSettingsState>).lichessApiToken === 'string'
       ? (parsed as Partial<PersistedSettingsState>).lichessApiToken as string
       : '',
@@ -969,6 +1072,41 @@ function findBookMovesForGame(gamePath: MoveNode[], repertoires: BookRepertoireI
   return result;
 }
 
+function playerExplorerMoves(fen: string, moves: LichessMove[]) {
+  if (!moves.some(move => /^O-O/.test(move.san))) return moves;
+  const legal = new Map(fenToChess(fen).moves({ verbose: true }).map(move => [move.san, uciFromMove(move)]));
+  return moves.flatMap(move => {
+    // The explorer encodes castling as king-to-rook, even in standard chess.
+    const uci = /^O-O/.test(move.san) ? legal.get(move.san) : move.uci;
+    return uci ? [{ ...move, uci }] : [];
+  });
+}
+
+function explorerReplyFen(fen: string, uci: string) {
+  const chess = fenToChess(fen);
+  try {
+    chess.move(uci);
+    return chess.fen();
+  } catch {
+    return null;
+  }
+}
+
+function repertoireBranchNodes(tree: MoveTree, rootId: string) {
+  const nodes: MoveNode[] = [];
+  const stack = [rootId];
+  const visited = new Set<string>();
+  while (stack.length) {
+    const id = stack.pop()!;
+    const node = tree.nodes[id];
+    if (!node || visited.has(id)) continue;
+    visited.add(id);
+    nodes.push(node);
+    for (let index = node.children.length - 1; index >= 0; index--) stack.push(node.children[index]);
+  }
+  return nodes;
+}
+
 function AnalysisIcon() {
   return (
     <TabIconBase>
@@ -1080,18 +1218,18 @@ function fenToChess(fen: string) {
   return fen === START_FEN ? new Chess() : new Chess(fen);
 }
 
-function boardFen(fen: string) {
+function fullBoardFen(fen: string) {
   return fen === START_FEN ? START_POS_FEN : fen;
 }
 
 function positionFenKey(fen: string) {
-  const fullFen = boardFen(fen);
+  const fullFen = fullBoardFen(fen);
   const parts = fullFen.split(' ');
   return parts.slice(0, 4).join(' ');
 }
 
 function bookPositionFenKey(fen: string) {
-  const fullFen = boardFen(fen);
+  const fullFen = fullBoardFen(fen);
   const parts = fullFen.split(' ');
   if (parts[3] && parts[3] !== '-') {
     const chess = new Chess(fullFen);
@@ -1763,7 +1901,7 @@ function uciToFigurineSan(fen: string, uci: string) {
   }
 }
 
-function buildEnginePvMoves(fen: string, pv: string) {
+function buildEnginePvMoves(fen: string, pv: string, limit = Infinity) {
   const chess = fenToChess(fen);
   const moves: Array<{ san: string; fen: string; lastMove: [Key, Key] }> = [];
   for (const uci of pv.split(/\s+/).filter((part) => /^[a-h][1-8][a-h][1-8][nbrq]?$/.test(part))) {
@@ -1773,11 +1911,20 @@ function buildEnginePvMoves(fen: string, pv: string) {
       const move = chess.move(input);
       if (!move) break;
       moves.push({ san: toFigurineSan(move.san), fen: chess.fen(), lastMove: [move.from as Key, move.to as Key] });
+      if (moves.length >= limit) break;
     } catch {
       break;
     }
   }
   return moves;
+}
+
+function stockfishRank(evaluation: CandidateEvaluation, side: Side) {
+  const mate = evaluation.scoreText.match(/^([+-])M(\d+)$/);
+  const value = mate
+    ? (mate[1] === '+' ? 1 : -1) * (100_000 - Number(mate[2]))
+    : evaluation.evalCp;
+  return side === 'white' ? value : -value;
 }
 
 function MaiaMoveSummary({ result, positionFen }: { result: GameAnalysisMoveResult; positionFen?: string }) {
@@ -1874,6 +2021,36 @@ function LichessStatsBar(props: { white: number; draws: number; black: number; t
   );
 }
 
+async function readExplorerResponse(
+  response: Response,
+  publish: (snapshot: LichessResponse) => void,
+  onChunk?: () => void,
+) {
+  if (!response.body) {
+    const snapshot = parseLastJsonObject<LichessResponse>(await response.text());
+    if (Array.isArray(snapshot?.moves)) publish(snapshot);
+    return;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (!done) onChunk?.();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      const parsed = extractJsonObjects<LichessResponse>(buffer);
+      buffer = parsed.rest;
+      for (const snapshot of parsed.objects) {
+        if (Array.isArray(snapshot?.moves)) publish(snapshot);
+      }
+      if (done) break;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 function Board(props: {
   fen: string;
   orientation: 'white' | 'black';
@@ -1915,7 +2092,7 @@ function Board(props: {
 
   useEffect(() => {
     apiRef.current?.set({
-      fen: boardFen(fen),
+      fen: fullBoardFen(fen),
       orientation,
       coordinates: false,
       coordinatesOnSquares: false,
@@ -2003,6 +2180,7 @@ function App() {
   const [, setStatus] = useState('Ready');
   const [engineDepth, setEngineDepth] = useState(initialEngineDepth);
   const [selectedEngine, setSelectedEngine] = useState<EngineChoice>(initialEngineChoice);
+  const [bothEngines, setBothEngines] = useState(false);
   const [maiaStrengthElo, setMaiaStrengthElo] = useState(initialMaiaStrengthElo);
   const [showMaiaPopularity, setShowMaiaPopularity] = useState(false);
   const [maiaResultKey, setMaiaResultKey] = useState('');
@@ -2027,6 +2205,8 @@ function App() {
   const [engineMultiPv, setEngineMultiPv] = useState(3);
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
+  const [desktopEngineComparison, setDesktopEngineComparison] = useState(false);
+  const [maiaStockfishComparison, setMaiaStockfishComparison] = useState<MaiaStockfishComparison | null>(null);
   const [stockfishLinesFen, setStockfishLinesFen] = useState(START_POS_FEN);
   const [engineStatus, setEngineStatus] = useState('stopped');
   const [maiaLoadingStatus, setMaiaLoadingStatus] = useState<MaiaLoadingStatus | null>(null);
@@ -2036,6 +2216,14 @@ function App() {
   const [engineRunning, setEngineRunning] = useState(false);
   const [lichessData, setLichessData] = useState<LichessResponse | null>(null);
   const [lichessDataFen, setLichessDataFen] = useState<string | null>(null);
+  const [lichessDataRequestKey, setLichessDataRequestKey] = useState('');
+  const [explorerRefresh, setExplorerRefresh] = useState(0);
+  const explorerRefreshHandledRef = useRef(0);
+  const [playerSearchNote, setPlayerSearchNote] = useState('');
+  const [findCommonCursor, setFindCommonCursor] = useState<string | null>(null);
+  const [isFindingCommonMistakes, setIsFindingCommonMistakes] = useState(false);
+  const [playerMistakeFinding, setPlayerMistakeFinding] = useState<FoundPlayerMistake | null>(null);
+  const findMissingControllerRef = useRef<AbortController | null>(null);
   const [openingByFen, setOpeningByFen] = useState<Record<string, { eco: string; name: string }>>({});
   const [lichessStatus, setLichessStatus] = useState('idle');
   const [lichessApiIssueNote, setLichessApiIssueNote] = useState('');
@@ -2051,6 +2239,11 @@ function App() {
   const [isLichessTokenEditorOpen, setIsLichessTokenEditorOpen] = useState(false);
   const [lichessSource, setLichessSource] = useState<LichessSource>(initialLichessSource);
   const [playerHandle, setPlayerHandle] = useState(initialPlayerHandle);
+  const [playerSpeeds, setPlayerSpeeds] = useState<string[]>([...PLAYER_SPEEDS]);
+  const [playerAssessments, setPlayerAssessments] = useState<PlayerAssessments>({});
+  const [playerAssessmentRunning, setPlayerAssessmentRunning] = useState(false);
+  const [playerAssessmentNotice, setPlayerAssessmentNotice] = useState<{ key: string; message: string } | null>(null);
+  const playerAssessmentJobRef = useRef<AbortController | null>(null);
   const [lichessApiToken, setLichessApiToken] = useState(initialLichessApiToken);
   const [dateRange, setDateRange] = useState<DateRange>(initialDateRange);
   const [lichessArrowThreshold, setLichessArrowThreshold] = useState<MoveThreshold>(initialLichessArrowThreshold);
@@ -2108,7 +2301,9 @@ function App() {
       if (analysisGameActiveRef.current) setAnalysisMaiaNotice({ kind: 'error', text: `Błąd Maia-3: ${message}` });
     }
   }), []);
-  const [analysisScratchPosition, setAnalysisScratchPosition] = useState<{ fen: string; lastMove: [Key, Key] | null } | null>(null);
+  const [analysisScratchPosition, setAnalysisScratchPosition] = useState<{
+    fen: string; lastMove: [Key, Key] | null; playerMoves?: string[];
+  } | null>(null);
   const [isBackupIoRunning, setIsBackupIoRunning] = useState(false);
   const [isNewRepertoireOpen, setIsNewRepertoireOpen] = useState(false);
   const [isLoadRepertoireOpen, setIsLoadRepertoireOpen] = useState(false);
@@ -2203,7 +2398,6 @@ function App() {
   const [findMissingSearchCursorNodeId, setFindMissingSearchCursorNodeId] = useState<string | null>(null);
   const findMissingSearchAutoNavigationRef = useRef(false);
   const [isFindMissingSearchRunning, setIsFindMissingSearchRunning] = useState(false);
-  const lichessNodeLookupCacheRef = useRef<Map<string, LichessResponse | null>>(new Map());
   const lichessRateLimitedUntilRef = useRef(0);
   const lichessNextRequestAtRef = useRef(0);
   const lichessRequestQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -2233,6 +2427,7 @@ function App() {
     () => buildBookRepertoireIndex([...repertoiresBySide.white, ...repertoiresBySide.black]),
     [repertoiresBySide],
   );
+  const playerRepertoire = bookRepertoireIndex.find(entry => entry.id === activeRepertoireId);
   const boardOrientation: 'white' | 'black' =
     isTempBoardFlipped ? (repertoireSide === 'white' ? 'black' : 'white') : repertoireSide;
   const newRepertoireSide: Side = boardOrientation;
@@ -2252,11 +2447,19 @@ function App() {
   const selectedNode = tree.nodes[selectedNodeId] ?? tree.nodes[tree.rootId];
   const analysisScratchFen = analysisScratchPosition?.fen ?? null;
   const selectedBoardFen = analysisScratchFen ?? selectedNode.fen;
+  const playerPositionKey = bookPositionFenKey(selectedBoardFen);
+  const playerReviewKey = playerAssessmentKey(playerHandle, activeSide, playerPositionKey);
+  const playerAssessment = playerAssessments[playerReviewKey];
+  const playerRepertoireMoves = playerRepertoire?.movesByFen.get(playerPositionKey);
   const enginePvFen = selectedEngine === 'stockfish' ? stockfishLinesFen : selectedBoardFen;
   const maiaPositionFen = selectedBoardFen === START_FEN ? START_POS_FEN : selectedBoardFen;
+  const currentMaiaKey = `${maiaPositionFen}|${maiaStrengthElo}`;
+  const maiaComparisonKey = `${currentMaiaKey}|${engineMultiPv}`;
+  const showMixedEngines = desktopEngineComparison && bothEngines && selectedEngine === 'maia';
+  const isGameReviewRunning = Boolean(analysisGameProgress);
   const maiaPopularity = useMaiaPopularity(maiaPositionFen, maiaStrengthElo,
     showMaiaPopularity && selectedEngine === 'maia' && engineRunning && !analysisGameProgress &&
-    engineStatus === 'done' && maiaResultKey === `${maiaPositionFen}|${maiaStrengthElo}`);
+    engineStatus === 'done' && maiaResultKey === currentMaiaKey);
   const trainingForActive = trainingSession?.side === activeSide && !trainingSession.suddenDeathMode;
   const isTreeEvalRunning = Boolean(treeEvalProgress?.running);
 
@@ -2276,6 +2479,15 @@ function App() {
   useEffect(() => {
     setAnalysisScratchPosition(null);
   }, [activeSide, selectedNode.id]);
+
+  useEffect(() => {
+    if (lichessSource !== 'player') {
+      setAnalysisScratchPosition(previous => previous?.playerMoves ? null : previous);
+    }
+  }, [lichessSource]);
+
+  useEffect(() => () => playerAssessmentJobRef.current?.abort(),
+    [selectedBoardFen, activeSide, playerHandle, lichessSource, trainingSession]);
 
   const childNodes = useMemo(
     () => selectedNode.children.map((id) => tree.nodes[id]).filter(Boolean),
@@ -2376,12 +2588,23 @@ function App() {
       treeMoveOptionsForUi.map((option) => option.moveUci).filter((uci): uci is string => Boolean(uci)),
     );
 
-    const positionGames = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
+    const data = lichessDataFen === selectedNode.fen ? lichessData : null;
+    const positionGames = data ? explorerGameCount(data) : 0;
     const thresholdShare = lichessArrowThreshold / 100;
     const lichessArrows =
       !analysisScratchFen && showLichessArrows && positionGames > 0
         ? (() => {
-            const allEntries = (lichessData?.moves ?? [])
+            let explorerMoves = data?.moves ?? [];
+            if (lichessSource === 'player') {
+              explorerMoves = playerExplorerMoves(selectedNode.fen, explorerMoves);
+              if (!isBrowseMode && toTurnColor(selectedNode.fen) !== activeSide && !playerRepertoireMoves?.size) {
+                explorerMoves = explorerMoves.filter(move => {
+                  const reply = explorerReplyFen(selectedNode.fen, move.uci);
+                  return reply && hasPlayedMistake(playerAssessments[playerAssessmentKey(playerHandle, activeSide, bookPositionFenKey(reply))]);
+                });
+              }
+            }
+            const allEntries = explorerMoves
               .map((move) => {
                 const moveGames = move.white + move.draws + move.black;
                 const share = moveGames / positionGames;
@@ -2474,6 +2697,8 @@ function App() {
     mergedTreeMoveOptions,
     showTreeArrows,
     lichessData,
+    lichessDataFen,
+    lichessSource,
     lichessArrowThreshold,
     engineLines,
     selectedEngine,
@@ -2481,6 +2706,11 @@ function App() {
     showStockfishArrows,
     showLichessOnTreeMoves,
     analysisScratchFen,
+    activeSide,
+    selectedNode.fen,
+    playerAssessments,
+    playerHandle,
+    playerRepertoireMoves,
   ]);
 
   const lastMove = parseUciMove(selectedNode.moveUci);
@@ -2488,12 +2718,14 @@ function App() {
   const applyPersistedSettingsState = useCallback((persistedSettings: PersistedSettingsState) => {
     setThemeMode(persistedSettings.themeMode);
     setSelectedEngine(persistedSettings.selectedEngine);
+    setBothEngines(persistedSettings.bothEngines);
     setMaiaStrengthElo(persistedSettings.maiaStrengthElo);
     setAnalysisBenchmarkElo(persistedSettings.analysisBenchmarkElo ?? 1800);
     setRepertoireSide(persistedSettings.repertoireSide);
     setIsTempBoardFlipped(persistedSettings.isTempBoardFlipped);
     setLichessSource(persistedSettings.lichessSource);
     setPlayerHandle(persistedSettings.playerHandle);
+    setPlayerSpeeds(persistedSettings.playerSpeeds.length ? persistedSettings.playerSpeeds : [...PLAYER_SPEEDS]);
     setLichessApiToken(persistedSettings.lichessApiToken);
     setDateRange(persistedSettings.dateRange);
     setLichessArrowThreshold(persistedSettings.lichessArrowThreshold);
@@ -2583,6 +2815,8 @@ function App() {
             status: persistedGameAnalysis.status === 'running' ? 'partial' : persistedGameAnalysis.status,
           });
         }
+        const assessments = await idbGet<PlayerAssessments>(APP_PLAYER_ASSESSMENTS_KEY).catch(() => null);
+        if (assessments) setPlayerAssessments(assessments);
         setStatus('Ready');
       } catch {
         setStatus('Local storage load failed');
@@ -2595,10 +2829,19 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (selectedEngine === 'stockfish' && !stockfishRef.current) {
+    const desktop = window.matchMedia('(orientation: landscape) and (min-width: 900px) and (pointer: fine)');
+    const sync = () => setDesktopEngineComparison(desktop.matches);
+    sync();
+    desktop.addEventListener('change', sync);
+    return () => desktop.removeEventListener('change', sync);
+  }, []);
+
+  useEffect(() => {
+    if ((selectedEngine === 'stockfish' || (showMixedEngines && engineRunning && !isGameReviewRunning)) &&
+      !stockfishRef.current) {
       setStockfishGeneration((value) => value + 1);
     }
-  }, [selectedEngine]);
+  }, [selectedEngine, showMixedEngines, engineRunning, isGameReviewRunning]);
 
   useEffect(() => {
     if (!hasHydratedAppState || !gameAnalysisReport) return;
@@ -2660,6 +2903,7 @@ function App() {
       version: 1,
       themeMode,
       selectedEngine,
+      bothEngines,
       maiaStrengthElo,
       analysisBenchmarkElo,
       suddenDeathEngine,
@@ -2668,6 +2912,7 @@ function App() {
       isTempBoardFlipped,
       lichessSource,
       playerHandle,
+      playerSpeeds,
       lichessApiToken,
       dateRange,
       lichessArrowThreshold,
@@ -2700,6 +2945,7 @@ function App() {
     hasHydratedAppState,
     themeMode,
     selectedEngine,
+    bothEngines,
     maiaStrengthElo,
     analysisBenchmarkElo,
     suddenDeathEngine,
@@ -2708,6 +2954,7 @@ function App() {
     isTempBoardFlipped,
     lichessSource,
     playerHandle,
+    playerSpeeds,
     lichessApiToken,
     dateRange,
     lichessArrowThreshold,
@@ -2792,7 +3039,7 @@ function App() {
 
     tryStartPendingRef.current = () => {
       const w = stockfishRef.current;
-      if (!w || !engineReadyRef.current || !engineRunningRef.current) return;
+      if (!w || !engineReadyRef.current || !engineRunningRef.current || suddenDeathBusyRef.current) return;
       if (isSearchingRef.current) {
         w.postMessage('stop');
         return;
@@ -2850,8 +3097,8 @@ function App() {
             for (const old of pending.candidateLayers.keys()) if (old < depth - 2) pending.candidateLayers.delete(old);
           }
         }
-        if (suddenDeathAwaiterRef.current && text.includes(' multipv 1')) {
-          const awaiter = suddenDeathAwaiterRef.current;
+        if (pending && /\bmultipv 1\b/.test(text)) {
+          const awaiter = pending;
           const cpMatch = text.match(/ score cp (-?\d+)/);
           const mateMatch = text.match(/ score mate (-?\d+)/);
           const wdlMatch = text.match(/\bwdl (\d+) (\d+) (\d+)/);
@@ -2888,6 +3135,7 @@ function App() {
           }
         }
 
+        if (pending) return;
         const multipvMatch = text.match(/ multipv (\d+)/);
         const cpMatch = text.match(/ score cp (-?\d+)/);
         const mateMatch = text.match(/ score mate (-?\d+)/);
@@ -2965,6 +3213,7 @@ function App() {
         window.clearTimeout(suddenDeathAwaiter.timeoutId);
       }
       suddenDeathAwaiterRef.current = null;
+      suddenDeathAwaiter?.resolve({ scoreText: '?', evalCp: 0, bestMove: null, pv: '', depth: 0, nodes: 0, hasScore: false });
       worker.terminate();
       stockfishRef.current = null;
       engineReadyRef.current = false;
@@ -2975,6 +3224,7 @@ function App() {
   }, [stockfishGeneration]);
 
   useEffect(() => {
+    if (playerAssessmentJobRef.current) return;
     if (selectedEngine === 'maia') {
       const worker = stockfishRef.current;
       pendingAnalysisRef.current = null;
@@ -3044,6 +3294,7 @@ function App() {
     engineReadyTick,
     selectedEngine,
     maiaStrengthElo,
+    playerAssessmentRunning,
   ]);
 
   useEffect(() => {
@@ -3110,7 +3361,7 @@ function App() {
           for (const [url, entry] of Object.entries(raw)) {
             if (!entry || typeof entry !== 'object') continue;
             if (typeof entry.expiresAt !== 'number' || !Number.isFinite(entry.expiresAt)) continue;
-            if (entry.expiresAt <= now) continue;
+            if (entry.expiresAt <= now && !isPlayerExplorerUrl(url)) continue;
             const data = (entry as LichessResponseCacheEntry).data;
             if (!data || typeof data !== 'object' || !Array.isArray(data.moves)) continue;
             nextMap.set(url, { expiresAt: entry.expiresAt, data });
@@ -3133,303 +3384,185 @@ function App() {
     const now = Date.now();
     const serialized: Record<string, LichessResponseCacheEntry> = {};
     for (const [url, entry] of lichessResponseCacheRef.current.entries()) {
-      if (entry.expiresAt <= now) continue;
+      if (entry.expiresAt <= now && !isPlayerExplorerUrl(url)) continue;
       serialized[url] = entry;
     }
-    await idbSet(APP_LICHESS_RESPONSE_CACHE_KEY, serialized).catch(() => {
+    await idbUpdate<Record<string, LichessResponseCacheEntry>>(APP_LICHESS_RESPONSE_CACHE_KEY, (saved = {}) => {
+      const merged = { ...saved };
+      for (const [url, entry] of Object.entries(serialized)) {
+        if (!merged[url] || entry.expiresAt >= merged[url].expiresAt) merged[url] = entry;
+      }
+      for (const [url, entry] of Object.entries(merged)) {
+        if (!Number.isFinite(entry?.expiresAt) || !Array.isArray(entry?.data?.moves) ||
+          (entry.expiresAt <= now && !isPlayerExplorerUrl(url))) delete merged[url];
+      }
+      const playerEntries = Object.entries(merged).filter(([url]) => isPlayerExplorerUrl(url));
+      playerEntries.sort(([, a], [, b]) => b.expiresAt - a.expiresAt);
+      for (const [url] of playerEntries.slice(LICHESS_CACHE_PLAYER_LIMIT)) delete merged[url];
+      return merged;
+    }).catch(() => {
       // Keep cache write failures silent.
     });
   }, []);
 
   const getCachedLichessResponse = useCallback(
-    async (url: string): Promise<LichessResponse | null> => {
+    async (url: string): Promise<LichessResponseCacheEntry | null> => {
       await ensureLichessResponseCacheLoaded();
       const now = Date.now();
       const cached = lichessResponseCacheRef.current.get(url);
       if (!cached) return null;
-      if (cached.expiresAt <= now) {
+      if (cached.expiresAt <= now && !isPlayerExplorerUrl(url)) {
         lichessResponseCacheRef.current.delete(url);
         void persistLichessResponseCache();
         return null;
       }
-      return cached.data;
+      return cached;
     },
     [ensureLichessResponseCacheLoaded, persistLichessResponseCache],
   );
 
   const setCachedLichessResponse = useCallback(
-    async (url: string, data: LichessResponse, source: LichessSource) => {
+    async (url: string, data: LichessResponse, isPlayer: boolean) => {
       await ensureLichessResponseCacheLoaded();
       const ttlMs =
-        source === 'player'
+        isPlayer
           ? LICHESS_CACHE_PLAYER_TTL_MS
           : LICHESS_CACHE_DEFAULT_TTL_MS + Math.floor(Math.random() * (LICHESS_CACHE_DEFAULT_JITTER_MS + 1));
-      lichessResponseCacheRef.current.set(url, {
+      const cache = lichessResponseCacheRef.current;
+      cache.set(url, {
         expiresAt: Date.now() + ttlMs,
         data,
       });
+      if (isPlayer) {
+        const entries = [...cache].filter(([key]) => isPlayerExplorerUrl(key));
+        entries.sort(([, a], [, b]) => b.expiresAt - a.expiresAt);
+        for (const [key] of entries.slice(LICHESS_CACHE_PLAYER_LIMIT)) cache.delete(key);
+      }
       void persistLichessResponseCache();
     },
     [ensureLichessResponseCacheLoaded, persistLichessResponseCache],
   );
 
+  const getExplorerUrl = useCallback((fen: string, historyWindow?: PlayerHistoryWindow) => {
+    const params = new URLSearchParams({ fen: fullBoardFen(fen), variant: FIXED_VARIANT, color: activeSide });
+    if (lichessSource === 'player') {
+      params.set('fen', bookPositionFenKey(fen) + ' 0 1');
+      params.set('player', playerHandle.trim().toLowerCase());
+      if (playerSpeeds.length && playerSpeeds.length !== PLAYER_SPEEDS.length) params.set('speeds', [...playerSpeeds].sort().join(','));
+      params.set('modes', [...(selectedModes.length ? selectedModes : MODES)].sort().join(','));
+      params.set('source', FIXED_SOURCE);
+    } else if (lichessSource === 'lichess') {
+      if (selectedSpeeds.length) params.set('speeds', selectedSpeeds.join(','));
+      if (selectedRatings.length) params.set('ratings', selectedRatings.join(','));
+    }
+    const dates = historyWindow ? playerHistoryDates(historyWindow) : explorerDateFilter(lichessSource, dateRange);
+    if (dates?.since) params.set('since', dates.since);
+    if (dates?.until) params.set('until', dates.until);
+    const top = maxTopGamesForSource(lichessSource), recent = maxRecentGamesForSource(lichessSource);
+    if (top) params.set('topGames', String(top));
+    if (recent) params.set('recentGames', String(recent));
+    return 'https://explorer.lichess.ovh/' + lichessSource + '?' + params;
+  }, [activeSide, dateRange, lichessSource, playerHandle, playerSpeeds, selectedModes, selectedRatings, selectedSpeeds]);
+
+  const requestExplorer = useCallback(async (url: string, signal: AbortSignal,
+    publish?: (snapshot: LichessResponse) => void, onChunk?: () => void) => {
+    const allowed = await waitForLichessRateSlot();
+    signal.throwIfAborted();
+    if (!allowed) throw new Error("Lichess rate limit. Try again later.");
+    const token = lichessApiToken.trim();
+    const response = await fetch(url, { signal, headers: token ? { Authorization: 'Bearer ' + token } : undefined });
+    if (response.status === 429) registerLichessRateLimit(response.headers.get("Retry-After"));
+    if (response.status === 401) setLichessAuthRequired(true);
+    if (!response.ok) throw new Error('Lichess API error (' + response.status + ')');
+    const received: { last: LichessResponse | null } = { last: null };
+    await readExplorerResponse(response, snapshot => {
+      signal.throwIfAborted();
+      received.last = snapshot;
+      publish?.(snapshot);
+    }, onChunk);
+    signal.throwIfAborted();
+    const result = received.last;
+    if (!result) throw new Error('Invalid Lichess response');
+    const player = isPlayerExplorerUrl(url);
+    if (player && (result.queuePosition ?? 0) > 0) throw new Error('Lichess is still indexing these games.');
+    setLichessAuthRequired(false);
+    await setCachedLichessResponse(url, result, player);
+    return result;
+  }, [lichessApiToken, registerLichessRateLimit, setCachedLichessResponse, waitForLichessRateSlot]);
+
+  const explorerFen = lichessSource === 'player' ? selectedBoardFen : selectedNode.fen;
+  const explorerUrl = getExplorerUrl(explorerFen);
+  const explorerRequestKey = JSON.stringify([explorerUrl, lichessApiToken]);
   useEffect(() => {
     const controller = new AbortController();
-    const isPlayerWithoutHandle = lichessSource === 'player' && playerHandle.trim().length === 0;
-    const isTrainingLocalPlay = Boolean(trainingSession?.side === activeSide);
-    const isRateLimited = Date.now() < lichessRateLimitedUntilRef.current;
-
-    if (isPlayerWithoutHandle) {
-      setLichessData(null);
-      setLichessDataFen(null);
-      setLichessStatus('idle');
-      return () => {
-        controller.abort();
-      };
-    }
-
-    if (isTrainingLocalPlay) {
-      setLichessStatus('idle');
-      return () => {
-        controller.abort();
-      };
-    }
-
-    setLichessStatus('loading');
-
+    const isPlayer = lichessSource === 'player';
+    const skip = (isPlayer && !playerHandle.trim()) || trainingSession?.side === activeSide;
+    if (skip) { setLichessStatus('idle'); return; }
+    if (isFindMissingSearchRunning) return;
+    let disposed = false;
+    let timedOut = false;
+    let idle: number | undefined;
+    let shown: LichessResponse | null = null;
+    const publish = (data: LichessResponse, status: string) => {
+      shown = data;
+      setLichessData(data);
+      setLichessDataFen(explorerFen);
+      setLichessDataRequestKey(explorerRequestKey);
+      setLichessStatus(status);
+    };
+    const stopForTimeout = () => { timedOut = true; controller.abort(); };
+    const resetIdle = () => {
+      window.clearTimeout(idle);
+      idle = window.setTimeout(stopForTimeout, 20_000);
+    };
     const run = async () => {
-      const fenKey = selectedNode.fen;
-      const fen = fenKey === START_FEN ? new Chess().fen() : fenKey;
-      const params = new URLSearchParams({
-        fen,
-        variant: FIXED_VARIANT,
-      });
-      params.set('color', activeSide);
-      if (lichessSource === 'lichess' || lichessSource === 'player') {
-        if (selectedSpeeds.length) params.set('speeds', selectedSpeeds.join(','));
+      const cached = await getCachedLichessResponse(explorerUrl);
+      if (disposed) return;
+      setLichessApiIssueNote("");
+      const forceRefresh = explorerRefresh !== explorerRefreshHandledRef.current;
+      explorerRefreshHandledRef.current = explorerRefresh;
+      if (cached) {
+        const fresh = !forceRefresh && cached.expiresAt > Date.now();
+        publish(cached.data, fresh ? 'done' : 'refreshing');
+        if (fresh) return;
+      } else {
+        setLichessData(null);
+        setLichessDataFen(null);
+        setLichessStatus('loading');
       }
-      if (lichessSource === 'lichess') {
-        if (selectedRatings.length) params.set('ratings', selectedRatings.join(','));
-      }
-      if (lichessSource === 'player') {
-        params.set('player', playerHandle.trim());
-        params.set('play', '');
-        params.set('modes', (selectedModes.length > 0 ? selectedModes : [...MODES]).join(','));
-        params.set('source', FIXED_SOURCE);
-      }
-
-      const normalizedDateRange: DateRange =
-        lichessSource === 'player'
-          ? dateRange === '5y' ||
-            dateRange === '10y' ||
-            dateRange === '20y' ||
-            dateRange === '30y' ||
-            dateRange === '50y'
-            ? null
-            : dateRange
-          : lichessSource === 'masters'
-            ? dateRange === '1m' ||
-              dateRange === '2m' ||
-              dateRange === '3m' ||
-              dateRange === '6m' ||
-              dateRange === '20y' ||
-              dateRange === '30y' ||
-              dateRange === '50y'
-            ? null
-              : dateRange
-            : dateRange === '1m' ||
-                dateRange === '2m' ||
-                dateRange === '3m' ||
-                dateRange === '6m' ||
-                dateRange === '20y' ||
-                dateRange === '30y' ||
-                dateRange === '50y'
-            ? null
-            : dateRange;
-      const effectiveDateRange: DateRange = normalizedDateRange;
-      if (effectiveDateRange) {
-        const now = new Date();
-        const sinceDate = new Date(now);
-        if (effectiveDateRange === '1m') {
-          sinceDate.setMonth(now.getMonth());
-        } else if (effectiveDateRange === '2m') {
-          sinceDate.setMonth(now.getMonth() - 1);
-        } else if (effectiveDateRange === '3m') {
-          sinceDate.setMonth(now.getMonth() - 2);
-        } else if (effectiveDateRange === '6m') {
-          sinceDate.setMonth(now.getMonth() - 5);
-        } else if (effectiveDateRange === '1y') {
-          sinceDate.setFullYear(now.getFullYear() - 1);
-        } else if (effectiveDateRange === '5y') {
-          sinceDate.setFullYear(now.getFullYear() - 5);
-        } else if (effectiveDateRange === '10y') {
-          sinceDate.setFullYear(now.getFullYear() - 10);
-        } else {
-          sinceDate.setFullYear(now.getFullYear() - 3);
-        }
-        const since =
-          lichessSource === 'masters'
-            ? `${sinceDate.getFullYear()}`
-            : `${sinceDate.getFullYear()}-${String(sinceDate.getMonth() + 1).padStart(2, '0')}`;
-        const until =
-          lichessSource === 'masters'
-            ? `${now.getFullYear()}`
-            : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-        params.set('since', since);
-        params.set('until', until);
-      }
-
-      const endpoint = lichessSource === 'player' ? 'player' : lichessSource;
-      const topGamesLimit = maxTopGamesForSource(lichessSource);
-      const recentGamesLimit = maxRecentGamesForSource(lichessSource);
-      if (topGamesLimit > 0) params.set('topGames', String(topGamesLimit));
-      if (recentGamesLimit > 0) params.set('recentGames', String(recentGamesLimit));
-      const url = `https://explorer.lichess.ovh/${endpoint}?${params.toString()}`;
-      const token = lichessApiToken.trim();
-      const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
-
-      const cachedResponse = await getCachedLichessResponse(url);
-      if (cachedResponse) {
-        setLichessData(cachedResponse);
-        setLichessDataFen(fenKey);
-        setLichessStatus(isRateLimited ? 'limited' : 'done');
+      if (Date.now() < lichessRateLimitedUntilRef.current) {
+        setLichessStatus(cached ? 'cached' : 'limited');
         return;
       }
-
-      setLichessData(null);
-      setLichessDataFen(null);
-
-      if (isRateLimited) {
-        setLichessStatus('limited');
-        return;
-      }
-
-      const requestTimeoutMs = 120000;
-      const idleTimeoutMs = 20000;
-      let abortedByIdle = false;
-      const requestTimeout = window.setTimeout(() => {
-        if (!controller.signal.aborted) {
-          controller.abort();
-        }
-      }, requestTimeoutMs);
-      let idleTimeout = window.setTimeout(() => {
-        if (!controller.signal.aborted) {
-          abortedByIdle = true;
-          controller.abort();
-        }
-      }, idleTimeoutMs);
-      const resetIdleTimeout = () => {
-        window.clearTimeout(idleTimeout);
-        idleTimeout = window.setTimeout(() => {
-          if (!controller.signal.aborted) {
-            abortedByIdle = true;
-            controller.abort();
-          }
-        }, idleTimeoutMs);
-      };
-
-      let latestData: LichessResponse | null = null;
+      const timeout = window.setTimeout(stopForTimeout, 120_000);
+      resetIdle();
       try {
-        const allowed = await waitForLichessRateSlot();
-        if (!allowed || controller.signal.aborted) return;
-        const res = await fetch(url, {
-          signal: controller.signal,
-          headers,
-        });
-        if (res.status === 429) {
-          registerLichessRateLimit(res.headers.get('Retry-After'));
-          return;
-        }
-        if (res.status === 401) {
-          setLichessAuthRequired(true);
-          setLichessApiIssueNote('Lichess API error (401) - add token in options.');
-          setLichessStatus('error');
-          return;
-        }
-        if (!res.ok) {
-          setLichessApiIssueNote(`Lichess API error (${res.status})`);
-          throw new Error('Lichess request failed');
-        }
-        const body = res.body;
-        if (body) {
-          const reader = body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-          resetIdleTimeout();
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            resetIdleTimeout();
-            buffer += decoder.decode(value, { stream: true });
-            const parsed = extractJsonObjects<LichessResponse>(buffer);
-            buffer = parsed.rest;
-            if (parsed.objects.length > 0) {
-              latestData = parsed.objects[parsed.objects.length - 1];
-              setLichessData(latestData);
-              setLichessDataFen(fenKey);
-            }
-          }
-
-          buffer += decoder.decode();
-          if (!latestData) {
-            const data = parseLastJsonObject<LichessResponse>(buffer);
-            if (data) {
-              latestData = data;
-              setLichessData(data);
-              setLichessDataFen(fenKey);
-            }
-          }
-        } else {
-          const rawBody = await res.text();
-          const data = parseLastJsonObject<LichessResponse>(rawBody);
-          if (data) {
-            latestData = data;
-            setLichessData(data);
-            setLichessDataFen(fenKey);
-          }
-        }
-
-        if (!latestData) throw new Error('Invalid Lichess payload');
-        setLichessAuthRequired(false);
-        void setCachedLichessResponse(url, latestData, lichessSource);
-        setLichessApiIssueNote('');
-        setLichessStatus('done');
-      } catch {
-        if (controller.signal.aborted && abortedByIdle && latestData) {
-          setLichessStatus('done');
-        } else if (!controller.signal.aborted) {
-          setLichessApiIssueNote((prev) => prev || 'Lichess API error (?)');
-          setLichessStatus('error');
-        }
+        const final = await requestExplorer(explorerUrl, controller.signal, data => {
+          if (!cached) publish(data, isPlayer ? 'indexing' : 'loading');
+        }, resetIdle);
+        if (!disposed) publish(final, 'done');
+      } catch (error) {
+        if (disposed) return;
+        setLichessApiIssueNote(timedOut ? "Lichess took too long. Retry to continue." : getErrorMessage(error, "Lichess request failed."));
+        setLichessStatus(shown ? cached ? 'cached' : 'partial' : Date.now() < lichessRateLimitedUntilRef.current ? 'limited' : 'error');
       } finally {
-        window.clearTimeout(requestTimeout);
-        window.clearTimeout(idleTimeout);
+        window.clearTimeout(timeout);
+        window.clearTimeout(idle);
       }
     };
-
-    const timeout = window.setTimeout(run, 280);
+    // The cache is local, so show it before the navigation debounce expires.
+    void getCachedLichessResponse(explorerUrl).then(cached => {
+      if (!disposed && cached) publish(cached.data, cached.expiresAt > Date.now() ? 'done' : 'refreshing');
+    });
+    const timeout = window.setTimeout(() => { void run(); }, 280);
     return () => {
-      controller.abort();
+      disposed = true;
       window.clearTimeout(timeout);
+      window.clearTimeout(idle);
+      controller.abort();
     };
-  }, [
-    selectedNode.fen,
-    selectedSpeeds,
-    selectedRatings,
-    selectedModes,
-    dateRange,
-    lichessSource,
-    playerHandle,
-    lichessApiToken,
-    activeSide,
-    trainingSession?.side,
-    lichessRateLimitedUntil,
-    registerLichessRateLimit,
-    waitForLichessRateSlot,
-    getCachedLichessResponse,
-    setCachedLichessResponse,
-  ]);
+  }, [activeSide, explorerFen, explorerRequestKey, explorerUrl, getCachedLichessResponse, isFindMissingSearchRunning,
+    lichessRateLimitedUntil, lichessSource, playerHandle, requestExplorer, trainingSession?.side, explorerRefresh]);
 
   useEffect(() => {
     if (findMissingSearchAutoNavigationRef.current) {
@@ -3438,7 +3571,13 @@ function App() {
     }
     setFindMissingSearchBaseNodeId(selectedNode.id);
     setFindMissingSearchCursorNodeId(null);
-  }, [selectedNode.id, activeSide]);
+    setFindCommonCursor(null);
+    setPlayerSearchNote('');
+    setPlayerMistakeFinding(null);
+  }, [selectedNode.id, activeSide, activeRepertoireId, getExplorerUrl]);
+
+  useEffect(() => () => findMissingControllerRef.current?.abort(),
+    [selectedNode.id, activeRepertoireId, getExplorerUrl, trainingSession]);
 
   useEffect(() => {
     if (!isTrainingStatsMenuOpen) return;
@@ -3455,178 +3594,37 @@ function App() {
     };
   }, [isTrainingStatsMenuOpen]);
 
-  const fetchLichessNodeData = useCallback(
-    async (fenKey: string): Promise<LichessResponse | null> => {
-      const normalizedFenKey = positionFenKey(fenKey);
-      const cacheKey = JSON.stringify({
-        fen: normalizedFenKey,
-        side: activeSide,
-        source: lichessSource,
-        player: playerHandle.trim(),
-        token: lichessApiToken.trim(),
-        dateRange,
-        speeds: [...selectedSpeeds].sort().join(','),
-        ratings: [...selectedRatings].sort((a, b) => a - b).join(','),
-        modes: [...selectedModes].sort().join(','),
-        topGames: maxTopGamesForSource(lichessSource),
-        recentGames: maxRecentGamesForSource(lichessSource),
-      });
-      const cached = lichessNodeLookupCacheRef.current.get(cacheKey);
-      if (cached !== undefined) return cached;
+  const fetchLichessNodeData = async (fen: string, signal: AbortSignal): Promise<LichessResponse | null> => {
+    if (lichessSource === 'player' && !playerHandle.trim()) return null;
+    const url = getExplorerUrl(fen);
+    const cached = await getCachedLichessResponse(url);
+    if (cached || signal.aborted) return cached?.data ?? null;
+    try {
+      return await requestExplorer(url, AbortSignal.any([signal, AbortSignal.timeout(20_000)]));
+    } catch {
+      return null;
+    }
+  };
 
-      const fen = fenKey === START_FEN ? new Chess().fen() : fenKey;
-      const params = new URLSearchParams({
-        fen,
-        variant: FIXED_VARIANT,
-      });
-      params.set('color', activeSide);
-      if (lichessSource === 'lichess' || lichessSource === 'player') {
-        if (selectedSpeeds.length) params.set('speeds', selectedSpeeds.join(','));
-      }
-      if (lichessSource === 'lichess') {
-        if (selectedRatings.length) params.set('ratings', selectedRatings.join(','));
-      }
-      if (lichessSource === 'player') {
-        params.set('player', playerHandle.trim());
-        params.set('play', '');
-        params.set('modes', (selectedModes.length > 0 ? selectedModes : [...MODES]).join(','));
-        params.set('source', FIXED_SOURCE);
-      }
-
-      const normalizedDateRange: DateRange =
-        lichessSource === 'player'
-          ? dateRange === '5y' ||
-            dateRange === '10y' ||
-            dateRange === '20y' ||
-            dateRange === '30y' ||
-            dateRange === '50y'
-            ? null
-            : dateRange
-          : lichessSource === 'masters'
-            ? dateRange === '1m' ||
-              dateRange === '2m' ||
-              dateRange === '3m' ||
-              dateRange === '6m' ||
-              dateRange === '20y' ||
-              dateRange === '30y' ||
-              dateRange === '50y'
-              ? null
-              : dateRange
-            : dateRange === '1m' ||
-                dateRange === '2m' ||
-                dateRange === '3m' ||
-                dateRange === '6m' ||
-                dateRange === '20y' ||
-                dateRange === '30y' ||
-                dateRange === '50y'
-              ? null
-              : dateRange;
-
-      if (normalizedDateRange) {
-        const now = new Date();
-        const sinceDate = new Date(now);
-        if (normalizedDateRange === '1m') {
-          sinceDate.setMonth(now.getMonth());
-        } else if (normalizedDateRange === '2m') {
-          sinceDate.setMonth(now.getMonth() - 1);
-        } else if (normalizedDateRange === '3m') {
-          sinceDate.setMonth(now.getMonth() - 2);
-        } else if (normalizedDateRange === '6m') {
-          sinceDate.setMonth(now.getMonth() - 5);
-        } else if (normalizedDateRange === '1y') {
-          sinceDate.setFullYear(now.getFullYear() - 1);
-        } else if (normalizedDateRange === '5y') {
-          sinceDate.setFullYear(now.getFullYear() - 5);
-        } else if (normalizedDateRange === '10y') {
-          sinceDate.setFullYear(now.getFullYear() - 10);
-        } else {
-          sinceDate.setFullYear(now.getFullYear() - 3);
-        }
-        const since =
-          lichessSource === 'masters'
-            ? `${sinceDate.getFullYear()}`
-            : `${sinceDate.getFullYear()}-${String(sinceDate.getMonth() + 1).padStart(2, '0')}`;
-        const until =
-          lichessSource === 'masters'
-            ? `${now.getFullYear()}`
-            : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-        params.set('since', since);
-        params.set('until', until);
-      }
-
-      const endpoint = lichessSource === 'player' ? 'player' : lichessSource;
-      const topGamesLimit = maxTopGamesForSource(lichessSource);
-      const recentGamesLimit = maxRecentGamesForSource(lichessSource);
-      if (topGamesLimit > 0) params.set('topGames', String(topGamesLimit));
-      if (recentGamesLimit > 0) params.set('recentGames', String(recentGamesLimit));
-      const url = `https://explorer.lichess.ovh/${endpoint}?${params.toString()}`;
-      const token = lichessApiToken.trim();
-      const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
-
-      const cachedResponse = await getCachedLichessResponse(url);
-      if (cachedResponse) {
-        lichessNodeLookupCacheRef.current.set(cacheKey, cachedResponse);
-        return cachedResponse;
-      }
-
-      if (Date.now() < lichessRateLimitedUntilRef.current) {
-        return null;
-      }
-
-      if (lichessSource === 'player' && playerHandle.trim().length === 0) {
-        return null;
-      }
-
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 20000);
+  const playerSearchQuery = (signal: AbortSignal) => {
+    let networkRequests = 0;
+    return async (fen: string, window?: PlayerHistoryWindow) => {
+      const url = getExplorerUrl(fen, window);
+      const cached = await getCachedLichessResponse(url);
+      signal.throwIfAborted();
+      if (cached && cached.expiresAt > Date.now()) return cached.data;
+      if (networkRequests >= 6) throw new Error('Search paused after six requests. Run it again to continue.');
+      networkRequests++;
       try {
-        const allowed = await waitForLichessRateSlot();
-        if (!allowed || controller.signal.aborted) {
-          return null;
-        }
-        const response = await fetch(url, { signal: controller.signal, headers });
-        if (response.status === 429) {
-          registerLichessRateLimit(response.headers.get('Retry-After'));
-          return null;
-        }
-        if (response.status === 401) {
-          setLichessAuthRequired(true);
-          setLichessApiIssueNote('Lichess API error (401) - add token in options.');
-          return null;
-        }
-        if (!response.ok) {
-          setLichessApiIssueNote(`Lichess API error (${response.status})`);
-          throw new Error('Lichess request failed');
-        }
-        const rawBody = await response.text();
-        const data = parseLastJsonObject<LichessResponse>(rawBody);
-        setLichessAuthRequired(false);
-        lichessNodeLookupCacheRef.current.set(cacheKey, data ?? null);
-        if (data) void setCachedLichessResponse(url, data, lichessSource);
-        if (data) setLichessApiIssueNote('');
-        return data ?? null;
-      } catch {
-        setLichessApiIssueNote((prev) => prev || 'Lichess API error (?)');
-        return null;
-      } finally {
-        window.clearTimeout(timeout);
+        return await requestExplorer(url, AbortSignal.any([signal, AbortSignal.timeout(20_000)]));
+      } catch (error) {
+        signal.throwIfAborted();
+        if (cached && !window) return cached.data;
+        throw new Error(error instanceof DOMException && error.name === 'TimeoutError'
+          ? 'Lichess timed out. Run the search again to retry.' : getErrorMessage(error, 'Explorer data unavailable.'));
       }
-    },
-    [
-      activeSide,
-      lichessSource,
-      playerHandle,
-      lichessApiToken,
-      dateRange,
-      selectedSpeeds,
-      selectedRatings,
-      selectedModes,
-      registerLichessRateLimit,
-      waitForLichessRateSlot,
-      getCachedLichessResponse,
-      setCachedLichessResponse,
-    ],
-  );
+    };
+  };
 
   const clearTrainingHint = () => {
     setTrainingSession((prev) =>
@@ -3684,7 +3682,7 @@ function App() {
     });
   };
 
-  const runStockfishSingleQuery = async (params: {
+  const runStockfishSingleQuery = useCallback(async (params: {
     fen: string;
     depth: number;
     perspectiveSide: Side;
@@ -3694,6 +3692,9 @@ function App() {
     engineChoice?: EngineChoice;
     maiaElo?: number;
     positionCommand?: string;
+    searchMoves?: readonly string[];
+    preserveInteractiveLines?: boolean;
+    signal?: AbortSignal;
     onInfo?: (scoreText: string) => void;
   }): Promise<StockfishEvaluationResult> => {
     const {
@@ -3706,6 +3707,9 @@ function App() {
       engineChoice,
       maiaElo,
       positionCommand,
+      searchMoves,
+      preserveInteractiveLines,
+      signal,
       onInfo,
     } = params;
     const effectiveEngine: EngineChoice = engineChoice ?? selectedEngineRef.current;
@@ -3736,9 +3740,12 @@ function App() {
     }
 
     while (suddenDeathBusyRef.current) {
+      signal?.throwIfAborted();
       await new Promise((resolve) => window.setTimeout(resolve, 25));
     }
+    signal?.throwIfAborted();
     suddenDeathBusyRef.current = true;
+    let stopOnAbort: (() => void) | undefined;
 
     try {
       const worker = stockfishRef.current;
@@ -3752,13 +3759,15 @@ function App() {
       worker.postMessage('stop');
       // Drain the interactive search before a new awaiter can own its bestmove.
       for (let attempt = 0; attempt < 100 && isSearchingRef.current && stockfishRef.current === worker; attempt++) {
+        signal?.throwIfAborted();
         await new Promise(resolve => window.setTimeout(resolve, 20));
       }
+      signal?.throwIfAborted();
       if (isSearchingRef.current || stockfishRef.current !== worker || !engineReadyRef.current) {
         return { scoreText: '?', evalCp: 0, bestMove: null, pv: '', depth: 0, nodes: 0, hasScore: false };
       }
       lineCacheRef.current = new Map();
-      setEngineLines([]);
+      if (!preserveInteractiveLines) setEngineLines([]);
 
       const whitePerspectiveMultiplier = whitePerspectiveMultiplierFromFen(fen);
       const sidePerspectiveMultiplier = perspectiveSide === 'white' ? 1 : -1;
@@ -3797,11 +3806,16 @@ function App() {
           latestWdl: null,
           wdlMultiplier: perspectiveMultiplier,
           candidateLayers: new Map(),
-          requiredCandidates: Math.min(effectiveMultiPv, new Chess(fen).moves().length),
+          requiredCandidates: Math.min(effectiveMultiPv, searchMoves?.length ?? new Chess(fen).moves().length),
           onInfo,
           timeoutId,
           resolve,
         };
+        const query = suddenDeathAwaiterRef.current;
+        stopOnAbort = () => {
+          if (suddenDeathAwaiterRef.current === query) worker.postMessage('stop');
+        };
+        signal?.addEventListener('abort', stopOnAbort, { once: true });
 
         worker.postMessage('setoption name UCI_ShowWDL value true');
         worker.postMessage(`setoption name MultiPV value ${effectiveMultiPv}`);
@@ -3812,21 +3826,166 @@ function App() {
           worker.postMessage('setoption name UCI_LimitStrength value false');
         }
         worker.postMessage(positionCommand ?? `position fen ${fen}`);
-        if (typeof movetimeMs === 'number' && Number.isFinite(movetimeMs) && movetimeMs > 0) {
-          worker.postMessage(`go movetime ${Math.floor(movetimeMs)}`);
-        } else {
-          worker.postMessage(`go depth ${Math.max(8, depth)}`);
-        }
+        const limit = typeof movetimeMs === 'number' && Number.isFinite(movetimeMs) && movetimeMs > 0
+          ? `movetime ${Math.floor(movetimeMs)}` : `depth ${Math.max(8, depth)}`;
+        worker.postMessage(`go ${limit}${searchMoves?.length ? ` searchmoves ${searchMoves.join(' ')}` : ''}`);
       });
 
+      signal?.throwIfAborted();
       return result;
     } finally {
+      if (stopOnAbort) signal?.removeEventListener('abort', stopOnAbort);
       suddenDeathBusyRef.current = false;
+      tryStartPendingRef.current?.();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!showMixedEngines || !engineRunning || !stockfishLoaded || engineStatus !== 'done' ||
+      maiaResultKey !== currentMaiaKey || !engineLines.length || isGameReviewRunning ||
+      isTreeEvalRunning || playerAssessmentRunning || trainingSession || exampleReplay) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    const maiaMoves = engineLines.map(line => line.bestMove);
+    const query = (multipv: number, movetimeMs: number, searchMoves?: readonly string[]) => runStockfishSingleQuery({
+      fen: maiaPositionFen, depth: engineDepth, perspectiveSide: 'white', engineChoice: 'stockfish',
+      multipv, movetimeMs, searchMoves, preserveInteractiveLines: true, signal,
+    });
+    const compare = async () => {
+      setMaiaStockfishComparison({ key: maiaComparisonKey, scores: new Map(), alternatives: [], pending: true });
+      try {
+        const top = (await query(engineMultiPv, 300)).candidates ?? [];
+        if (!top.length) throw new Error('Stockfish returned no candidate moves.');
+        const stockfishMoves = new Set(top.map(candidate => candidate.uci));
+        const union = [...new Set([...stockfishMoves, ...maiaMoves])];
+        // A common root search scores both sets at the same depth.
+        const compared = union.length === stockfishMoves.size ? top
+          : (await query(union.length, 400 + 70 * union.length, union)).candidates ?? [];
+        const scores = new Map(compared.map(candidate => [candidate.uci, candidate]));
+        const side = toTurnColor(maiaPositionFen);
+        const maiaRanks = maiaMoves.flatMap(uci => {
+          const candidate = scores.get(uci);
+          return candidate ? [stockfishRank(candidate, side)] : [];
+        });
+        const weakestMaia = maiaRanks.length === maiaMoves.length ? Math.min(...maiaRanks) : Infinity;
+        const maiaSet = new Set(maiaMoves);
+        const alternatives = compared.filter(candidate => stockfishMoves.has(candidate.uci) &&
+          !maiaSet.has(candidate.uci) && stockfishRank(candidate, side) > weakestMaia);
+        if (!signal.aborted) setMaiaStockfishComparison({ key: maiaComparisonKey, scores, alternatives, pending: false });
+      } catch {
+        if (!signal.aborted) {
+          setMaiaStockfishComparison({ key: maiaComparisonKey, scores: new Map(), alternatives: [], pending: false });
+        }
+      }
+    };
+    const timer = window.setTimeout(() => void compare(), 100);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [showMixedEngines, engineRunning, stockfishLoaded, engineStatus, maiaResultKey, currentMaiaKey, engineLines,
+    isGameReviewRunning, isTreeEvalRunning, playerAssessmentRunning, trainingSession, exampleReplay, maiaPositionFen,
+    engineDepth, engineMultiPv, maiaComparisonKey, runStockfishSingleQuery]);
+
+  const withPlayerEngine = async <T,>(controller: AbortController, run: () => Promise<T>) => {
+    playerAssessmentJobRef.current = controller;
+    const wasRunning = engineRunningRef.current;
+    engineRunningRef.current = false;
+    setPlayerAssessmentRunning(true);
+    const stop = () => stockfishRef.current?.postMessage('stop');
+    controller.signal.addEventListener('abort', stop, { once: true });
+    try {
+      return await run();
+    } finally {
+      controller.signal.removeEventListener('abort', stop);
+      playerAssessmentJobRef.current = null;
+      engineRunningRef.current = wasRunning;
+      setPlayerAssessmentRunning(false);
+    }
+  };
+
+  const assessPlayerPosition = async (fen: string, moves: ReadonlyMap<string, number>, signal: AbortSignal,
+    reuse: boolean, saveNoticeKey?: string) => {
+    const key = playerAssessmentKey(playerHandle, activeSide, bookPositionFenKey(fen));
+    const previous = playerAssessments[key];
+    const pending = [...moves].filter(([uci]) => !reuse || !previous?.moves[uci]);
+    const observed = { ...previous?.observed };
+    for (const [uci, count] of moves) {
+      if (count > (observed[uci] ?? 0)) observed[uci] = count;
+    }
+    if (!pending.length && previous) {
+      if ([...moves.keys()].every(uci => observed[uci] === previous.observed[uci])) return previous;
+      const updated = { ...previous, observed };
+      setPlayerAssessments(prev => ({ ...prev, [key]: updated }));
+      await savePlayerAssessment(key, updated).catch(() => {});
+      return updated;
+    }
+    const evaluate = async (movetimeMs: number, searchMove?: string) => {
+      signal.throwIfAborted();
+      const result = await runStockfishSingleQuery({
+        fen: fullBoardFen(fen), depth: engineDepth, perspectiveSide: activeSide, movetimeMs,
+        searchMoves: searchMove ? [searchMove] : undefined, engineChoice: 'stockfish',
+      });
+      signal.throwIfAborted();
+      return result;
+    };
+    const best = await evaluate(180);
+    if (!best.hasScore) throw new Error('Stockfish could not score this position.');
+    let refinedBest: StockfishEvaluationResult | undefined;
+    const assessment: PlayerAssessment = {
+      best, moves: { ...previous?.moves }, observed,
+    };
+    for (const [uci] of pending) {
+      const quick = best.bestMove === uci ? best : await evaluate(180, uci);
+      if (!quick.hasScore) continue;
+      const initialLoss = playerPositionLoss(best, quick);
+      let score = quick.scoreText;
+      let confirmedLoss = initialLoss;
+      const contradicts = (a: StockfishEvaluationResult, b: StockfishEvaluationResult) =>
+        (playerPositionLoss(b, a) ?? 0) > 1;
+      if (initialLoss === null || initialLoss >= 4 || contradicts(best, quick)) {
+        refinedBest ??= await evaluate(480);
+        const played = refinedBest.bestMove === uci ? refinedBest : await evaluate(480, uci);
+        const refinedLoss = refinedBest.hasScore && played.hasScore ? playerPositionLoss(refinedBest, played) : null;
+        if (refinedBest.hasScore) assessment.best = refinedBest;
+        if (played.hasScore) score = played.scoreText;
+        confirmedLoss = refinedLoss !== null && initialLoss !== null && !contradicts(refinedBest, played) &&
+          [5, PLAYER_MISTAKE_LOSS].every(threshold => (initialLoss >= threshold) === (refinedLoss >= threshold))
+          ? refinedLoss : null;
+      }
+      assessment.moves[uci] = { score, confirmedLoss };
+    }
+    signal.throwIfAborted();
+    if (!Object.keys(assessment.moves).length) throw new Error('Stockfish could not score these moves.');
+    setPlayerAssessments(prev => ({ ...prev, [key]: assessment }));
+    await savePlayerAssessment(key, assessment).catch(() => {
+      if (saveNoticeKey) setPlayerAssessmentNotice({ key: saveNoticeKey, message: 'Could not save the Stockfish results locally.' });
+    });
+    return assessment;
+  };
+
+  const assessPlayerMoves = async (moves: ReadonlyMap<string, number>) => {
+    if (playerAssessmentJobRef.current) {
+      playerAssessmentJobRef.current.abort();
+      return;
+    }
+    if (!hasHydratedAppState || !stockfishLoaded || analysisGameProgress || isTreeEvalRunning ||
+      trainingSession || isExampleReplayActive || findMissingControllerRef.current || !moves.size ||
+      toTurnColor(selectedBoardFen) !== activeSide) return;
+    const controller = new AbortController();
+    setPlayerAssessmentNotice(null);
+    try {
+      await withPlayerEngine(controller, () =>
+        assessPlayerPosition(selectedBoardFen, moves, controller.signal, false, playerReviewKey));
+    } catch (error) {
+      if (!controller.signal.aborted) setPlayerAssessmentNotice({
+        key: playerReviewKey, message: getErrorMessage(error, 'Could not evaluate moves.'),
+      });
     }
   };
 
   const analyzeCurrentGame = async (deep = false) => {
-    if (!isBrowseMode || isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning) return;
+    if (!isBrowseMode || isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning || playerAssessmentJobRef.current) return;
     if (analysisGameProgress) {
       analysisGameCancelRef.current = true;
       analysisReviewAbortRef.current?.abort();
@@ -4004,6 +4163,19 @@ function App() {
     return (correct / recentAnswers.length) * 100;
   };
 
+  const flashcardWeight = (side: Side, scopeId: string, fen: string) => {
+    const base = Math.max(1, 101 - getScopeSuccessRate(side, scopeId, fen));
+    const position = bookPositionFenKey(fen);
+    const assessment = playerAssessments[playerAssessmentKey(playerHandle, side, position)];
+    if (!assessment) return base;
+    const ids = scopeId === TRAINING_SCOPE_WHOLE_DB
+      ? repertoiresBySide[side].map(entry => entry.id) : [scopeId.slice('repo:'.length)];
+    const repertoireMoves = new Set(bookRepertoireIndex.flatMap(entry =>
+      ids.includes(entry.id) ? [...(entry.movesByFen.get(position) ?? [])] : []));
+    const answers = trainingStatsBySide[side]?.[scopeId]?.[positionFenKey(fen)]?.recentAnswers ?? [];
+    return base + playerTrainingBonus(assessment, repertoireMoves, answers);
+  };
+
   const collectBrowseChildFenKeys = (side: Side, fen: string) => {
     const targetFenKey = positionFenKey(fen);
     const childFenKeys = new Set<string>();
@@ -4074,10 +4246,7 @@ function App() {
       if (candidateNodes.length === 0) return;
       const preferred = candidateNodes.filter((node) => node.parentId !== selectedNode.id);
       const pool = preferred.length > 0 ? preferred : candidateNodes;
-      const weights = pool.map((node) => {
-        const successRate = getScopeSuccessRate(side, scopeId, node.fen);
-        return Math.max(1, 101 - successRate);
-      });
+      const weights = pool.map(node => flashcardWeight(side, scopeId, node.fen));
       const pickedIndex = weightedPickIndex(weights);
       if (pickedIndex < 0) return;
       const pickedNode = pool[pickedIndex];
@@ -4122,10 +4291,7 @@ function App() {
     const candidateFens = [...candidateByFen.values()];
     const preferred = candidateFens.filter((fen) => !childFenKeys.has(positionFenKey(fen)));
     const pool = preferred.length > 0 ? preferred : candidateFens;
-    const weights = pool.map((fen) => {
-      const successRate = getScopeSuccessRate(side, scopeId, fen);
-      return Math.max(1, 101 - successRate);
-    });
+    const weights = pool.map(fen => flashcardWeight(side, scopeId, fen));
     const pickedIndex = weightedPickIndex(weights);
     if (pickedIndex < 0) return;
     const pickedFen = pool[pickedIndex];
@@ -4353,6 +4519,7 @@ function App() {
   };
 
   const startTraining = () => {
+    if (playerAssessmentJobRef.current) return;
     const side = activeSide;
     if (!hasSideTrainingContent(side)) {
       setStatus('No lines to train on this side.');
@@ -4412,6 +4579,7 @@ function App() {
   };
 
   const toggleSuddenDeathMode = () => {
+    if (playerAssessmentJobRef.current) return;
     if (!trainingSession) {
       startSuddenDeathTraining();
       return;
@@ -4601,6 +4769,8 @@ function App() {
       setAnalysisScratchPosition({
         fen: chess.fen(),
         lastMove: [move.from as Key, move.to as Key],
+        playerMoves: analysisScratchPosition.playerMoves
+          ? [...analysisScratchPosition.playerMoves, uciFromMove(move)] : undefined,
       });
       return;
     }
@@ -4964,6 +5134,48 @@ function App() {
     makeMove(keyPair[0], keyPair[1], promotion);
   };
 
+  const playPlayerMove = (uci: string) => {
+    if (trainingSession || isExampleReplayActive || isTreeEvalRunning) return;
+    const chess = fenToChess(selectedBoardFen);
+    try {
+      const move = chess.move(uci);
+      setPlayerSearchNote('');
+      const preview = analysisScratchPosition?.playerMoves;
+      setAnalysisScratchPosition({
+        fen: chess.fen(), lastMove: [move.from as Key, move.to as Key],
+        playerMoves: !analysisScratchPosition || preview ? [...(preview ?? []), uciFromMove(move)] : undefined,
+      });
+    } catch {
+      // An explorer row can become stale while the board is changing.
+    }
+  };
+
+  const backPlayerPreview = () => {
+    const moves = analysisScratchPosition?.playerMoves?.slice(0, -1);
+    if (!moves?.length) {
+      setAnalysisScratchPosition(null);
+      return;
+    }
+    const chess = fenToChess(selectedNode.fen);
+    for (const uci of moves) chess.move(uci);
+    setAnalysisScratchPosition({ fen: chess.fen(), lastMove: parseUciMove(moves.at(-1) ?? null) ?? null, playerMoves: moves });
+  };
+
+  const savePlayerLine = () => {
+    const moves = analysisScratchPosition?.playerMoves;
+    if (!moves?.length || isBrowseMode || trainingSession || isTreeEvalRunning) return;
+    const chess = fenToChess(selectedNode.fen);
+    const next = { ...tree, nodes: { ...tree.nodes } };
+    let nodeId = selectedNode.id;
+    for (const uci of moves) nodeId = ensureChildNode(next, nodeId, chess.move(uci), chess);
+    setUndoStackBySide(prev => ({
+      ...prev, [activeSide]: [...prev[activeSide], { tree, selectedNodeId: selectedNode.id }].slice(-200),
+    }));
+    setTrees(prev => ({ ...prev, [activeSide]: next }));
+    setSelectedNodeBySide(prev => ({ ...prev, [activeSide]: nodeId }));
+    setAnalysisScratchPosition(null);
+  };
+
   const previewEnginePvMove = (rootFen: string, pv: string, moveIndex: number) => {
     const move = buildEnginePvMoves(rootFen, pv)[moveIndex];
     if (!move) return;
@@ -4971,7 +5183,7 @@ function App() {
   };
 
   const setEngineRunningEnabled = (enabled: boolean) => {
-    if (analysisGameProgress) return;
+    if (analysisGameProgress || isTreeEvalRunning || playerAssessmentJobRef.current) return;
     engineRunningRef.current = enabled;
     if (enabled) {
       setEngineRunning(true);
@@ -4982,8 +5194,20 @@ function App() {
     setEngineRunning(false);
   };
 
-  const selectEngine = (engine: EngineChoice) => {
-    if (engine === selectedEngine || analysisGameProgress) return;
+  const selectEngine = (clicked: EngineChoice, allowMixed = false) => {
+    if (analysisGameProgress || isTreeEvalRunning || playerAssessmentJobRef.current) return;
+    let engine = clicked;
+    let mixed = false;
+    if (allowMixed && desktopEngineComparison) {
+      if (bothEngines) engine = clicked === 'stockfish' ? 'maia' : 'stockfish';
+      else if (clicked !== selectedEngine) {
+        engine = 'maia';
+        mixed = true;
+      }
+    }
+    if (engine === selectedEngine && mixed === bothEngines) return;
+    setBothEngines(mixed);
+    if (engine === selectedEngine) return;
     selectedEngineRef.current = engine;
     maiaAnalysisRequestRef.current += 1;
     pendingAnalysisRef.current = null;
@@ -4997,79 +5221,180 @@ function App() {
     setSelectedEngine(engine);
   };
 
-  const jumpToNextMissingLichessMove = async () => {
-    if (isBrowseMode || isTrainingActive || isSuddenDeathActive || isFindMissingSearchRunning) return;
-
-    const sideTree = tree;
-    const baseNodeId =
-      findMissingSearchBaseNodeId && sideTree.nodes[findMissingSearchBaseNodeId]
-        ? findMissingSearchBaseNodeId
-        : selectedNode.id;
-    const baseNode = sideTree.nodes[baseNodeId];
-    if (!baseNode || baseNode.children.length === 0) return;
-
-    const traversal: string[] = [];
-    const stack = [baseNodeId];
-    const visited = new Set<string>();
-    while (stack.length > 0) {
-      const nodeId = stack.pop() as string;
-      if (visited.has(nodeId)) continue;
-      visited.add(nodeId);
-      traversal.push(nodeId);
-      const node = sideTree.nodes[nodeId];
-      if (!node) continue;
-      for (let i = node.children.length - 1; i >= 0; i -= 1) {
-        stack.push(node.children[i]);
-      }
-    }
-
-    let startIndex = 0;
-    if (findMissingSearchCursorNodeId) {
-      const cursorIdx = traversal.indexOf(findMissingSearchCursorNodeId);
-      if (cursorIdx >= 0) startIndex = cursorIdx + 1;
-    }
-    if (startIndex >= traversal.length) return;
-
+  const runExplorerSearch = async (run: (controller: AbortController) => Promise<void>) => {
+    if (findMissingControllerRef.current || playerAssessmentJobRef.current) return;
+    const controller = new AbortController();
+    findMissingControllerRef.current = controller;
     setIsFindMissingSearchRunning(true);
+    setPlayerSearchNote('');
     try {
-      let foundNodeId: string | null = null;
-      const thresholdShare = lichessArrowThreshold / 100;
-      for (let index = startIndex; index < traversal.length; index += 1) {
-        const nodeId = traversal[index];
-        const node = sideTree.nodes[nodeId];
-        if (!node) continue;
+      await run(controller);
+    } catch (error) {
+      if (!controller.signal.aborted) setPlayerSearchNote(getErrorMessage(error, 'Search failed.'));
+    } finally {
+      findMissingControllerRef.current = null;
+      setIsFindMissingSearchRunning(false);
+    }
+  };
+
+  const playerReplyHasMistake = (fen: string) => hasPlayedMistake(
+    playerAssessments[playerAssessmentKey(playerHandle, activeSide, bookPositionFenKey(fen))],
+  );
+
+  const inspectPlayerReply = async (fen: string, query: ReturnType<typeof playerSearchQuery>, controller: AbortController) => {
+    if (playerReplyHasMistake(fen)) return true;
+    const response = await query(fen);
+    const moves = playerExplorerMoves(fen, response.moves).sort((a, b) => explorerGameCount(b) - explorerGameCount(a)).slice(0, 4);
+    if (!moves.length) return false;
+    const counts = new Map(moves.map(move => [move.uci, explorerGameCount(move)]));
+    for (const uci of playerRepertoire?.movesByFen.get(bookPositionFenKey(fen)) ?? []) {
+      if (!counts.has(uci)) counts.set(uci, 0);
+    }
+    const assessment = await withPlayerEngine(controller, () => assessPlayerPosition(fen, counts, controller.signal, true));
+    return hasPlayedMistake(assessment);
+  };
+
+  const checkPlayerReplies = async () => {
+    if (!explorerData || !stockfishLoaded || isExampleReplayActive || isTreeEvalRunning || trainingSession || analysisGameProgress) return;
+    await runExplorerSearch(async controller => {
+      const query = playerSearchQuery(controller.signal);
+      let found = 0;
+      for (const move of playerExplorerMoves(selectedBoardFen, explorerData.moves)) {
+        controller.signal.throwIfAborted();
+        const reply = explorerReplyFen(selectedBoardFen, move.uci);
+        if (reply && await inspectPlayerReply(reply, query, controller)) found++;
+      }
+      if (!found) setPlayerSearchNote('No confirmed mistakes in the replies checked.');
+    });
+  };
+
+  const jumpToNextMissingLichessMove = async () => {
+    const player = lichessSource === 'player';
+    if (isBrowseMode || isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning ||
+      (player && !playerHandle.trim())) return;
+    const root = (findMissingSearchBaseNodeId && tree.nodes[findMissingSearchBaseNodeId]) || selectedNode;
+    if (!player && !root.children.length) return;
+    const branch = repertoireBranchNodes(tree, root.id);
+    const start = branch.findIndex(node => node.id === findMissingSearchCursorNodeId) + 1;
+    if (!player && start >= branch.length) return;
+    if (player) setPortraitTab('lichess');
+    await runExplorerSearch(async controller => {
+      const query = playerSearchQuery(controller.signal);
+      const checked = new Set<string>();
+      setFindMissingSearchBaseNodeId(root.id);
+      for (const node of branch.slice(start >= branch.length ? 0 : start)) {
         if (toTurnColor(node.fen) === activeSide) continue;
-
-        const data = await fetchLichessNodeData(node.fen);
-        if (!data?.moves || data.moves.length === 0) continue;
-        const total = (data.white ?? 0) + (data.draws ?? 0) + (data.black ?? 0);
-        if (total <= 0) continue;
-
-        const existingMoves = new Set(
-          node.children
-            .map((childId) => sideTree.nodes[childId]?.moveUci)
-            .filter((uci): uci is string => Boolean(uci)),
-        );
-        const hasMissingCandidate = data.moves.some((move) => {
-          const moveTotal = move.white + move.draws + move.black;
-          return moveTotal / total >= thresholdShare && !existingMoves.has(move.uci);
-        });
-        if (hasMissingCandidate) {
-          foundNodeId = node.id;
+        const position = bookPositionFenKey(node.fen);
+        if (player && checked.has(position)) continue;
+        checked.add(position);
+        if (player && !stockfishLoaded && !playerRepertoire?.movesByFen.get(position)?.size) continue;
+        const data = player ? await query(node.fen) : await fetchLichessNodeData(node.fen, controller.signal);
+        controller.signal.throwIfAborted();
+        const total = data ? explorerGameCount(data) : 0;
+        const prepared = player ? playerRepertoire?.movesByFen.get(position)
+          : new Set(node.children.map(id => tree.nodes[id]?.moveUci));
+        const moves = player ? playerExplorerMoves(node.fen, data?.moves ?? []) : data?.moves ?? [];
+        let found = false;
+        for (const move of moves) {
+          if (prepared?.has(move.uci) || explorerGameCount(move) === 0) continue;
+          if (!player && (!total || explorerGameCount(move) / total < lichessArrowThreshold / 100)) continue;
+          if (player && !prepared?.size) {
+            const reply = explorerReplyFen(node.fen, move.uci);
+            if (!reply || !await inspectPlayerReply(reply, query, controller)) continue;
+          }
+          found = true;
           break;
         }
+        setFindMissingSearchCursorNodeId(node.id);
+        if (found) {
+          if (node.id !== selectedNode.id) findMissingSearchAutoNavigationRef.current = true;
+          navigateToNode(activeSide, node.id);
+          if (player) setPlayerSearchNote('Select an opponent move to inspect your replies.');
+          return;
+        }
       }
+      if (player) {
+        setFindMissingSearchCursorNodeId(branch.at(-1)?.id ?? root.id);
+        setPlayerSearchNote('No further opponent moves to review in this branch.');
+      }
+    });
+  };
 
-      setFindMissingSearchBaseNodeId(baseNodeId);
-      if (foundNodeId) {
-        setFindMissingSearchCursorNodeId(foundNodeId);
-        findMissingSearchAutoNavigationRef.current = true;
-        navigateToNode(activeSide, foundNodeId);
-      } else {
-        setFindMissingSearchCursorNodeId(traversal[traversal.length - 1] ?? baseNodeId);
-      }
+  const findCommonMistakes = async () => {
+    if (lichessSource !== 'player' || isBrowseMode || !playerHandle.trim() || !stockfishLoaded ||
+      !hasHydratedAppState || trainingSession || isTreeEvalRunning || analysisGameProgress || isExampleReplayActive ||
+      findMissingControllerRef.current || playerAssessmentJobRef.current) return;
+    const root = tree.nodes[tree.rootId];
+    const branch = repertoireBranchNodes(tree, root.id);
+    const start = branch.findIndex(node => node.id === findCommonCursor) + 1;
+    setPortraitTab('lichess');
+    setPlayerMistakeFinding(null);
+    setIsFindingCommonMistakes(true);
+    try {
+      await runExplorerSearch(async controller => {
+        const query = playerSearchQuery(controller.signal);
+        let best: { nodeId: string; finding: FoundPlayerMistake; priority: number } | undefined;
+        let checkedPositions = 0;
+        const checked = new Set<string>();
+        let paused = '';
+        try {
+          for (const node of branch.slice(start >= branch.length ? 0 : start)) {
+            if (toTurnColor(node.fen) !== activeSide) continue;
+            const position = bookPositionFenKey(node.fen);
+            if (checked.has(position)) continue;
+            checked.add(position);
+            if (checkedPositions >= 3) {
+              paused = 'Checked three positions. Run Find common mistakes again to continue.';
+              break;
+            }
+            const recent = await query(node.fen, 'recent');
+            const earlier = await query(node.fen, 'earlier');
+            const recentMoves = new Map(playerExplorerMoves(node.fen, recent.moves).map(move => [move.uci, move]));
+            const earlierMoves = new Map(playerExplorerMoves(node.fen, earlier.moves).map(move => [move.uci, move]));
+            const candidates = [...new Set([...recentMoves.keys(), ...earlierMoves.keys()])].flatMap(uci => {
+              const now = recentMoves.get(uci), old = earlierMoves.get(uci);
+              const san = now?.san ?? old?.san;
+              return san ? [{ uci, san, recent: now ? explorerGameCount(now) : 0, earlier: old ? explorerGameCount(old) : 0 }] : [];
+            }).filter(move => move.recent + move.earlier > 0)
+              .sort((a, b) => playerMistakePriority(b) - playerMistakePriority(a)).slice(0, 4);
+            if (!candidates.length) { setFindCommonCursor(node.id); continue; }
+            checkedPositions++;
+            const counts = new Map(candidates.map(move => [move.uci, move.recent + move.earlier]));
+            for (const uci of playerRepertoire?.movesByFen.get(position) ?? []) {
+              if (!counts.has(uci)) counts.set(uci, 0);
+            }
+            const key = playerAssessmentKey(playerHandle, activeSide, position);
+            const assessment = await withPlayerEngine(controller, () => assessPlayerPosition(node.fen, counts, controller.signal, true));
+            for (const { uci, san, recent: recentCount, earlier: earlierCount } of candidates) {
+              const result = assessment.moves[uci];
+              const loss = result?.confirmedLoss ?? 0;
+              if (loss < PLAYER_MISTAKE_LOSS) continue;
+              const priority = playerMistakePriority({ recent: recentCount, earlier: earlierCount }) + loss / 100;
+              if (!best || priority > best.priority) best = {
+                nodeId: node.id, priority, finding: { key, san, score: result.score, recent: recentCount, earlier: earlierCount,
+                  recentGames: explorerGameCount(recent), earlierGames: explorerGameCount(earlier) },
+              };
+            }
+            setFindCommonCursor(node.id);
+            if (best && best.finding.recent >= 2) break;
+          }
+        } catch (error) {
+          controller.signal.throwIfAborted();
+          if (!best) throw error;
+        }
+        controller.signal.throwIfAborted();
+        if (!best) {
+          setPlayerSearchNote(paused || 'No further confirmed mistakes in the moves checked.');
+          if (!paused) setFindCommonCursor(branch.at(-1)?.id ?? root.id);
+          return;
+        }
+        setFindCommonCursor(best.nodeId);
+        setPlayerMistakeFinding(best.finding);
+        if (best.nodeId !== selectedNode.id) findMissingSearchAutoNavigationRef.current = true;
+        navigateToNode(activeSide, best.nodeId);
+      });
     } finally {
-      setIsFindMissingSearchRunning(false);
+      setIsFindingCommonMistakes(false);
     }
   };
 
@@ -5161,6 +5486,7 @@ function App() {
       version: 1,
       themeMode,
       selectedEngine,
+      bothEngines,
       maiaStrengthElo,
       analysisBenchmarkElo,
       suddenDeathEngine,
@@ -5169,6 +5495,7 @@ function App() {
       isTempBoardFlipped,
       lichessSource,
       playerHandle,
+      playerSpeeds,
       lichessApiToken,
       dateRange,
       lichessArrowThreshold,
@@ -5852,7 +6179,7 @@ function App() {
     const [orig, dest] = keyPair;
     return [{ orig, dest, brush: 'green' }];
   }, [isTrainingActive, trainingSession]);
-  const canGoBack = Boolean(selectedNode.parentId);
+  const canGoBack = Boolean(analysisScratchPosition?.playerMoves?.length || selectedNode.parentId);
   const isEngineEnabled = engineRunning;
   const selectedEngineLoaded = selectedEngine === 'maia' ? maiaLoaded : stockfishLoaded;
   const canToggleEngineArrows = selectedEngineLoaded && engineRunning;
@@ -5903,8 +6230,55 @@ function App() {
       return total / lichessTotal >= thresholdShare;
     });
   }, [lichessData, lichessTotal, lichessArrowThreshold]);
-  const lichessTopGames = lichessData?.topGames ?? [];
-  const lichessRecentGames = lichessData?.recentGames ?? [];
+  const isPlayerExplorer = lichessSource === 'player';
+  const explorerData = lichessDataRequestKey === explorerRequestKey &&
+    (!isPlayerExplorer || playerHandle.trim()) ? lichessData : null;
+  const playerToMove = isPlayerExplorer && toTurnColor(selectedBoardFen) === activeSide;
+  const playerAfterLine = isPlayerExplorer && !isBrowseMode && !playerToMove && !playerRepertoireMoves?.size;
+  const playerRows: PlayerMoveRow[] = [];
+  const playerMoveCounts = new Map<string, number>();
+  const playerBestMove = playerToMove ? playerAssessment?.best.bestMove : null;
+  let playerBestSan: string | undefined;
+  if (isPlayerExplorer) {
+    const moves = playerExplorerMoves(selectedBoardFen, explorerData?.moves ?? []);
+    const seen = new Map(moves.map(move => [move.uci, move]));
+    const chess = fenToChess(selectedBoardFen);
+    const legal = new Map(chess.moves({ verbose: true }).map(move => [uciFromMove(move), move.san]));
+    if (playerBestMove) playerBestSan = legal.get(playerBestMove);
+    const displayed = new Set([...(playerToMove ? playerRepertoireMoves ?? [] : []), ...seen.keys()]);
+    for (const uci of displayed) {
+      const san = legal.get(uci);
+      if (!san) continue;
+      const move = seen.get(uci);
+      const results = move && {
+        wins: activeSide === 'white' ? move.white : move.black,
+        draws: move.draws,
+        losses: activeSide === 'white' ? move.black : move.white,
+      };
+      if (playerToMove) playerMoveCounts.set(uci, move ? move.white + move.draws + move.black : 0);
+      const inRepertoire = playerRepertoireMoves?.has(uci);
+      const evaluation = playerToMove ? playerAssessment?.moves[uci] : undefined;
+      const mistake = (evaluation?.confirmedLoss ?? 0) >= PLAYER_MISTAKE_LOSS;
+      let note = isBrowseMode ? undefined : inRepertoire ? 'In repertoire' : 'Outside repertoire';
+      if (!playerToMove && !isBrowseMode) {
+        const reply = explorerReplyFen(selectedBoardFen, uci);
+        if (!reply) continue;
+        if (playerAfterLine) {
+          if (!playerReplyHasMistake(reply)) continue;
+          note = 'Mistake in your replies';
+        } else if (!playerRepertoire?.movesByFen.get(bookPositionFenKey(reply))?.size) {
+          note = inRepertoire ? 'In repertoire · no reply' : 'No saved reply';
+        }
+      }
+      if (mistake) note = inRepertoire ? 'Weak repertoire move' : note ? 'Mistake outside repertoire' : 'Mistake';
+      playerRows.push({
+        uci, san: toFigurineSan(san), note, score: evaluation?.score,
+        provisional: evaluation?.confirmedLoss === null, results,
+      });
+    }
+  }
+  const lichessTopGames = explorerData?.topGames ?? [];
+  const lichessRecentGames = explorerData?.recentGames ?? [];
   const hasLichessExampleGames = lichessTopGames.length > 0 || lichessRecentGames.length > 0;
   const isExampleReplayActive = Boolean(exampleReplay && exampleReplay.side === activeSide);
 
@@ -5970,7 +6344,7 @@ function App() {
         throw new Error('Invalid PGN');
       }
       const verboseMoves = fullGame.history({ verbose: true }) as Move[];
-      const targetFen = selectedNode.fen === START_FEN ? START_POS_FEN : selectedNode.fen;
+      const targetFen = fullBoardFen(explorerFen);
       const targetKey = positionFenKey(targetFen);
       const scanChess = fenToChess(gameStartFen);
       const replayMovesUci: string[] = [];
@@ -6021,7 +6395,10 @@ function App() {
   const activeFindMissingBaseNode =
     (findMissingSearchBaseNodeId ? tree.nodes[findMissingSearchBaseNodeId] : null) ?? selectedNode;
   const canRunFindMissingSearch =
-    activeFindMissingBaseNode.children.length > 0 && !isFindMissingSearchRunning && !isSuddenDeathActive;
+    (isPlayerExplorer ? Boolean(playerHandle.trim() && activeRepertoire) : activeFindMissingBaseNode.children.length > 0) &&
+    !isFindMissingSearchRunning && !isSuddenDeathActive && !isTreeEvalRunning && !playerAssessmentRunning;
+  const canFindCommonMistakes = isPlayerExplorer && !isBrowseMode && canRunFindMissingSearch && stockfishLoaded &&
+    hasHydratedAppState && !trainingSession && !isExampleReplayActive && !analysisGameProgress;
   const displayedMovePath = isBrowseMode && !isTrainingActive ? mainLinePath : path;
   const selectedMoveIndex = displayedMovePath.findIndex((node) => node.id === selectedNode.id);
   const canGoForward = isBrowseMode && !isTrainingActive && !isSuddenDeathActive &&
@@ -6670,7 +7047,7 @@ function App() {
   };
 
   const runTreeStockfishEval = async () => {
-    if (isTreeEvalRunning) return;
+    if (isTreeEvalRunning || playerAssessmentJobRef.current) return;
     const worker = stockfishRef.current;
     if (!worker) return;
     const missingTargets = collectTreeEvalTargets(true);
@@ -6745,10 +7122,11 @@ function App() {
     );
 
     const waitForReady = async () => {
-      if (engineReadyRef.current) return true;
+      const available = () => engineReadyRef.current && !suddenDeathBusyRef.current && !isSearchingRef.current;
+      if (available()) return true;
       for (let i = 0; i < 100; i += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 50));
-        if (engineReadyRef.current) return true;
+        if (available()) return true;
       }
       return false;
     };
@@ -6940,8 +7318,8 @@ function App() {
   }, [repertoiresBySide, trainingStatsBySide, trainingLeafLastShownBySide]);
 
   useEffect(() => {
-    if (isBrowseMode) return;
-    if (lichessStatus !== 'done' || !lichessData?.moves || lichessData.moves.length === 0) return;
+    if (isBrowseMode || lichessSource === 'player') return;
+    if (lichessStatus !== 'done' || lichessDataFen !== selectedNode.fen || !lichessData?.moves.length) return;
 
     setTrees((prev) => {
       const currentTree = prev[activeSide];
@@ -6982,7 +7360,7 @@ function App() {
         [activeSide]: nextTree,
       };
     });
-  }, [activeSide, isBrowseMode, lichessData, lichessStatus, selectedNodeBySide]);
+  }, [activeSide, isBrowseMode, lichessData, lichessDataFen, lichessSource, lichessStatus, selectedNode.fen, selectedNodeBySide]);
 
   const rewindToNode = (targetId: string) => {
     if (isTrainingActive || isSuddenDeathActive) return;
@@ -6996,6 +7374,10 @@ function App() {
   };
 
   const goBackOneMove = () => {
+    if (analysisScratchPosition?.playerMoves) {
+      backPlayerPreview();
+      return;
+    }
     if (selectedNode.parentId) rewindToNode(selectedNode.parentId);
   };
 
@@ -7321,6 +7703,114 @@ function App() {
     setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: snapshot.selectedNodeId }));
   };
 
+  const renderEnginePv = (fen: string, pv: string) => {
+    const moves = buildEnginePvMoves(fen, pv, 5);
+    return (
+      <div className="engine-pv-moves">
+        {moves.map((move, index) => (
+          <button key={index} type="button" className="engine-pv-move"
+            title={`Show position after ${move.san}`}
+            onClick={() => setAnalysisScratchPosition({ fen: move.fen, lastMove: move.lastMove })}>
+            {move.san}
+          </button>
+        ))}
+        {!moves.length && '—'}
+      </div>
+    );
+  };
+  const maiaLines = maiaResultKey === currentMaiaKey ? engineLines : [];
+  const comparison = maiaStockfishComparison?.key === maiaComparisonKey ? maiaStockfishComparison : null;
+  const mixedRows = [
+    ...maiaLines.map(line => ({ uci: line.bestMove, maia: line, score: comparison?.scores.get(line.bestMove) })),
+    ...(comparison?.alternatives ?? []).map(score => ({ uci: score.uci, maia: undefined, score })),
+  ];
+  if (showMixedEngines) {
+    const side = toTurnColor(maiaPositionFen);
+    const rank = (score: CandidateEvaluation | undefined) => score ? stockfishRank(score, side) : -Infinity;
+    mixedRows.sort((a, b) => rank(b.score) - rank(a.score));
+  }
+  const engineTable = (
+    <div className="table ai-eval-table">
+      {selectedEngine === 'stockfish' ? engineLines.map(line => (
+        <div className="table-row engine-pv-row" key={line.multipv}>
+          <span className="engine-pv-score">{line.scoreText}</span>
+          {renderEnginePv(enginePvFen, line.pv)}
+        </div>
+      )) : (
+        <>
+          <MaiaPopularityControls checked={showMaiaPopularity} onChange={setShowMaiaPopularity} profile={maiaPopularity} />
+          {showMixedEngines ? (
+            <div className="mixed-engine-table" aria-label="Maia and Stockfish comparison">
+              <div className="mixed-engine-row mixed-engine-head">
+                <strong>{MAIA_ENGINE_LABEL}</strong>
+                <strong title="Scores from White’s perspective. Rows ranked for the side to move.">{STOCKFISH_ENGINE_NAME}</strong>
+              </div>
+              {mixedRows.map(({ uci, maia, score }) => (
+                <div className="table-row mixed-engine-row" key={uci}>
+                  <div className="mixed-engine-maia">
+                    {maia ? <>{renderEnginePv(maiaPositionFen, maia.pv)}<span>{maia.scoreText}</span></>
+                      : <span title="Outside the displayed Maia suggestions">—</span>}
+                  </div>
+                  <div className="mixed-engine-stockfish">
+                    <span>{score?.scoreText ?? '—'}</span>
+                    {score && renderEnginePv(maiaPositionFen, score.pv || uci)}
+                  </div>
+                  {showMaiaPopularity && maia && <MaiaPopularityChart uci={uci} elo={maiaStrengthElo} profile={maiaPopularity} />}
+                </div>
+              ))}
+              {maiaLines.length > 0 && engineRunning && (
+                (!comparison || comparison.pending) ? <div className="status" role="status">Stockfish is evaluating the moves…</div>
+                  : maiaLines.some(line => !comparison.scores.has(line.bestMove)) &&
+                    <div className="status" role="status">Some Stockfish evaluations are unavailable.</div>
+              )}
+            </div>
+          ) : maiaLines.map(line => (
+            <div className={`table-row engine-pv-row ${showMaiaPopularity ? 'maia-popularity-row' : ''}`} key={line.multipv}>
+              <span className="engine-pv-score">{line.scoreText}</span>
+              {renderEnginePv(maiaPositionFen, line.pv)}
+              {showMaiaPopularity && <MaiaPopularityChart uci={line.bestMove} elo={maiaStrengthElo} profile={maiaPopularity} />}
+            </div>
+          ))}
+          {!maiaLines.length && engineStatus === 'analyzing' && (maiaLoadingStatus
+            ? <MaiaStatusView status={maiaLoadingStatus} /> : <span className="maia-popularity-pending" role="status">Obliczanie ruchów…</span>)}
+          {!maiaLines.length && maiaError && <div className="maia-load-error" role="alert">Maia: {maiaError}</div>}
+        </>
+      )}
+    </div>
+  );
+
+  const arrowToggleButtons = (
+    <>
+      <button
+        type="button"
+        className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-lichess arrow-options-dot ${showLichessArrows ? 'active' : ''}`}
+        onClick={handleLichessArrowClick}
+        onPointerDown={handleLichessArrowPointerDown}
+        onPointerUp={handleLichessArrowPointerEnd}
+        onPointerCancel={handleLichessArrowPointerEnd}
+        onPointerLeave={handleLichessArrowPointerEnd}
+        onContextMenu={(event) => { event.preventDefault(); movesButtonLongPressHandledRef.current = true; clearMovesButtonLongPress(); setIsLichessArrowOptionsOpen(true); }}
+        aria-label="Toggle Lichess arrows"
+        title="Toggle Lichess arrows (hold for options)"
+      />
+      <button
+        type="button"
+        className={`icon-toggle-btn with-diagonal-arrow only-arrow ${selectedEngine === 'maia' ? 'arrow-maia' : 'arrow-stockfish'} ${showStockfishArrows && canToggleEngineArrows ? 'active' : ''}`}
+        onClick={() => setShowStockfishArrows((prev) => !prev)}
+        disabled={!canToggleEngineArrows}
+        aria-label={`Toggle ${selectedEngineLabel} arrows`}
+        title={`Toggle ${selectedEngineLabel} arrows`}
+      />
+      <button
+        type="button"
+        className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-tree ${showTreeArrows ? 'active' : ''}`}
+        onClick={() => setShowTreeArrows((prev) => !prev)}
+        aria-label="Toggle tree arrows"
+        title="Toggle tree arrows"
+      />
+    </>
+  );
+
   return (
     <div className={`app ${themeMode === 'dark' ? 'theme-dark' : ''}`}>
       <header className="topbar">
@@ -7345,18 +7835,93 @@ function App() {
         <section className="left-panel">
           <div className={`board-row ${isTrainingActive ? 'training-mode' : ''}`}>
             {!isTrainingActive && <aside className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}>
-              {!lichessAuthRequired && (visibleLichessStatus || lichessStatus === 'loading') && (
+              {isPlayerExplorer && (
+                <div className="player-repertoire-panel">
+                  <div className="player-repertoire-controls">
+                    <span title={activeRepertoireName}>{activeSide} · {activeRepertoireName}</span>
+                    <button type="button" onClick={() => setIsLichessFilterOpen(true)}>Player settings</button>
+                  </div>
+                  <div className="player-repertoire-controls">
+                    <button type="button"
+                      disabled={!playerHandle.trim() || isFindMissingSearchRunning || lichessStatus === 'refreshing'}
+                      onClick={() => setExplorerRefresh(value => value + 1)}>Refresh</button>
+                    {isFindMissingSearchRunning && <button type="button" onClick={() => findMissingControllerRef.current?.abort()}>
+                      Stop search
+                    </button>}
+                    {playerToMove && !isFindMissingSearchRunning && <button type="button"
+                      disabled={!playerAssessmentRunning && (!stockfishLoaded || !playerMoveCounts.size ||
+                        !hasHydratedAppState || !playerHandle.trim() || isTreeEvalRunning || isExampleReplayActive ||
+                        Boolean(analysisGameProgress) || Boolean(trainingSession) || isFindMissingSearchRunning)}
+                      onClick={() => void assessPlayerMoves(playerMoveCounts)}>
+                      {playerAssessmentRunning ? 'Stop checking' : 'Check moves'}
+                    </button>}
+                    {playerAfterLine && !isFindMissingSearchRunning && Boolean(explorerData?.moves.length) && (
+                      <button type="button" disabled={!stockfishLoaded || playerAssessmentRunning || isTreeEvalRunning ||
+                        isExampleReplayActive || Boolean(trainingSession) || Boolean(analysisGameProgress)}
+                        onClick={() => void checkPlayerReplies()}>Check replies</button>
+                    )}
+                  </div>
+                  {analysisScratchPosition?.playerMoves && (
+                    <div className="player-repertoire-controls">
+                      <span>Preview</span>
+                      <button type="button" onClick={backPlayerPreview}>Back</button>
+                      <button type="button" onClick={() => setAnalysisScratchPosition(null)}>Return</button>
+                      {!isBrowseMode && <button type="button" disabled={isTreeEvalRunning || isExampleReplayActive}
+                        onClick={savePlayerLine}>Save line</button>}
+                    </div>
+                  )}
+                  <div role="status" className="player-repertoire-status">
+                    {!playerHandle.trim() ? 'Enter your Lichess username in Player settings.'
+                      : lichessStatus === 'indexing' ? (explorerData?.queuePosition
+                        ? `Partial results · Lichess queue: ${explorerData.queuePosition}` : 'Partial results · Lichess is indexing.')
+                      : lichessStatus === 'refreshing' ? 'Showing saved results · refreshing…'
+                      : lichessStatus === 'cached' ? 'Showing saved results · refresh unavailable.'
+                      : lichessStatus === 'partial' ? 'Partial results · refresh to continue.'
+                      : lichessStatus === 'loading' ? 'Waiting for Lichess…'
+                      : lichessStatus === 'done' && explorerData && !explorerData.moves.length ? 'No games in this position.'
+                      : ''}
+                    {playerSearchNote && <div>{playerSearchNote}</div>}
+                    {playerAssessmentNotice?.key === playerReviewKey && <div>{playerAssessmentNotice.message}</div>}
+                    {isFindMissingSearchRunning && <div>{isFindingCommonMistakes ? 'Checking your moves…' : 'Checking opponent moves…'}</div>}
+                    {playerAfterLine && !playerRows.length && Boolean(explorerData?.moves.length) &&
+                      !isFindMissingSearchRunning && !playerSearchNote && <div>End of the line · check your replies to reveal problems.</div>}
+                  </div>
+                  {playerMistakeFinding?.key === playerReviewKey && (
+                    <div className="player-mistake-finding" role="status">
+                      <strong>{toFigurineSan(playerMistakeFinding.san)} {playerMistakeFinding.score} · {
+                        playerMistakePattern(playerMistakeFinding, playerMistakeFinding.recentGames)
+                      }</strong>
+                      <span>Last 3 calendar months · {playerMistakeFinding.recentGames
+                        ? `${playerMistakeFinding.recent}/${playerMistakeFinding.recentGames} (${formatPercent(playerMistakeFinding.recent, playerMistakeFinding.recentGames)})`
+                        : 'No games in this position'}</span>
+                      <span>Earlier · {playerMistakeFinding.earlierGames
+                        ? `${playerMistakeFinding.earlier}/${playerMistakeFinding.earlierGames} (${formatPercent(playerMistakeFinding.earlier, playerMistakeFinding.earlierGames)})`
+                        : 'No games in this position'}</span>
+                    </div>
+                  )}
+                  {playerAssessment && playerBestMove && playerBestSan && (
+                    <button type="button" className="player-best-move" onClick={() => playPlayerMove(playerBestMove)}>
+                      {STOCKFISH_ENGINE_LABEL} best: {toFigurineSan(playerBestSan)} {playerAssessment.best.scoreText}
+                    </button>
+                  )}
+                  {playerRows.length > 0 && (
+                    <PlayerRepertoireTable rows={playerRows} complete={Boolean(explorerData) &&
+                      ['done', 'cached', 'refreshing'].includes(lichessStatus)} onMove={playPlayerMove} />
+                  )}
+                </div>
+              )}
+              {!isPlayerExplorer && !lichessAuthRequired && (visibleLichessStatus || lichessStatus === 'loading') && (
                 <div className="status lichess-status-row">
                   {lichessStatus === 'loading' && <span className="spinner" aria-hidden="true" />}
                   <span>{visibleLichessStatus || 'loading'}</span>
                 </div>
               )}
-              {lichessStatus === 'limited' && !lichessData && (
+              {lichessStatus === 'limited' && !explorerData && (
                 <div className="status lichess-rate-limit-note">
                   {`Lichess API error (429), ${lichessData ? 'showing cached data' : 'no cached data'}`}
                 </div>
               )}
-              {!lichessAuthRequired && lichessApiIssueNote && !lichessData && (
+              {!lichessAuthRequired && lichessApiIssueNote && (!explorerData || isPlayerExplorer) && (
                 <div className="status lichess-rate-limit-note">{lichessApiIssueNote}</div>
               )}
               {lichessAuthRequired && (
@@ -7370,9 +7935,15 @@ function App() {
                   </button>
                 </div>
               )}
-              {lichessData && (
+              {!isPlayerExplorer && !explorerData && !lichessAuthRequired && (
+                <div className="lichess-table-actions desktop-only">
+                  <button className="gear-btn" type="button" aria-label="Filters" title="Filters"
+                    onClick={() => setIsLichessFilterOpen(true)}>⚙</button>
+                </div>
+              )}
+              {(explorerData || isPlayerExplorer) && (
                 <>
-                  <div className="table">
+                  {!isPlayerExplorer && <div className="table">
                     {filteredLichessMoves.map((move) => {
                       const total = move.white + move.draws + move.black;
                       return (
@@ -7400,8 +7971,8 @@ function App() {
                         </div>
                       );
                     })}
-                  </div>
-                  <div className="lichess-example-games">
+                  </div>}
+                  {(!isPlayerExplorer || hasLichessExampleGames) && <div className="lichess-example-games">
                     {!hasLichessExampleGames && (
                       <span className="status">No example games for current filters.</span>
                     )}
@@ -7444,8 +8015,8 @@ function App() {
                       </div>
                     )}
                     {exampleReplayError && <span className="status">{exampleReplayError}</span>}
-                  </div>
-                  <div className="lichess-table-actions desktop-only">
+                  </div>}
+                  {!isPlayerExplorer && <div className="lichess-table-actions desktop-only">
                     <button
                       className="gear-btn"
                       type="button"
@@ -7455,150 +8026,103 @@ function App() {
                     >
                       ⚙
                     </button>
-                  </div>
-                  <div className="stockfish-inline desktop-only">
-                    <div className="controls-row stockfish-controls-row ai-engine-controls">
-                      <div className="ai-engine-row">
-                        <span className="ai-engine-select">
-                          <button
-                            type="button"
-                            className={`ai-engine-tab ${selectedEngine === 'stockfish' ? 'active' : ''}`}
-                            disabled={Boolean(analysisGameProgress)}
-                            onClick={() => selectEngine('stockfish')}
-                          >
-                            {STOCKFISH_ENGINE_LABEL}
-                          </button>
-                          <button
-                            type="button"
-                            className={`ai-engine-tab ${selectedEngine === 'maia' ? 'active' : ''}`}
-                            disabled={Boolean(analysisGameProgress)}
-                            onClick={() => selectEngine('maia')}
-                          >
-                            {MAIA_ENGINE_LABEL}
-                          </button>
-                        </span>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={isEngineEnabled}
-                          className={`ai-switch ${isEngineEnabled ? 'on' : 'off'}`}
-                          disabled={Boolean(analysisGameProgress)}
-                          onClick={() => setEngineRunningEnabled(!isEngineEnabled)}
-                        >
-                          <span className="ai-switch-track" aria-hidden="true">
-                            <span className="ai-switch-thumb" />
-                          </span>
-                          <span className="ai-switch-text">{isEngineEnabled ? 'On' : 'Off'}</span>
-                        </button>
-                        {selectedEngine === 'maia' && (
-                          <label className="ai-elo-select-wrap">
-                            <select
-                              className="ai-elo-select"
-                              value={maiaStrengthElo}
-                              onChange={(e) => {
-                                const next = Number.parseInt(e.target.value, 10);
-                                if (Number.isFinite(next)) {
-                                  setMaiaStrengthElo(
-                                    Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
-                                  );
-                                }
-                              }}
-                              aria-label={`${MAIA_ENGINE_LABEL} strength`}
-                            >
-                              {MAIA_STRENGTH_ELO_VALUES.map((elo) => (
-                                <option key={elo} value={elo}>
-                                  {`${elo} Elo`}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                        )}
-                        <span className="inline-stepper ai-row-right">
-                          <button
-                            type="button"
-                            onClick={() => setEngineMultiPv((prev) => Math.max(1, prev - 1))}
-                            aria-label="Decrease lines"
-                          >
-                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                              <path d="M6 12h12" />
-                            </svg>
-                          </button>
-                          <span className="stepper-value">{engineMultiPv}</span>
-                          <button
-                            type="button"
-                            onClick={() => setEngineMultiPv((prev) => Math.min(10, prev + 1))}
-                            aria-label="Increase lines"
-                          >
-                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                              <path d="M12 6v12M6 12h12" />
-                            </svg>
-                          </button>
-                        </span>
-                        <button
-                          type="button"
-                          className="stockfish-settings-btn"
-                          aria-label="AI options"
-                          title="AI options"
-                          onClick={() => setIsStockfishQuickOpen(true)}
-                        >
-                          ⚙
-                        </button>
-                      </div>
-                      {selectedEngine === 'stockfish' && (
-                        <div className="table ai-eval-table">
-                          {engineLines.map((line) => (
-                            <div className="table-row engine-pv-row" key={line.multipv}>
-                              <span className="engine-pv-score">{line.scoreText}</span>
-                              <div className="engine-pv-moves">
-                                {buildEnginePvMoves(enginePvFen, line.pv).map((move, index) => (
-                                  <button
-                                    type="button"
-                                    className="engine-pv-move"
-                                    key={`${line.multipv}-${index}-${move.san}`}
-                                    title={`Show position after ${move.san}`}
-                                    onClick={() => previewEnginePvMove(enginePvFen, line.pv, index)}
-                                  >
-                                    {move.san}
-                                  </button>
-                                ))}
-                                {line.pv.trim() === '' && <span>-</span>}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {selectedEngine === 'maia' && (
-                        <div className="table ai-eval-table">
-                          <MaiaPopularityControls checked={showMaiaPopularity} onChange={setShowMaiaPopularity} profile={maiaPopularity} />
-                          {engineLines.map((line) => (
-                            <div className={`table-row engine-pv-row ${showMaiaPopularity ? 'maia-popularity-row' : ''}`} key={line.multipv}>
-                              <span className="engine-pv-score">{line.scoreText}</span>
-                              <div className="engine-pv-moves">
-                                {buildEnginePvMoves(enginePvFen, line.pv).map((move, index) => (
-                                  <button
-                                    type="button"
-                                    className="engine-pv-move"
-                                    key={`${line.multipv}-${index}-${move.san}`}
-                                    title={`Show position after ${move.san}`}
-                                    onClick={() => previewEnginePvMove(enginePvFen, line.pv, index)}
-                                  >
-                                    {move.san}
-                                  </button>
-                                ))}
-                                {line.pv.trim() === '' && <span>-</span>}
-                              </div>
-                              {showMaiaPopularity && <MaiaPopularityChart uci={line.bestMove} elo={maiaStrengthElo} profile={maiaPopularity} />}
-                            </div>
-                          ))}
-                          {engineLines.length === 0 && engineStatus === 'analyzing' && (maiaLoadingStatus ? <MaiaStatusView status={maiaLoadingStatus} /> : <span className="maia-popularity-pending" role="status">Obliczanie ruchów…</span>)}
-                          {engineLines.length === 0 && maiaError && <div className="maia-load-error" role="alert">Maia: {maiaError}</div>}
-                        </div>
-                      )}
-                      {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
-                    </div>
-                  </div>
+                  </div>}
                 </>
               )}
+              <div className="stockfish-inline desktop-only">
+                <div className="controls-row stockfish-controls-row ai-engine-controls">
+                  <div className="ai-engine-row">
+                    <span className="ai-engine-select">
+                      <button
+                        type="button"
+                        className={`ai-engine-tab ${selectedEngine === 'maia' ? 'active' : ''}`}
+                        aria-pressed={selectedEngine === 'maia'}
+                        disabled={isGameReviewRunning || isTreeEvalRunning || playerAssessmentRunning}
+                        onClick={() => selectEngine('maia', true)}
+                      >
+                        {MAIA_ENGINE_LABEL}
+                      </button>
+                      <button
+                        type="button"
+                        className={`ai-engine-tab ${selectedEngine === 'stockfish' || showMixedEngines ? 'active' : ''}`}
+                        aria-pressed={selectedEngine === 'stockfish' || showMixedEngines}
+                        disabled={isGameReviewRunning || isTreeEvalRunning || playerAssessmentRunning}
+                        onClick={() => selectEngine('stockfish', true)}
+                      >
+                        {STOCKFISH_ENGINE_LABEL}
+                      </button>
+                    </span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={isEngineEnabled}
+                      className={`ai-switch ${isEngineEnabled ? 'on' : 'off'}`}
+                      disabled={Boolean(analysisGameProgress)}
+                      onClick={() => setEngineRunningEnabled(!isEngineEnabled)}
+                    >
+                      <span className="ai-switch-track" aria-hidden="true">
+                        <span className="ai-switch-thumb" />
+                      </span>
+                      <span className="ai-switch-text">{isEngineEnabled ? 'On' : 'Off'}</span>
+                    </button>
+                    {selectedEngine === 'maia' && (
+                      <label className="ai-elo-select-wrap">
+                        <select
+                          className="ai-elo-select"
+                          value={maiaStrengthElo}
+                          onChange={(e) => {
+                            const next = Number.parseInt(e.target.value, 10);
+                            if (Number.isFinite(next)) {
+                              setMaiaStrengthElo(
+                                Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
+                              );
+                            }
+                          }}
+                          aria-label={`${MAIA_ENGINE_LABEL} strength`}
+                        >
+                          {MAIA_STRENGTH_ELO_VALUES.map((elo) => (
+                            <option key={elo} value={elo}>
+                              {`${elo} Elo`}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                    <span className="inline-stepper ai-row-right">
+                      <button
+                        type="button"
+                        onClick={() => setEngineMultiPv((prev) => Math.max(1, prev - 1))}
+                        aria-label="Decrease lines"
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="M6 12h12" />
+                        </svg>
+                      </button>
+                      <span className="stepper-value">{engineMultiPv}</span>
+                      <button
+                        type="button"
+                        onClick={() => setEngineMultiPv((prev) => Math.min(10, prev + 1))}
+                        aria-label="Increase lines"
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="M12 6v12M6 12h12" />
+                        </svg>
+                      </button>
+                    </span>
+                    <button
+                      type="button"
+                      className="stockfish-settings-btn"
+                      aria-label="AI options"
+                      title="AI options"
+                      onClick={() => setIsStockfishQuickOpen(true)}
+                    >
+                      ⚙
+                    </button>
+                  </div>
+                  {engineTable}
+                  {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
+                </div>
+              </div>
             </aside>}
 
             <div className="board-center">
@@ -7613,13 +8137,13 @@ function App() {
                 </div>
                 <div className="stats-row">
                   <LichessStatsBar
-                    white={lichessData?.white ?? 0}
-                    draws={lichessData?.draws ?? 0}
-                    black={lichessData?.black ?? 0}
-                    total={lichessTotal}
+                    white={explorerData?.white ?? 0}
+                    draws={explorerData?.draws ?? 0}
+                    black={explorerData?.black ?? 0}
+                    total={explorerData ? lichessTotal : 0}
                   />
                   <span className="games-total">
-                    {formatGamesCount(lichessTotal)}
+                    {formatGamesCount(explorerData ? lichessTotal : 0)}
                     {visibleEngineEval && <span className="games-eval-inline">{` ${visibleEngineEval}`}</span>}
                   </span>
                 </div>
@@ -7888,56 +8412,7 @@ function App() {
                 </div>
               </div>
               <div className="ai-portrait-scroll">
-                {selectedEngine === 'stockfish' && (
-                  <div className="table ai-eval-table">
-                    {engineLines.map((line) => (
-                      <div className="table-row engine-pv-row" key={line.multipv}>
-                        <span className="engine-pv-score">{line.scoreText}</span>
-                        <div className="engine-pv-moves">
-                          {buildEnginePvMoves(enginePvFen, line.pv).map((move, index) => (
-                            <button
-                              type="button"
-                              className="engine-pv-move"
-                              key={`${line.multipv}-${index}-${move.san}`}
-                              title={`Show position after ${move.san}`}
-                              onClick={() => previewEnginePvMove(enginePvFen, line.pv, index)}
-                            >
-                              {move.san}
-                            </button>
-                          ))}
-                          {line.pv.trim() === '' && <span>-</span>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {selectedEngine === 'maia' && (
-                  <div className="table ai-eval-table">
-                          <MaiaPopularityControls checked={showMaiaPopularity} onChange={setShowMaiaPopularity} profile={maiaPopularity} />
-                    {engineLines.map((line) => (
-                      <div className={`table-row engine-pv-row ${showMaiaPopularity ? 'maia-popularity-row' : ''}`} key={line.multipv}>
-                        <span className="engine-pv-score">{line.scoreText}</span>
-                        <div className="engine-pv-moves">
-                          {buildEnginePvMoves(enginePvFen, line.pv).map((move, index) => (
-                            <button
-                              type="button"
-                              className="engine-pv-move"
-                              key={`${line.multipv}-${index}-${move.san}`}
-                              title={`Show position after ${move.san}`}
-                              onClick={() => previewEnginePvMove(enginePvFen, line.pv, index)}
-                            >
-                              {move.san}
-                            </button>
-                          ))}
-                          {line.pv.trim() === '' && <span>-</span>}
-                        </div>
-                              {showMaiaPopularity && <MaiaPopularityChart uci={line.bestMove} elo={maiaStrengthElo} profile={maiaPopularity} />}
-                      </div>
-                    ))}
-                    {engineLines.length === 0 && engineStatus === 'analyzing' && (maiaLoadingStatus ? <MaiaStatusView status={maiaLoadingStatus} /> : <span className="maia-popularity-pending" role="status">Obliczanie ruchów…</span>)}
-                    {engineLines.length === 0 && maiaError && <div className="maia-load-error" role="alert">Maia: {maiaError}</div>}
-                  </div>
-                )}
+                {engineTable}
                 {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
               </div>
             </aside>}
@@ -8185,6 +8660,7 @@ function App() {
                       </>
                     ) : (
                       <>
+                        <div className="arrow-toggle-group desktop-only">{arrowToggleButtons}</div>
                         <button
                           className="desktop-only back-btn"
                           onClick={handleBackClick}
@@ -8212,15 +8688,26 @@ function App() {
                           <button
                             type="button"
                             className="next-missing-btn mode-icon-btn"
-                            onClick={jumpToNextMissingLichessMove}
+                            onClick={() => void jumpToNextMissingLichessMove()}
                             disabled={!canRunFindMissingSearch}
-                            aria-label="Find missing popular opponent move"
-                            title={`Find missing popular opponent move (${lichessArrowThreshold}%+)`}
+                            aria-label={isPlayerExplorer ? 'Find missing opponent moves' : 'Find missing popular opponent move'}
+                            title={isPlayerExplorer ? 'Find missing opponent moves in your games'
+                              : `Find missing popular opponent move (${lichessArrowThreshold}%+)`}
                           >
                             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                               <circle cx="12" cy="12" r="4.2" />
                               <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
                               <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2" />
+                            </svg>
+                          </button>
+                        )}
+                        {!isBrowseMode && isPlayerExplorer && (
+                          <button type="button" className="mode-icon-btn"
+                            onClick={() => void findCommonMistakes()} disabled={!canFindCommonMistakes}
+                            aria-label="Find common mistakes" title="Find common mistakes in your games">
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                              <circle cx="12" cy="12" r="7" />
+                              <path d="M12 8v4m0 3.5v.5" />
                             </svg>
                           </button>
                         )}
@@ -8270,36 +8757,7 @@ function App() {
                               <SuddenDeathIcon />
                             </button>
                           </>
-                        <span className="controls-row-break" aria-hidden="true" />
-                        <div className="arrow-toggle-group">
-                          <button
-                            type="button"
-                            className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-lichess arrow-options-dot ${showLichessArrows ? 'active' : ''}`}
-                            onClick={handleLichessArrowClick}
-                            onPointerDown={handleLichessArrowPointerDown}
-                            onPointerUp={handleLichessArrowPointerEnd}
-                            onPointerCancel={handleLichessArrowPointerEnd}
-                            onPointerLeave={handleLichessArrowPointerEnd}
-                            onContextMenu={(event) => { event.preventDefault(); movesButtonLongPressHandledRef.current = true; clearMovesButtonLongPress(); setIsLichessArrowOptionsOpen(true); }}
-                            aria-label="Toggle Lichess arrows"
-                            title="Toggle Lichess arrows (hold for options)"
-                          />
-                          <button
-                            type="button"
-                            className={`icon-toggle-btn with-diagonal-arrow only-arrow ${selectedEngine === 'maia' ? 'arrow-maia' : 'arrow-stockfish'} ${showStockfishArrows && canToggleEngineArrows ? 'active' : ''}`}
-                            onClick={() => setShowStockfishArrows((prev) => !prev)}
-                            disabled={!canToggleEngineArrows}
-                            aria-label={`Toggle ${selectedEngineLabel} arrows`}
-                            title={`Toggle ${selectedEngineLabel} arrows`}
-                          />
-                          <button
-                            type="button"
-                            className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-tree ${showTreeArrows ? 'active' : ''}`}
-                            onClick={() => setShowTreeArrows((prev) => !prev)}
-                            aria-label="Toggle tree arrows"
-                            title="Toggle tree arrows"
-                          />
-                        </div>
+                        <div className="arrow-toggle-group portrait-only">{arrowToggleButtons}</div>
                       </>
                     )}
                   </div>
@@ -9270,7 +9728,10 @@ function App() {
                     <button
                       type="button"
                       className={lichessSource === 'player' ? 'active' : ''}
-                      onClick={() => setLichessSource((prev) => (prev === 'player' ? 'lichess' : 'player'))}
+                      onClick={() => {
+                        setLichessSource(prev => prev === 'player' ? 'lichess' : 'player');
+                        setPortraitTab('lichess');
+                      }}
                     >
                       Player
                     </button>
@@ -9294,6 +9755,30 @@ function App() {
                     </span>
                   )}
                 </label>
+                {isPlayerExplorer && (
+                  <div className="player-repertoire-filters">
+                    <label>
+                      Player color
+                      <select value={activeSide} onChange={event => {
+                        setRepertoireSide(event.target.value === 'black' ? 'black' : 'white');
+                        setIsTempBoardFlipped(false);
+                      }}>
+                        <option value="white">White</option>
+                        <option value="black">Black</option>
+                      </select>
+                    </label>
+                    <label>
+                      Repertoire
+                      <select value={activeRepertoireId ?? ''} onChange={event => {
+                        if (event.target.value) loadRepertoire(event.target.value);
+                        else enterBrowseMode();
+                      }}>
+                        <option value="">Review mode</option>
+                        {activeRepertoireList.map(entry => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
+                      </select>
+                    </label>
+                  </div>
+                )}
                 <label>
                   Date range
                   <span className="toggle-group date-range-toggle">
@@ -9373,15 +9858,16 @@ function App() {
                 <div className="checkbox-grid">
                 <div>
                   <strong>Speeds</strong>
-                  {SPEEDS.map((speed) => (
+                  {(isPlayerExplorer ? PLAYER_SPEEDS : SPEEDS).map((speed) => (
                     <label key={speed} className="inline-check">
                       <input
                         type="checkbox"
-                        checked={selectedSpeeds.includes(speed)}
+                        checked={(isPlayerExplorer ? playerSpeeds : selectedSpeeds).includes(speed)}
                         onChange={(e) => {
-                          setSelectedSpeeds((prev) =>
-                            e.target.checked ? [...prev, speed] : prev.filter((item) => item !== speed),
-                          );
+                          const setSpeeds = isPlayerExplorer ? setPlayerSpeeds : setSelectedSpeeds;
+                          const checked = e.target.checked;
+                          setSpeeds(prev => checked ? [...prev, speed]
+                            : isPlayerExplorer && prev.length === 1 ? prev : prev.filter(item => item !== speed));
                         }}
                       />
                       {speed}
