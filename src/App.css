@@ -870,6 +870,17 @@ select {
   height: 1rem;
 }
 
+.mistake-review-controls .review-text-btn {
+  width: auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.5rem;
+  white-space: nowrap;
+  font-size: 0.78rem;
+}
+
 .player-repertoire-row[data-kind="mistake"] {
   border-inline-start: 3px solid #b91c1c;
 }

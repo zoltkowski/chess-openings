@@ -35,6 +35,7 @@ import { HumanMoveDetails } from './analysis/HumanMoveDetails';
 import { MaiaPopularityChart, MaiaPopularityControls } from './MaiaPopularity';
 import { useMaiaPopularity } from './useMaiaPopularity';
 import { PlayerRepertoireTable, type PlayerMoveRow } from './analysis/PlayerRepertoireTable';
+import { indexPlayerGameHistory, syncPlayerGameHistory, type PlayerGameHistory } from './analysis/playerGameHistory';
 import {
   PLAYER_MISTAKE_LOSS,
   hasPlayedMistake,
@@ -183,6 +184,7 @@ type LichessMove = {
   averageRating?: number;
   averageElo?: number;
   game?: LichessExampleGame;
+  lastPlayedAt?: number;
 };
 
 type LichessExamplePlayer = {
@@ -228,6 +230,7 @@ type MistakeReviewMove = {
   recent: number;
   earlier: number;
   lastMonth?: string;
+  lastPlayedAt?: number;
 };
 
 type MistakeReviewPosition = {
@@ -236,6 +239,7 @@ type MistakeReviewPosition = {
   recentGames: number;
   earlierGames: number;
   recentSince: string;
+  fromHistory: boolean;
 };
 
 type MistakeReview = {
@@ -250,6 +254,15 @@ type OpponentFinding = {
   moves: Set<string>;
   prepared: Set<string>;
   data: LichessResponse;
+};
+
+type OpponentReview = {
+  findings: OpponentFinding[];
+  index: number;
+  nextNode: number;
+  waitingForNext: boolean;
+  exhausted: boolean;
+  fromHistory?: boolean;
 };
 
 type UndoSnapshot = {
@@ -442,6 +455,8 @@ const MAIA_STRENGTH_ELO_VALUES = Array.from(
 const LICHESS_API_MIN_INTERVAL_MS = 2000;
 const LICHESS_API_COOLDOWN_FALLBACK_MS = 120000;
 const LICHESS_CACHE_PLAYER_TTL_MS = 24 * 60 * 60 * 1000;
+const PLAYER_HISTORY_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+const PLAYER_HISTORY_SYNC_CHECK_MS = 60_000;
 const LICHESS_CACHE_PLAYER_LIMIT = 1500;
 const LICHESS_CACHE_DEFAULT_TTL_MS = 10 * 24 * 60 * 60 * 1000;
 const LICHESS_CACHE_DEFAULT_JITTER_MS = 5 * 24 * 60 * 60 * 1000;
@@ -2260,7 +2275,8 @@ function App() {
   const explorerRefreshHandledRef = useRef(0);
   const [playerSearchNote, setPlayerSearchNote] = useState('');
   const [mistakeReview, setMistakeReview] = useState<MistakeReview | null>(null);
-  const [opponentFinding, setOpponentFinding] = useState<OpponentFinding | null>(null);
+  const [opponentReview, setOpponentReview] = useState<OpponentReview | null>(null);
+  const displayedOpponentFindingRef = useRef<OpponentFinding | undefined>(undefined);
   const [isFindingCommonMistakes, setIsFindingCommonMistakes] = useState(false);
   const [mistakeDateLookupFailed, setMistakeDateLookupFailed] = useState(false);
   const findMissingControllerRef = useRef<AbortController | null>(null);
@@ -2279,6 +2295,12 @@ function App() {
   const [isLichessTokenEditorOpen, setIsLichessTokenEditorOpen] = useState(false);
   const [lichessSource, setLichessSource] = useState<LichessSource>(initialLichessSource);
   const [playerHandle, setPlayerHandle] = useState(initialPlayerHandle);
+  const [playerHistory, setPlayerHistory] = useState<{ player: string; data: PlayerGameHistory } | null>(null);
+  const [playerHistorySyncing, setPlayerHistorySyncing] = useState(false);
+  const [playerHistoryError, setPlayerHistoryError] = useState('');
+  const [playerHistoryRefresh, setPlayerHistoryRefresh] = useState(0);
+  const playerHistoryRefreshHandledRef = useRef(0);
+  const playerHistoryJobRef = useRef<{ player: string; promise: Promise<PlayerGameHistory | null> } | null>(null);
   const [playerSpeeds, setPlayerSpeeds] = useState<string[]>([...PLAYER_SPEEDS]);
   const [playerAssessments, setPlayerAssessments] = useState<PlayerAssessments>({});
   const [playerAssessmentRunning, setPlayerAssessmentRunning] = useState(false);
@@ -2434,7 +2456,6 @@ function App() {
   const suddenDeathButtonLongPressHandledRef = useRef(false);
   const movesButtonLongPressTimeoutRef = useRef<number | null>(null);
   const movesButtonLongPressHandledRef = useRef(false);
-  const [opponentSearchCursor, setOpponentSearchCursor] = useState<string | null>(null);
   const findMissingSearchAutoNavigationRef = useRef(false);
   const [isFindMissingSearchRunning, setIsFindMissingSearchRunning] = useState(false);
   const lichessRateLimitedUntilRef = useRef(0);
@@ -2487,6 +2508,7 @@ function App() {
   const reviewPosition = mistakeReview?.positions[mistakeReview.index];
   const browseMistakePosition = isBrowseMode ? reviewPosition : undefined;
   const reviewPositionOnBoard = reviewPosition && (isBrowseMode || reviewPosition.node.id === selectedNode.id);
+  const opponentFinding = opponentReview?.findings[opponentReview.index];
   const browseOpponentPosition = isBrowseMode ? opponentFinding?.node : undefined;
   const opponentFindingOnBoard = opponentFinding && (isBrowseMode || opponentFinding.node.id === selectedNode.id) &&
     !analysisScratchPosition ? opponentFinding : null;
@@ -2835,7 +2857,7 @@ function App() {
     setSuddenDeathStartNodeId(null);
     setSuddenDeathCurrentFen(null);
     setSuddenDeathLastMove(null);
-    setOpponentSearchCursor(null);
+    setOpponentReview(null);
   }, []);
 
   useEffect(() => {
@@ -3395,6 +3417,87 @@ function App() {
     }
   }, []);
 
+  const historyPlayer = playerHandle.trim().toLowerCase();
+  const savedPlayerHistory = playerHistory?.player === historyPlayer ? playerHistory.data : null;
+  useEffect(() => {
+    if (!hasHydratedAppState || !historyPlayer || isLichessFilterOpen) {
+      setPlayerHistorySyncing(false);
+      setPlayerHistoryError('');
+      return;
+    }
+    const controller = new AbortController();
+    const { signal } = controller;
+    const key = `player-game-history-v1:${historyPlayer}`;
+    const publish = (data: PlayerGameHistory) => {
+      if (signal.aborted) return;
+      setPlayerHistory(previous => {
+        if (previous?.player !== historyPlayer) return { player: historyPlayer, data };
+        if (previous.data.syncedAt >= data.syncedAt) return previous;
+        const priorGames = previous.data.games;
+        const sameGames = priorGames.length === data.games.length && priorGames.every((game, i) => game.id === data.games[i].id);
+        return { player: historyPlayer, data: sameGames ? { ...data, games: priorGames } : data };
+      });
+    };
+    const sync = (force: boolean, maxAge = PLAYER_HISTORY_SYNC_INTERVAL_MS) => {
+      if (signal.aborted || playerHistoryJobRef.current || findMissingControllerRef.current) return;
+      let saved: PlayerGameHistory | null = null;
+      const run = async () => {
+        saved = await idbGet<PlayerGameHistory>(key);
+        signal.throwIfAborted();
+        if (saved) publish(saved);
+        if (!force && saved && Date.now() - saved.syncedAt < maxAge) return saved;
+        setPlayerHistorySyncing(true);
+        setPlayerHistoryError('');
+        const latest = await syncPlayerGameHistory(historyPlayer, saved, signal, async (url, requestSignal) => {
+          const allowed = await waitForLichessRateSlot(requestSignal);
+          requestSignal.throwIfAborted();
+          if (!allowed) throw new Error('Lichess rate limit. Try again later.');
+          const headers = new Headers({ Accept: 'application/x-ndjson' });
+          if (lichessApiToken.trim()) headers.set('Authorization', `Bearer ${lichessApiToken.trim()}`);
+          const response = await fetch(url, { signal: requestSignal, headers });
+          if (response.status === 429) registerLichessRateLimit(response.headers.get('Retry-After'));
+          if (!response.ok) throw new Error(`Lichess game export failed (${response.status}).`);
+          return response;
+        });
+        signal.throwIfAborted();
+        let stored = latest;
+        await idbUpdate<PlayerGameHistory>(key, previous => {
+          if (previous && previous.syncedAt > latest.syncedAt) stored = previous;
+          return stored;
+        });
+        publish(stored);
+        return stored;
+      };
+      const job = { player: historyPlayer, promise: run().catch(error => {
+        if (!signal.aborted) setPlayerHistoryError(getErrorMessage(error, 'Could not sync Lichess games.'));
+        return saved;
+      }).finally(() => {
+        if (playerHistoryJobRef.current === job) playerHistoryJobRef.current = null;
+        if (!signal.aborted) setPlayerHistorySyncing(false);
+      }) };
+      playerHistoryJobRef.current = job;
+    };
+    const force = playerHistoryRefresh !== playerHistoryRefreshHandledRef.current;
+    playerHistoryRefreshHandledRef.current = playerHistoryRefresh;
+    setPlayerHistorySyncing(false);
+    setPlayerHistoryError('');
+    sync(force);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') sync(false, PLAYER_HISTORY_SYNC_CHECK_MS);
+    };
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') sync(false);
+    }, PLAYER_HISTORY_SYNC_CHECK_MS);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      controller.abort();
+      if (playerHistoryJobRef.current?.player === historyPlayer) playerHistoryJobRef.current = null;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [hasHydratedAppState, historyPlayer, isLichessFilterOpen, lichessApiToken, playerHistoryRefresh,
+    registerLichessRateLimit, waitForLichessRateSlot]);
+
   const ensureLichessResponseCacheLoaded = useCallback(async () => {
     if (lichessResponseCacheLoadedRef.current) return;
     if (lichessResponseCacheLoadPromiseRef.current) {
@@ -3544,13 +3647,14 @@ function App() {
   const explorerUrl = getExplorerUrl(explorerFen);
   const explorerRequestKey = JSON.stringify([explorerUrl, lichessApiToken]);
   const mistakeReviewOpen = mistakeReview !== null;
+  const opponentReviewOpen = opponentReview !== null;
   const showingOpponentResult = opponentFindingOnBoard !== null;
   useEffect(() => {
     const controller = new AbortController();
     const isPlayer = lichessSource === 'player';
     const skip = (isPlayer && !playerHandle.trim()) || trainingSession?.side === activeSide;
     if (skip) { setLichessStatus('idle'); return; }
-    if (isFindMissingSearchRunning || mistakeReviewOpen || showingOpponentResult) return;
+    if (isFindMissingSearchRunning || mistakeReviewOpen || opponentReviewOpen || (isPlayer && playerHistorySyncing)) return;
     let disposed = false;
     let timedOut = false;
     let idle: number | undefined;
@@ -3614,7 +3718,7 @@ function App() {
       controller.abort();
     };
   }, [activeSide, explorerFen, explorerRequestKey, explorerUrl, getCachedLichessResponse, isFindMissingSearchRunning, mistakeReviewOpen,
-    showingOpponentResult,
+    opponentReviewOpen, playerHistorySyncing,
     lichessRateLimitedUntil, lichessSource, playerHandle, requestExplorer, trainingSession?.side, explorerRefresh]);
 
   useEffect(() => {
@@ -3622,19 +3726,18 @@ function App() {
       findMissingSearchAutoNavigationRef.current = false;
       return;
     }
-    setOpponentSearchCursor(null);
+    findMissingControllerRef.current?.abort();
     setPlayerSearchNote('');
-    setOpponentFinding(null);
+    setOpponentReview(null);
   }, [selectedNode.id, activeSide, activeRepertoireId, getExplorerUrl]);
 
   useEffect(() => {
     setMistakeReview(null);
-    setOpponentFinding(null);
-    setOpponentSearchCursor(null);
+    setOpponentReview(null);
   }, [repertoireReviewNodes, activeRepertoireId, getExplorerUrl, lichessApiToken, trainingSession]);
 
   useEffect(() => () => findMissingControllerRef.current?.abort(),
-    [selectedNode.id, activeRepertoireId, mistakeReviewNodes, getExplorerUrl, lichessApiToken, trainingSession]);
+    [activeSide, activeRepertoireId, repertoireReviewNodes, getExplorerUrl, lichessApiToken, trainingSession]);
 
   useEffect(() => {
     if (!isTrainingStatsMenuOpen) return;
@@ -3691,9 +3794,54 @@ function App() {
     return requestExplorer(url, AbortSignal.any([signal, AbortSignal.timeout(20_000)]));
   }, [getExplorerUrl, getCachedLichessResponse, requestExplorer]);
 
+  const historyIndexRef = useRef<{
+    games: PlayerGameHistory['games'];
+    nodes: typeof repertoireReviewNodes;
+    side: Side;
+    speeds: string[];
+    modes: string[];
+    query: Awaited<ReturnType<typeof indexPlayerGameHistory>>;
+  } | null>(null);
+  const preparePersonalReviewQuery = async (signal: AbortSignal) => {
+    let history = savedPlayerHistory;
+    const job = playerHistoryJobRef.current;
+    if (!history && job?.player === historyPlayer) {
+      let onAbort: () => void = () => {};
+      const cancelled = new Promise<null>(resolve => {
+        onAbort = () => resolve(null);
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+      try {
+        signal.throwIfAborted();
+        history = await Promise.race([job.promise, cancelled]);
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+      }
+    }
+    signal.throwIfAborted();
+    if (!history) return { fromHistory: false, query: (fen: string, dates?: ExplorerDates) => queryMistakeExplorer(fen, signal, dates) };
+    const cached = historyIndexRef.current;
+    const index = cached?.games === history.games && cached.nodes === repertoireReviewNodes && cached.side === activeSide &&
+      cached.speeds === playerSpeeds && cached.modes === selectedModes
+      ? cached.query
+      : await indexPlayerGameHistory(history, new Set(repertoireReviewNodes.map(({ node }) => bookPositionFenKey(node.fen))),
+        activeSide, playerSpeeds, selectedModes, signal);
+    signal.throwIfAborted();
+    historyIndexRef.current = {
+      games: history.games, nodes: repertoireReviewNodes, side: activeSide, speeds: playerSpeeds, modes: selectedModes, query: index,
+    };
+    return {
+      fromHistory: true,
+      query: async (fen: string, dates?: ExplorerDates): Promise<LichessResponse> => {
+        signal.throwIfAborted();
+        return index(bookPositionFenKey(fen), dates);
+      },
+    };
+  };
+
   useEffect(() => {
     setMistakeDateLookupFailed(false);
-    if (!reviewPosition || !reviewPositionOnBoard || isFindMissingSearchRunning) return;
+    if (!reviewPosition || reviewPosition.fromHistory || !reviewPositionOnBoard || isFindMissingSearchRunning) return;
     const missing = reviewPosition.moves.filter(move => !move.lastMonth && move.recent + move.earlier > 0);
     if (!missing.length) return;
     const controller = new AbortController();
@@ -5387,21 +5535,34 @@ function App() {
     const player = lichessSource === 'player';
     if (!opponentReviewNodes.length || isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning ||
       (player && !playerHandle.trim())) return;
-    closeMistakeReview();
+    if (opponentReview && isFindMissingSearchRunning) {
+      setOpponentReview(prev => prev && (prev.index + 1 < prev.findings.length
+        ? { ...prev, index: prev.index + 1 }
+        : { ...prev, waitingForNext: true }));
+      return;
+    }
+    if (opponentReview && opponentReview.index + 1 < opponentReview.findings.length) {
+      setOpponentReview({ ...opponentReview, index: opponentReview.index + 1 });
+      return;
+    }
+    if (opponentReview?.exhausted || findMissingControllerRef.current || playerAssessmentJobRef.current) return;
+    if (mistakeReview) closeMistakeReview();
     setPortraitTab('lichess');
-    const start = opponentReviewNodes.findIndex(({ node }) => bookPositionFenKey(node.fen) === opponentSearchCursor) + 1;
+    const review = opponentReview ?? { findings: [], index: -1, nextNode: 0, waitingForNext: true, exhausted: false };
+    setOpponentReview({ ...review, waitingForNext: true });
     await runExplorerSearch(async controller => {
-      const query = (fen: string) => queryMistakeExplorer(fen, controller.signal);
-      for (let i = start; i < opponentReviewNodes.length; i++) {
+      if (player) setPlayerSearchNote('Preparing your game history…');
+      const personal = player ? await preparePersonalReviewQuery(controller.signal) : null;
+      setOpponentReview(prev => prev && ({ ...prev, fromHistory: personal?.fromHistory }));
+      for (let i = review.nextNode; i < opponentReviewNodes.length; i++) {
         const { node, prepared } = opponentReviewNodes[i];
-        const key = bookPositionFenKey(node.fen);
         controller.signal.throwIfAborted();
         if (!prepared.size && (!player || !stockfishLoaded)) {
-          setOpponentSearchCursor(key);
+          setOpponentReview(prev => prev && ({ ...prev, nextNode: i + 1 }));
           continue;
         }
         setPlayerSearchNote(`Checking opponent position ${i + 1} / ${opponentReviewNodes.length}…`);
-        const data = player ? await query(node.fen) : await fetchLichessNodeData(node.fen, controller.signal);
+        const data = personal ? await personal.query(node.fen) : await fetchLichessNodeData(node.fen, controller.signal);
         controller.signal.throwIfAborted();
         if (!data) throw new Error('Could not check this position. Try again.');
         const total = explorerGameCount(data);
@@ -5411,42 +5572,47 @@ function App() {
           const count = explorerGameCount(move);
           if (prepared.has(move.uci) || count === 0) continue;
           if (!player && (!total || count / total < lichessArrowThreshold / 100)) continue;
-          if (player && !prepared.size) {
+          if (personal && !prepared.size) {
             const reply = explorerReplyFen(node.fen, move.uci);
-            if (!reply || !await inspectPlayerReply(reply, query, controller)) continue;
+            if (!reply || !await inspectPlayerReply(reply, personal.query, controller)) continue;
           }
           missing.add(move.uci);
         }
         controller.signal.throwIfAborted();
-        setOpponentSearchCursor(key);
-        if (missing.size) {
-          setOpponentFinding({ node, moves: missing, prepared, data });
-          if (!isBrowseMode) {
-            if (node.id !== selectedNode.id) findMissingSearchAutoNavigationRef.current = true;
-            navigateToNode(activeSide, node.id);
-          } else setAnalysisScratchPosition(null);
-          setPlayerSearchNote('');
-          return;
-        }
+        setOpponentReview(prev => {
+          if (!prev) return prev;
+          if (!missing.size) return { ...prev, nextNode: i + 1 };
+          const finding = { node, moves: missing, prepared, data };
+          return {
+            ...prev,
+            findings: [...prev.findings, finding],
+            index: prev.waitingForNext ? prev.index + 1 : prev.index,
+            nextNode: i + 1,
+            waitingForNext: false,
+          };
+        });
       }
-      setOpponentFinding(null);
-      setOpponentSearchCursor(null);
-      setPlayerSearchNote(isBrowseMode ? 'No further missing opponent moves in the database.'
-        : 'No further missing opponent moves in this repertoire.');
+      controller.signal.throwIfAborted();
+      setOpponentReview(prev => prev && ({ ...prev, waitingForNext: false, exhausted: true }));
+      setPlayerSearchNote('');
     });
   };
 
   const closeMistakeReview = () => {
+    if (!mistakeReview) return;
     if (isFindingCommonMistakes) findMissingControllerRef.current?.abort();
-    if (mistakeReview) setAnalysisScratchPosition(null);
+    setAnalysisScratchPosition(null);
     setMistakeReview(null);
     setPlayerSearchNote('');
+    setPortraitTab('moves');
   };
 
   const closeOpponentFinding = () => {
-    setOpponentFinding(null);
+    if (opponentReview) findMissingControllerRef.current?.abort();
+    setOpponentReview(null);
     setAnalysisScratchPosition(null);
     setPlayerSearchNote('');
+    setPortraitTab('moves');
   };
 
   const showMistakePosition = (position: MistakeReviewPosition) => {
@@ -5471,20 +5637,22 @@ function App() {
       return;
     }
     if (direction === -1 || review.exhausted) return;
-    setOpponentFinding(null);
+    setOpponentReview(null);
     setAnalysisScratchPosition(null);
     setMistakeReview(review);
     setIsFindingCommonMistakes(true);
     try {
       await runExplorerSearch(async controller => {
         const { signal } = controller;
+        setPlayerSearchNote('Preparing your game history…');
+        const { query, fromHistory } = await preparePersonalReviewQuery(signal);
         const now = new Date();
         const recentSince = monthKey(now.getUTCFullYear() * 12 + now.getUTCMonth() - 2);
         for (let i = review.nextNode; i < mistakeReviewNodes.length; i++) {
           signal.throwIfAborted();
           const { node, prepared } = mistakeReviewNodes[i];
           setPlayerSearchNote('Checking position ' + (i + 1) + ' / ' + mistakeReviewNodes.length + '…');
-          const data = await queryMistakeExplorer(node.fen, signal);
+          const data = await query(node.fen);
           const all = new Map(playerExplorerMoves(node.fen, data.moves).map(move => [move.uci, move]));
           const deviations = [...all.values()].filter(move => !prepared.has(move.uci) && explorerGameCount(move) > 0);
           if (deviations.length) {
@@ -5493,7 +5661,7 @@ function App() {
             const assessment = await withPlayerEngine(controller, () => assessPlayerPosition(node.fen, counts, signal, true));
             const mistakes = deviations.filter(move => (assessment.moves[move.uci]?.confirmedLoss ?? 0) >= PLAYER_MISTAKE_LOSS);
             if (mistakes.length) {
-              const recentData = await queryMistakeExplorer(node.fen, signal, { since: recentSince });
+              const recentData = await query(node.fen, { since: recentSince });
               const recent = new Map(playerExplorerMoves(node.fen, recentData.moves).map(move => [move.uci, explorerGameCount(move)]));
               const latestByRawMove = new Map<string, string>();
               for (const game of data.recentGames ?? []) {
@@ -5514,12 +5682,13 @@ function App() {
                     losses: (activeSide === 'white' ? move?.black : move?.white) ?? 0,
                   },
                   recent: recentCount, earlier: total - recentCount,
+                  lastPlayedAt: move?.lastPlayedAt,
                   lastMonth: playerGameMonth(move?.game) ?? (move ? latestByRawMove.get(rawUciBySan.get(move.san) ?? uci) : undefined),
                 };
               };
               const recentGames = Math.min(explorerGameCount(data), explorerGameCount(recentData));
               const position: MistakeReviewPosition = {
-                node, recentSince, recentGames, earlierGames: explorerGameCount(data) - recentGames,
+                node, recentSince, recentGames, earlierGames: explorerGameCount(data) - recentGames, fromHistory,
                 moves: [
                   ...[...prepared].map(uci => makeRow(uci, true)),
                   ...mistakes.map(move => makeRow(move.uci, false))
@@ -6546,13 +6715,16 @@ function App() {
   const canRunFindMissingSearch =
     opponentReviewNodes.length > 0 && (!isPlayerExplorer || Boolean(playerHandle.trim())) &&
     !isFindMissingSearchRunning && !isSuddenDeathActive && !isTreeEvalRunning && !playerAssessmentRunning;
+  const hasNextOpponentFinding = Boolean(opponentReview && opponentReview.index + 1 < opponentReview.findings.length);
   const canFindCommonMistakes = Boolean(playerHandle.trim() && mistakeReviewNodes.length) && stockfishLoaded &&
     !isFindMissingSearchRunning && !playerAssessmentRunning && !isTreeEvalRunning &&
     hasHydratedAppState && !trainingSession && !isExampleReplayActive && !analysisGameProgress;
   const mistakeRows: PlayerMoveRow[] = reviewPosition?.moves.map(move => {
     const total = move.recent + move.earlier;
     const totalGames = reviewPosition.recentGames + reviewPosition.earlierGames;
-    const lastPlayed = move.lastMonth ? `Last played ${formatPlayerMonth(move.lastMonth)}`
+    const lastPlayed = move.lastPlayedAt
+      ? `Last played ${new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(move.lastPlayedAt)}`
+      : move.lastMonth ? `Last played ${formatPlayerMonth(move.lastMonth)}`
       : !total ? 'Never played' : mistakeDateLookupFailed ? 'Last played: unavailable' : 'Finding last played…';
     const frequencyIn = (count: number, games: number) => games ? `${count}/${games}` : '—';
     return {
@@ -7806,7 +7978,7 @@ function App() {
     [],
   );
 
-  const navigateToNode = (side: Side, nextId: string) => {
+  const navigateToNode = useCallback((side: Side, nextId: string) => {
     if (trainingSession && trainingSession.side === side) return;
     setAnalysisScratchPosition(null);
     setEngineLines([]);
@@ -7818,7 +7990,18 @@ function App() {
       [side]: [...prev[side], { tree: trees[side], selectedNodeId: currentId }].slice(-200),
     }));
     setSelectedNodeBySide((prev) => ({ ...prev, [side]: nextId }));
-  };
+  }, [trainingSession, selectedNodeBySide, trees]);
+
+  useEffect(() => {
+    if (displayedOpponentFindingRef.current === opponentFinding) return;
+    displayedOpponentFindingRef.current = opponentFinding;
+    if (!opponentFinding) return;
+    setAnalysisScratchPosition(null);
+    if (!isBrowseMode && opponentFinding.node.id !== selectedNode.id) {
+      findMissingSearchAutoNavigationRef.current = true;
+      navigateToNode(activeSide, opponentFinding.node.id);
+    }
+  }, [activeSide, isBrowseMode, navigateToNode, opponentFinding, selectedNode.id]);
 
   const undoNavigation = () => {
     if (isTrainingActive || isSuddenDeathActive) return;
@@ -7986,6 +8169,28 @@ function App() {
         <section className="left-panel">
           <div className={`board-row ${isTrainingActive ? 'training-mode' : ''}`}>
             {!isTrainingActive && <aside className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}>
+              {opponentReview && (
+                <div className="player-repertoire-panel">
+                  <div className="player-repertoire-controls mistake-review-controls">
+                    <span title={activeRepertoireName}>Missing opponent moves{opponentReview.index >= 0 &&
+                      ` · ${opponentReview.index + 1}/${opponentReview.findings.length}`}</span>
+                    <button type="button" className="review-text-btn"
+                      disabled={!hasNextOpponentFinding && (opponentReview.exhausted ||
+                        (isFindMissingSearchRunning && opponentReview.waitingForNext))}
+                      onClick={() => void jumpToNextMissingLichessMove()}>
+                      <NextIcon /> <span>Next problem</span>
+                    </button>
+                    <button type="button" className="review-text-btn" onClick={closeOpponentFinding}>
+                      <QuitIcon /> <span>Close review</span>
+                    </button>
+                  </div>
+                  <div role="status" className="player-repertoire-status">
+                    {playerSearchNote || (opponentReview.exhausted && !hasNextOpponentFinding &&
+                      (opponentFinding ? 'No further missing opponent moves.' : 'No missing opponent moves found.'))}
+                  </div>
+                  {opponentReview.fromHistory && <div className="player-repertoire-status">Local game history · last 12 months</div>}
+                </div>
+              )}
               {mistakeReview ? (
                 <div className="player-repertoire-panel">
                   <div className="player-repertoire-controls mistake-review-controls">
@@ -7999,8 +8204,10 @@ function App() {
                       disabled={isFindMissingSearchRunning ||
                         (mistakeReview.exhausted && mistakeReview.index >= mistakeReview.positions.length - 1)}
                       onClick={() => void findCommonMistakes(1)}><NextIcon /></button>
-                    <button type="button" aria-label="Close mistake review" title="Close mistake review"
-                      onClick={closeMistakeReview}><QuitIcon /></button>
+                    <button type="button" className="review-text-btn"
+                      onClick={closeMistakeReview}>
+                      <QuitIcon /> <span>Close review</span>
+                    </button>
                   </div>
                   <div className="player-repertoire-status" role="status">{playerSearchNote}</div>
                   {isFindMissingSearchRunning && (
@@ -8028,20 +8235,27 @@ function App() {
                       {!reviewPosition.moves.some(move => move.inRepertoire) &&
                         <div className="player-repertoire-status">No repertoire move saved for this position.</div>}
                       <PlayerRepertoireTable rows={mistakeRows} complete onMove={playPlayerMove} />
-                      <div className="player-repertoire-status">Recent = last 3 calendar months.</div>
+                      <div className="player-repertoire-status">
+                        {reviewPosition.fromHistory && 'Local game history · last 12 months. Dates show game start. '}
+                        Recent = last 3 calendar months.
+                      </div>
                     </>
                   ))}
                 </div>
               ) : isPlayerExplorer && (
                 <div className="player-repertoire-panel">
-                  <div className="player-repertoire-controls">
-                    <span title={activeRepertoireName}>{activeSide} · {activeRepertoireName}</span>
+                  {!opponentReviewOpen && <div className="player-repertoire-controls">
+                    <span title={activeRepertoireName}>{activeSide} · {isBrowseMode ? 'Player explorer' : activeRepertoireName}</span>
                     <button type="button" onClick={() => setIsLichessFilterOpen(true)}>Player settings</button>
-                  </div>
-                  <div className="player-repertoire-controls">
-                    {!showingOpponentResult && <button type="button"
+                  </div>}
+                  {!opponentReviewOpen && <div className="player-repertoire-controls">
+                    <button type="button"
                       disabled={!playerHandle.trim() || isFindMissingSearchRunning || lichessStatus === 'refreshing'}
-                      onClick={() => setExplorerRefresh(value => value + 1)}>Refresh</button>}
+                      onClick={() => setExplorerRefresh(value => value + 1)}>Refresh</button>
+                    <button type="button" disabled={!historyPlayer || playerHistorySyncing || isFindMissingSearchRunning}
+                      onClick={() => setPlayerHistoryRefresh(value => value + 1)}>
+                      {playerHistorySyncing ? 'Syncing games…' : 'Sync games'}
+                    </button>
                     {isFindMissingSearchRunning && <button type="button" onClick={() => findMissingControllerRef.current?.abort()}>
                       Stop search
                     </button>}
@@ -8057,7 +8271,7 @@ function App() {
                         isExampleReplayActive || Boolean(trainingSession) || Boolean(analysisGameProgress)}
                         onClick={() => void checkPlayerReplies()}>Check replies</button>
                     )}
-                  </div>
+                  </div>}
                   {analysisScratchPosition?.playerMoves && (
                     <div className="player-repertoire-controls">
                       <span>Preview</span>
@@ -8067,8 +8281,8 @@ function App() {
                         onClick={savePlayerLine}>Save line</button>}
                     </div>
                   )}
-                  <div role="status" className="player-repertoire-status">
-                    {showingOpponentResult ? '' : !playerHandle.trim() ? 'Enter your Lichess username in Player settings.'
+                  {!opponentReviewOpen && <div role="status" className="player-repertoire-status">
+                    {!playerHandle.trim() ? 'Enter your Lichess username in Player settings.'
                       : lichessStatus === 'indexing' ? (explorerData?.queuePosition
                         ? `Partial results · Lichess queue: ${explorerData.queuePosition}` : 'Partial results · Lichess is indexing.')
                       : lichessStatus === 'refreshing' ? 'Showing saved results · refreshing…'
@@ -8078,30 +8292,26 @@ function App() {
                       : lichessStatus === 'done' && explorerData && !explorerData.moves.length ? 'No games in this position.'
                       : ''}
                     {playerSearchNote && <div>{playerSearchNote}</div>}
+                    {playerHistoryError ? <div>{playerHistoryError}</div> : savedPlayerHistory && (
+                      <div>Games synced {new Date(savedPlayerHistory.syncedAt).toLocaleString()} · last 12 months</div>
+                    )}
                     {playerAssessmentNotice?.key === playerReviewKey && <div>{playerAssessmentNotice.message}</div>}
                     {isFindMissingSearchRunning && <div>Checking opponent moves…</div>}
                     {playerAfterLine && !playerRows.length && Boolean(explorerData?.moves.length) &&
                       !isFindMissingSearchRunning && !playerSearchNote && <div>End of the line · check your replies to reveal problems.</div>}
-                  </div>
-                  {playerAssessment && playerBestMove && playerBestSan && (
+                  </div>}
+                  {!opponentReviewOpen && playerAssessment && playerBestMove && playerBestSan && (
                     <button type="button" className="player-best-move" onClick={() => playPlayerMove(playerBestMove)}>
                       {STOCKFISH_ENGINE_LABEL} best: {toFigurineSan(playerBestSan)} {playerAssessment.best.scoreText}
                     </button>
                   )}
-                  {playerRows.length > 0 && (
+                  {(!opponentReviewOpen || showingOpponentResult) && playerRows.length > 0 && (
                     <PlayerRepertoireTable rows={playerRows} complete={Boolean(explorerData) &&
                       ['done', 'cached', 'refreshing'].includes(lichessStatus)} onMove={playPlayerMove} />
                   )}
                 </div>
               )}
-              {!mistakeReview && opponentFinding && !isFindMissingSearchRunning && (
-                <div className="player-repertoire-controls mistake-review-controls">
-                  <span>Missing opponent moves</span>
-                  <button type="button" onClick={closeOpponentFinding} aria-label="Close opponent move results"
-                    title="Close opponent move results"><QuitIcon /></button>
-                </div>
-              )}
-              {!mistakeReview && !isPlayerExplorer && (playerSearchNote || isFindMissingSearchRunning) && (
+              {!mistakeReview && !opponentReviewOpen && !isPlayerExplorer && (playerSearchNote || isFindMissingSearchRunning) && (
                 <div className="player-repertoire-controls">
                   <span role="status">{playerSearchNote || 'Checking opponent moves…'}</span>
                   {isFindMissingSearchRunning && (
@@ -8109,7 +8319,7 @@ function App() {
                   )}
                 </div>
               )}
-              {!mistakeReview && !showingOpponentResult && !isPlayerExplorer && !lichessAuthRequired &&
+              {!mistakeReview && !opponentReviewOpen && !isPlayerExplorer && !lichessAuthRequired &&
                 (visibleLichessStatus || lichessStatus === 'loading') && (
                 <div className="status lichess-status-row">
                   {lichessStatus === 'loading' && <span className="spinner" aria-hidden="true" />}
@@ -8141,7 +8351,7 @@ function App() {
                     onClick={() => setIsLichessFilterOpen(true)}>⚙</button>
                 </div>
               )}
-              {!mistakeReview && (explorerData || isPlayerExplorer) && (
+              {!mistakeReview && (!opponentReviewOpen || showingOpponentResult) && (explorerData || isPlayerExplorer) && (
                 <>
                   {!isPlayerExplorer && <div className="table">
                     {filteredLichessMoves.map((move) => {
@@ -8895,8 +9105,8 @@ function App() {
                           <button
                             type="button"
                             className="next-missing-btn mode-icon-btn"
-                            onClick={() => void jumpToNextMissingLichessMove()}
-                            disabled={!canRunFindMissingSearch}
+                            onClick={() => opponentReviewOpen ? setPortraitTab('lichess') : void jumpToNextMissingLichessMove()}
+                            disabled={!opponentReviewOpen && !canRunFindMissingSearch}
                             aria-label={isPlayerExplorer ? 'Find missing opponent moves' : 'Find missing popular opponent move'}
                             title={isPlayerExplorer ? 'Find missing opponent moves in your games'
                               : `Find missing popular opponent move (${lichessArrowThreshold}%+)`}
@@ -8908,7 +9118,7 @@ function App() {
                             </svg>
                           </button>
                           <button type="button" className={`mode-icon-btn find-mistakes-btn ${mistakeReview ? 'active' : ''}`}
-                            onClick={() => mistakeReview ? (closeMistakeReview(), setPortraitTab('lichess')) : void findCommonMistakes()}
+                            onClick={() => mistakeReview ? closeMistakeReview() : void findCommonMistakes()}
                             disabled={!mistakeReview && !canFindCommonMistakes} aria-pressed={mistakeReviewOpen}
                             aria-label="Find common mistakes" title={playerHandle.trim()
                               ? 'Find common mistakes in your games' : 'Set your Lichess username in Player settings'}>
