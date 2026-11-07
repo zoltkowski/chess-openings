@@ -1364,6 +1364,48 @@ select {
   align-self: start;
 }
 
+.filters-grid-player {
+  grid-template-areas:
+    "database history"
+    "dates history";
+}
+
+.filters-grid-player .filters-database {
+  grid-area: database;
+}
+
+.filters-grid-player .filters-date-range {
+  grid-area: dates;
+}
+
+.filters-grid-player .player-history-summary {
+  grid-area: history;
+}
+
+.filters-grid-player .database-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(100%, 10.35rem);
+}
+
+.filters-grid-player .database-toggle > button {
+  width: 100%;
+  min-width: 0;
+  padding-inline: 0.25rem;
+}
+
+.filters-grid-player .player-handle-input {
+  max-width: 100%;
+}
+
+@media (max-width: 480px) {
+  .filters-grid-player {
+    grid-template-areas:
+      "database dates"
+      "history history";
+  }
+}
+
 .toggle-group {
   display: inline-flex;
   flex-wrap: wrap;
@@ -1382,6 +1424,7 @@ select {
   width: 100%;
   min-width: 0;
   height: 2rem;
+  padding-inline: 0.25rem;
   text-align: center;
   white-space: nowrap;
 }
@@ -1391,6 +1434,11 @@ select {
   grid-template-columns: repeat(2, minmax(0, 3.1rem));
   gap: 0.35rem;
   width: max-content;
+}
+
+.filters-grid-player .date-range-toggle {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: min(100%, 10rem);
 }
 
 .toggle-group .active {
@@ -1849,25 +1897,11 @@ select {
 
 .filters-modal {
   width: min(620px, 100%);
-  height: min(620px, 90vh);
-  max-height: min(620px, 90vh);
-  overflow: hidden;
-  overflow-x: hidden;
-  display: flex;
-  flex-direction: column;
+  max-height: min(90dvh, calc(100dvh - 2rem));
+  overscroll-behavior: contain;
 }
 
-.filters-modal-main {
-  flex: 0 0 60%;
-  min-height: 0;
-  max-height: 60%;
-  overflow: auto;
-  overflow-x: hidden;
-  padding-right: 0.1rem;
-}
-
-.filters-modal-fixed {
-  flex-shrink: 0;
+.filters-modal-frequency {
   border-top: 1px solid #e5ebf3;
   margin-top: 0.5rem;
   padding-top: 0.6rem;
@@ -2224,7 +2258,7 @@ select {
 .app.theme-dark .move-table td,
 .app.theme-dark .move-list .controls-row,
 .app.theme-dark .training-stats-dropdown,
-.app.theme-dark .filters-modal-fixed,
+.app.theme-dark .filters-modal-frequency,
 .app.theme-dark .repertoire-hit-block {
   border-color: #334155;
 }

@@ -8465,7 +8465,7 @@ function App() {
                     )}
                     {exampleReplayError && <span className="status">{exampleReplayError}</span>}
                   </div>}
-                  {!isPlayerExplorer && <div className="lichess-table-actions desktop-only">
+                  <div className="lichess-table-actions desktop-only">
                     <button
                       className="gear-btn"
                       type="button"
@@ -8475,7 +8475,7 @@ function App() {
                     >
                       ⚙
                     </button>
-                  </div>}
+                  </div>
                 </>
               )}
               <div className="stockfish-inline desktop-only">
@@ -10166,10 +10166,10 @@ function App() {
 
       {isLichessFilterOpen && (
         <div className="modal-backdrop" onClick={() => { setIsLichessFilterOpen(false); setIsLichessTokenEditorOpen(false); }}>
-          <div className="modal-card filters-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="filters-modal-main">
-              <div className="filters-grid">
-                <label>
+          <div className="modal-card filters-modal" role="dialog" aria-modal="true" aria-label="Lichess filters" onClick={(e) => e.stopPropagation()}>
+            <div>
+              <div className={`filters-grid${isPlayerExplorer ? ' filters-grid-player' : ''}`}>
+                <label className="filters-database">
                   Lichess Database
                   <span className="toggle-group database-toggle">
                     <button
@@ -10238,7 +10238,7 @@ function App() {
                     <small>Date, speed, and mode filters change the displayed results. Game sync keeps all standard games from the last 12 months.</small>
                   </section>
                 )}
-                <label>
+                <label className="filters-date-range">
                   Date range
                   <span className="toggle-group date-range-toggle">
                     {lichessSource === 'player' && (
@@ -10376,10 +10376,10 @@ function App() {
               </div>
               )}
             </div>
-            <div className="filters-modal-fixed">
+            <div className="filters-modal-frequency">
               <div className="slider-stack">
                 <label>
-                  {`Min frequency: ${lichessArrowThreshold}%`}
+                  {`${isPlayerExplorer ? 'Min arrow frequency' : 'Min frequency'}: ${lichessArrowThreshold}%`}
                   <span className="slider-field">
                     <input
                       className="threshold-slider min-frequency-slider"
