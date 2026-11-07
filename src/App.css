@@ -1452,6 +1452,20 @@ select {
   fill: none;
 }
 
+.find-mistakes-btn svg {
+  width: 1.1rem;
+  height: 1.1rem;
+  color: #b91c1c;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  fill: none;
+}
+
+.theme-dark .find-mistakes-btn svg {
+  color: #f87171;
+}
+
 .move-list .controls-row > button.stop-training-btn {
   width: auto;
   min-width: 7.5rem;
@@ -2380,11 +2394,21 @@ select {
 
   /* Five toolbar buttons, three arrow buttons, Back, and all eight gaps. */
   @container portrait-board (min-width: 28.4rem) {
-    .portrait-navigation .arrow-toggle-group {
+    .portrait-navigation .arrow-toggle-group:not(.mixed-engine-arrows) {
       display: inline-flex;
     }
 
-    .portrait-panel-arrows {
+    .portrait-panel-arrows:not(.mixed-engine-arrows) {
+      display: none;
+    }
+  }
+
+  @container portrait-board (min-width: 31.4rem) {
+    .portrait-navigation .arrow-toggle-group.mixed-engine-arrows {
+      display: inline-flex;
+    }
+
+    .portrait-panel-arrows.mixed-engine-arrows {
       display: none;
     }
   }

@@ -81,6 +81,7 @@ type EngineLine = {
 type MaiaStockfishComparison = {
   key: string;
   scores: Map<string, CandidateEvaluation>;
+  stockfishMoves: CandidateEvaluation[];
   alternatives: CandidateEvaluation[];
   pending: boolean;
 };
@@ -333,6 +334,7 @@ type PersistedSettingsState = {
   showTreeArrows: boolean;
   showLichessArrows: boolean;
   showStockfishArrows: boolean;
+  showMaiaArrows: boolean;
   stockfishEvalSeconds: number;
   trainingStatsQueueLength: number;
   suddenDeathThreshold: number;
@@ -699,6 +701,8 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
     themeMode: normalizedThemeMode,
     selectedEngine: normalizedSelectedEngine,
     bothEngines: normalizedSelectedEngine === 'maia' && parsed.bothEngines === true,
+    showStockfishArrows: parsed.showStockfishArrows ?? true,
+    showMaiaArrows: parsed.showMaiaArrows ?? parsed.showStockfishArrows ?? true,
     analysisBenchmarkElo: clampInt((parsed as Partial<PersistedSettingsState>).analysisBenchmarkElo, 1100, 3000, 1800),
     maiaStrengthElo: clampInt(
       (parsed as Partial<PersistedSettingsState>).maiaStrengthElo,
@@ -2204,6 +2208,7 @@ function App() {
   const [suddenDeathMaxThinkTimeSec, setSuddenDeathMaxThinkTimeSec] = useState(initialSuddenDeathMaxThinkTimeSec);
   const [engineMultiPv, setEngineMultiPv] = useState(3);
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
+  const [showMaiaArrows, setShowMaiaArrows] = useState(true);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
   const [maiaStockfishComparison, setMaiaStockfishComparison] = useState<MaiaStockfishComparison | null>(null);
   const [stockfishLinesFen, setStockfishLinesFen] = useState(START_POS_FEN);
@@ -2455,6 +2460,7 @@ function App() {
   const currentMaiaKey = `${maiaPositionFen}|${maiaStrengthElo}`;
   const maiaComparisonKey = `${currentMaiaKey}|${engineMultiPv}`;
   const showMixedEngines = bothEngines && selectedEngine === 'maia';
+  const comparison = maiaStockfishComparison?.key === maiaComparisonKey ? maiaStockfishComparison : null;
   const isGameReviewRunning = Boolean(analysisGameProgress);
   const maiaPopularity = useMaiaPopularity(maiaPositionFen, maiaStrengthElo,
     showMaiaPopularity && selectedEngine === 'maia' && engineRunning && !analysisGameProgress &&
@@ -2528,12 +2534,6 @@ function App() {
     return collectMergedMoveOptionsAtFen(activeSide, selectedNode.fen);
   }, [isBrowseMode, selectedNode.fen, repertoiresBySide, activeSide]);
 
-  const mergedTreeMoveOptions = useMemo<BrowseMoveOption[]>(
-    () => collectMergedMoveOptionsAtFen(activeSide, selectedNode.fen),
-    [selectedNode.fen, repertoiresBySide, activeSide],
-  );
-  const isScopedTrainingOnSingleRepertoire = Boolean(trainingSession && trainingSession.side === activeSide && !isBrowseMode);
-
   const displayedChildNodes = useMemo<MoveNode[]>(() => {
     if (!isBrowseMode) return childNodes;
     return browseMoveOptions.map((option, index) => ({
@@ -2566,26 +2566,16 @@ function App() {
   }, [selectedNode.fen, repertoiresBySide, boardOrientation, activeSide, activeRepertoireIdBySide]);
 
   const autoArrows = useMemo<DrawShape[]>(() => {
-    const treeMoveOptionsForUi = !isBrowseMode || isScopedTrainingOnSingleRepertoire
-      ? childNodes
-          .filter((node): node is MoveNode & { moveUci: string; moveSan: string } => Boolean(node.moveUci && node.moveSan))
-          .map((node) => ({
-            moveUci: node.moveUci,
-            moveSan: node.moveSan,
-            repertoireNames: [],
-          }))
-      : mergedTreeMoveOptions;
+    const treeChildUcis = new Set(
+      displayedChildNodes.map(node => node.moveUci).filter((uci): uci is string => Boolean(uci)),
+    );
 
     const treeArrows = !analysisScratchFen && showTreeArrows
-      ? treeMoveOptionsForUi
-          .map((option) => parseUciMove(option.moveUci))
+      ? [...treeChildUcis]
+          .map(parseUciMove)
           .filter((value): value is [Key, Key] => Boolean(value))
           .map(([orig, dest]) => ({ orig, dest, brush: 'green' }))
       : [];
-
-    const treeChildUcis = new Set(
-      treeMoveOptionsForUi.map((option) => option.moveUci).filter((uci): uci is string => Boolean(uci)),
-    );
 
     const data = lichessDataFen === selectedNode.fen ? lichessData : null;
     const positionGames = data ? explorerGameCount(data) : 0;
@@ -2638,70 +2628,59 @@ function App() {
           })()
         : [];
 
-    const engineArrows =
-      showStockfishArrows && engineLines.length > 0
-        ? (() => {
-            const isMaiaEngine = selectedEngine === 'maia';
-            const candidates = engineLines
-              .map((line) => {
-                const keyPair = parseUciMove(line.bestMove);
-                return keyPair ? { keyPair, evalValue: line.evalValue } : null;
-              })
-              .filter((entry): entry is { keyPair: [Key, Key]; evalValue: number } => Boolean(entry));
+    const maiaLines = engineRunning && showMaiaArrows && selectedEngine === 'maia' && maiaResultKey === currentMaiaKey
+      ? engineLines : [];
+    const maxPopularity = Math.max(0, ...maiaLines.map(line => line.evalValue));
+    const maiaArrows = maiaLines.flatMap<DrawShape>(line => {
+      const move = parseUciMove(line.bestMove);
+      if (!move) return [];
+      const [orig, dest] = move;
+      const ratio = maxPopularity > 0 ? Math.max(0, line.evalValue) / maxPopularity : 1;
+      return [{ orig, dest, brush: 'purple', modifiers: { lineWidth: 6 + ratio * 12 } }];
+    });
 
-            if (candidates.length === 0) return [];
+    const stockfishLines = engineRunning && showStockfishArrows
+      ? showMixedEngines
+        ? (comparison?.stockfishMoves ?? []).map(candidate => ({
+            bestMove: candidate.uci,
+            evalValue: stockfishRank(candidate, toTurnColor(maiaPositionFen)),
+          }))
+        : selectedEngine === 'stockfish' && enginePvFen === maiaPositionFen ? engineLines : []
+      : [];
+    const topEval = stockfishLines[0]?.evalValue ?? 0;
+    const stockfishArrows = stockfishLines.flatMap<DrawShape>(line => {
+      const move = parseUciMove(line.bestMove);
+      if (!move) return [];
+      const [orig, dest] = move;
+      const diff = Math.max(0, topEval - line.evalValue);
+      return [{
+        orig,
+        dest,
+        brush: diff > 100 ? 'red' : 'blue',
+        modifiers: { lineWidth: 6 + (1 - Math.min(diff / 100, 1)) * 12 },
+      }];
+    });
 
-            const minLineWidth = 6;
-            const maxLineWidth = 18;
-
-            if (isMaiaEngine) {
-              const maxPopularity = Math.max(...candidates.map((entry) => Math.max(0, entry.evalValue)), 0);
-              return candidates.map((entry) => {
-                const [orig, dest] = entry.keyPair;
-                const popularity = Math.max(0, entry.evalValue);
-                const ratio = maxPopularity > 0 ? popularity / maxPopularity : 1;
-                const lineWidth = minLineWidth + ratio * (maxLineWidth - minLineWidth);
-                return {
-                  orig,
-                  dest,
-                  brush: 'purple',
-                  modifiers: { lineWidth },
-                } as DrawShape;
-              });
-            }
-
-            const topEval = engineLines[0]?.evalValue ?? candidates[0].evalValue;
-
-            return candidates.map((entry) => {
-              const [orig, dest] = entry.keyPair;
-              const diff = Math.max(0, topEval - entry.evalValue);
-              const severity = Math.min(diff / 100, 1);
-              const normalized = candidates.length === 1 ? 1 : 1 - severity;
-              const isClearlyWorse = diff > 100;
-              return {
-                orig,
-                dest,
-                brush: isClearlyWorse ? 'red' : 'blue',
-                modifiers: { lineWidth: minLineWidth + normalized * (maxLineWidth - minLineWidth) },
-              } as DrawShape;
-            });
-          })()
-        : [];
-
-    return softenOverlappingArrows([...treeArrows, ...lichessArrows, ...engineArrows]);
+    return softenOverlappingArrows([...treeArrows, ...lichessArrows, ...maiaArrows, ...stockfishArrows]);
   }, [
     isBrowseMode,
-    isScopedTrainingOnSingleRepertoire,
-    childNodes,
-    mergedTreeMoveOptions,
+    displayedChildNodes,
     showTreeArrows,
     lichessData,
     lichessDataFen,
     lichessSource,
     lichessArrowThreshold,
     engineLines,
+    engineRunning,
+    enginePvFen,
     selectedEngine,
+    showMixedEngines,
+    comparison,
+    maiaPositionFen,
+    maiaResultKey,
+    currentMaiaKey,
     showLichessArrows,
+    showMaiaArrows,
     showStockfishArrows,
     showLichessOnTreeMoves,
     analysisScratchFen,
@@ -2741,6 +2720,7 @@ function App() {
     setShowTreeArrows(persistedSettings.showTreeArrows);
     setShowLichessArrows(persistedSettings.showLichessArrows);
     setShowStockfishArrows(persistedSettings.showStockfishArrows);
+    setShowMaiaArrows(persistedSettings.showMaiaArrows);
     setStockfishEvalSeconds(persistedSettings.stockfishEvalSeconds);
     setTrainingStatsQueueLength(persistedSettings.trainingStatsQueueLength);
     setSuddenDeathThreshold(persistedSettings.suddenDeathThreshold);
@@ -2916,6 +2896,7 @@ function App() {
       showTreeArrows,
       showLichessArrows,
       showStockfishArrows,
+      showMaiaArrows,
       stockfishEvalSeconds,
       trainingStatsQueueLength,
       suddenDeathThreshold,
@@ -2958,6 +2939,7 @@ function App() {
     showTreeArrows,
     showLichessArrows,
     showStockfishArrows,
+    showMaiaArrows,
     stockfishEvalSeconds,
     trainingStatsQueueLength,
     suddenDeathThreshold,
@@ -3843,9 +3825,10 @@ function App() {
       multipv, movetimeMs, searchMoves, preserveInteractiveLines: true, signal,
     });
     const compare = async () => {
-      setMaiaStockfishComparison({ key: maiaComparisonKey, scores: new Map(), alternatives: [], pending: true });
+      let top: CandidateEvaluation[] = [];
+      setMaiaStockfishComparison({ key: maiaComparisonKey, scores: new Map(), stockfishMoves: [], alternatives: [], pending: true });
       try {
-        const top = (await query(engineMultiPv, 300)).candidates ?? [];
+        top = (await query(engineMultiPv, 300)).candidates ?? [];
         if (!top.length) throw new Error('Stockfish returned no candidate moves.');
         const stockfishMoves = new Set(top.map(candidate => candidate.uci));
         const union = [...new Set([...stockfishMoves, ...maiaMoves])];
@@ -3862,10 +3845,12 @@ function App() {
         const maiaSet = new Set(maiaMoves);
         const alternatives = compared.filter(candidate => stockfishMoves.has(candidate.uci) &&
           !maiaSet.has(candidate.uci) && stockfishRank(candidate, side) > weakestMaia);
-        if (!signal.aborted) setMaiaStockfishComparison({ key: maiaComparisonKey, scores, alternatives, pending: false });
+        if (!signal.aborted) {
+          setMaiaStockfishComparison({ key: maiaComparisonKey, scores, stockfishMoves: top, alternatives, pending: false });
+        }
       } catch {
         if (!signal.aborted) {
-          setMaiaStockfishComparison({ key: maiaComparisonKey, scores: new Map(), alternatives: [], pending: false });
+          setMaiaStockfishComparison({ key: maiaComparisonKey, scores: new Map(), stockfishMoves: top, alternatives: [], pending: false });
         }
       }
     };
@@ -5498,6 +5483,7 @@ function App() {
       showTreeArrows,
       showLichessArrows,
       showStockfishArrows,
+      showMaiaArrows,
       stockfishEvalSeconds,
       trainingStatsQueueLength,
       suddenDeathThreshold,
@@ -6171,9 +6157,8 @@ function App() {
   }, [isTrainingActive, trainingSession]);
   const canGoBack = Boolean(analysisScratchPosition?.playerMoves?.length || selectedNode.parentId);
   const isEngineEnabled = engineRunning;
-  const selectedEngineLoaded = selectedEngine === 'maia' ? maiaLoaded : stockfishLoaded;
-  const canToggleEngineArrows = selectedEngineLoaded && engineRunning;
-  const selectedEngineLabel = selectedEngine === 'maia' ? MAIA_ENGINE_LABEL : STOCKFISH_ENGINE_LABEL;
+  const canToggleMaiaArrows = maiaLoaded && engineRunning;
+  const canToggleStockfishArrows = stockfishLoaded && engineRunning;
   const visibleEngineStatus =
     engineStatus === 'done' || engineStatus === 'stopped' || engineStatus === 'analyzing' ? '' : engineStatus;
   const currentEngineEvalRaw = engineLines[0]?.scoreText ?? selectedNode.stockfishEval ?? null;
@@ -6527,44 +6512,10 @@ function App() {
       return total;
     };
 
-    if (isScopedTrainingOnSingleRepertoire) {
-      return childNodes.map((node) => ({
-        node,
-        leaves: countLeaves(node.id),
-      }));
-    }
-
-    const childByUci = new Map(
-      childNodes
-        .filter((node): node is MoveNode & { moveUci: string } => Boolean(node.moveUci))
-        .map((node) => [node.moveUci, node] as const),
-    );
-
-    return mergedTreeMoveOptions.map((option) => {
-      const existingChild = childByUci.get(option.moveUci);
-      if (existingChild) {
-        return {
-          node: existingChild,
-          leaves: countLeaves(existingChild.id),
-        };
-      }
-      return {
-        node: {
-          id: `merged-option-${option.moveUci}`,
-          parentId: selectedNode.id,
-          fen: selectedNode.fen,
-          moveSan: option.moveSan,
-          moveUci: option.moveUci,
-          children: [],
-        } as MoveNode,
-        leaves: option.repertoireNames.length,
-      };
-    });
+    return childNodes.map(node => ({ node, leaves: countLeaves(node.id) }));
   }, [
     isBrowseMode,
-    isScopedTrainingOnSingleRepertoire,
     browseMoveOptions,
-    mergedTreeMoveOptions,
     selectedNode.id,
     selectedNode.fen,
     childNodes,
@@ -7709,7 +7660,6 @@ function App() {
     </div>
   );
   const maiaLines = maiaResultKey === currentMaiaKey ? engineLines : [];
-  const comparison = maiaStockfishComparison?.key === maiaComparisonKey ? maiaStockfishComparison : null;
   const mixedRows = [
     ...maiaLines.map(line => ({ uci: line.bestMove, maia: line, score: comparison?.scores.get(line.bestMove) })),
     ...(comparison?.alternatives ?? []).map(score => ({ uci: score.uci, maia: undefined, score })),
@@ -7790,14 +7740,28 @@ function App() {
         aria-label="Toggle Lichess arrows"
         title="Toggle Lichess arrows (hold for options)"
       />
-      <button
-        type="button"
-        className={`icon-toggle-btn with-diagonal-arrow only-arrow ${selectedEngine === 'maia' ? 'arrow-maia' : 'arrow-stockfish'} ${showStockfishArrows && canToggleEngineArrows ? 'active' : ''}`}
-        onClick={() => setShowStockfishArrows((prev) => !prev)}
-        disabled={!canToggleEngineArrows}
-        aria-label={`Toggle ${selectedEngineLabel} arrows`}
-        title={`Toggle ${selectedEngineLabel} arrows`}
-      />
+      {selectedEngine === 'maia' && (
+        <button
+          type="button"
+          className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-maia ${showMaiaArrows && canToggleMaiaArrows ? 'active' : ''}`}
+          onClick={() => setShowMaiaArrows((prev) => !prev)}
+          disabled={!canToggleMaiaArrows}
+          aria-pressed={showMaiaArrows}
+          aria-label={`Toggle ${MAIA_ENGINE_LABEL} arrows`}
+          title={`Toggle ${MAIA_ENGINE_LABEL} arrows`}
+        />
+      )}
+      {(selectedEngine === 'stockfish' || showMixedEngines) && (
+        <button
+          type="button"
+          className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-stockfish ${showStockfishArrows && canToggleStockfishArrows ? 'active' : ''}`}
+          onClick={() => setShowStockfishArrows((prev) => !prev)}
+          disabled={!canToggleStockfishArrows}
+          aria-pressed={showStockfishArrows}
+          aria-label={`Toggle ${STOCKFISH_ENGINE_LABEL} arrows`}
+          title={`Toggle ${STOCKFISH_ENGINE_LABEL} arrows`}
+        />
+      )}
       <button
         type="button"
         className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-tree ${showTreeArrows ? 'active' : ''}`}
@@ -8310,7 +8274,7 @@ function App() {
                 )}
                 {!isTrainingActive && !isExampleReplayActive && (
                   <div className="portrait-navigation">
-                    <div className="arrow-toggle-group">{arrowToggleButtons}</div>
+                    <div className={`arrow-toggle-group ${showMixedEngines ? 'mixed-engine-arrows' : ''}`}>{arrowToggleButtons}</div>
                     <button
                       type="button"
                       className="portrait-back-btn long-pressable-btn"
@@ -8706,12 +8670,12 @@ function App() {
                           </button>
                         )}
                         {!isBrowseMode && isPlayerExplorer && (
-                          <button type="button" className="mode-icon-btn"
+                          <button type="button" className="mode-icon-btn find-mistakes-btn"
                             onClick={() => void findCommonMistakes()} disabled={!canFindCommonMistakes}
                             aria-label="Find common mistakes" title="Find common mistakes in your games">
                             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                              <circle cx="12" cy="12" r="7" />
-                              <path d="M12 8v4m0 3.5v.5" />
+                              <circle cx="12" cy="12" r="8.5" />
+                              <path d="m9 9 6 6m0-6-6 6" />
                             </svg>
                           </button>
                         )}
@@ -8761,7 +8725,7 @@ function App() {
                               <SuddenDeathIcon />
                             </button>
                           </>
-                        <div className="arrow-toggle-group portrait-panel-arrows">{arrowToggleButtons}</div>
+                        <div className={`arrow-toggle-group portrait-panel-arrows ${showMixedEngines ? 'mixed-engine-arrows' : ''}`}>{arrowToggleButtons}</div>
                       </>
                     )}
                   </div>
