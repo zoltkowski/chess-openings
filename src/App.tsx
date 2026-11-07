@@ -7711,21 +7711,21 @@ function App() {
     setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: snapshot.selectedNodeId }));
   };
 
-  const renderEnginePv = (fen: string, pv: string) => {
-    const moves = buildEnginePvMoves(fen, pv, 5);
-    return (
-      <div className="engine-pv-moves">
-        {moves.map((move, index) => (
-          <button key={index} type="button" className="engine-pv-move"
-            title={`Show position after ${move.san}`}
-            onClick={() => setAnalysisScratchPosition({ fen: move.fen, lastMove: move.lastMove })}>
-            {move.san}
-          </button>
-        ))}
-        {!moves.length && '—'}
-      </div>
-    );
-  };
+  const renderEngineMove = (move: ReturnType<typeof buildEnginePvMoves>[number] | undefined,
+    className = '', key?: number) => move ? (
+      <button key={key} type="button" className={`engine-pv-move ${className}`}
+        title={`Show position after ${move.san}`}
+        onClick={() => setAnalysisScratchPosition({ fen: move.fen, lastMove: move.lastMove })}>
+        {move.san}
+      </button>
+    ) : <span>—</span>;
+
+  const renderEngineContinuation = (moves: ReturnType<typeof buildEnginePvMoves>) => (
+    <div className="engine-pv-moves">
+      {moves.slice(1, 5).map((move, index) => renderEngineMove(move, '', index))}
+      {moves.length > 5 && '...'}
+    </div>
+  );
   const maiaLines = maiaResultKey === currentMaiaKey ? engineLines : [];
   const comparison = maiaStockfishComparison?.key === maiaComparisonKey ? maiaStockfishComparison : null;
   const mixedRows = [
@@ -7739,33 +7739,40 @@ function App() {
   }
   const engineTable = (
     <div className="table ai-eval-table">
-      {selectedEngine === 'stockfish' ? engineLines.map(line => (
-        <div className="table-row engine-pv-row" key={line.multipv}>
-          <span className="engine-pv-score">{line.scoreText}</span>
-          {renderEnginePv(enginePvFen, line.pv)}
-        </div>
-      )) : (
+      {selectedEngine === 'stockfish' ? engineLines.map(line => {
+        const moves = buildEnginePvMoves(enginePvFen, line.pv || line.bestMove, 6);
+        return (
+          <div className="table-row engine-pv-row" key={line.multipv}>
+            {renderEngineMove(moves[0], 'engine-pv-first engine-pv-stockfish')}
+            <span className="engine-pv-score">{line.scoreText}</span>
+            {renderEngineContinuation(moves)}
+          </div>
+        );
+      }) : (
         <>
           <MaiaPopularityControls checked={showMaiaPopularity} onChange={setShowMaiaPopularity} profile={maiaPopularity} />
           {showMixedEngines ? (
             <div className="mixed-engine-table" aria-label="Maia and Stockfish comparison">
-              <div className="mixed-engine-row mixed-engine-head">
+              <div className="engine-pv-row mixed-engine-row mixed-engine-head">
+                <strong>Move</strong>
                 <strong>{MAIA_ENGINE_LABEL}</strong>
-                <strong title="Scores from White’s perspective. Rows ranked for the side to move.">{STOCKFISH_ENGINE_NAME}</strong>
+                <strong title="Scores from White’s perspective. Rows ranked for the side to move.">{STOCKFISH_ENGINE_LABEL}</strong>
+                <strong>Line</strong>
               </div>
-              {mixedRows.map(({ uci, maia, score }) => (
-                <div className="table-row mixed-engine-row" key={uci}>
-                  <div className="mixed-engine-maia">
-                    {maia ? <>{renderEnginePv(maiaPositionFen, maia.pv)}<span>{maia.scoreText}</span></>
-                      : <span title="Outside the displayed Maia suggestions">—</span>}
+              {mixedRows.map(({ uci, maia, score }) => {
+                const moves = buildEnginePvMoves(maiaPositionFen, score?.pv || uci, 6);
+                return (
+                  <div className="table-row engine-pv-row mixed-engine-row" key={uci}>
+                    {renderEngineMove(moves[0], `engine-pv-first ${maia ? 'engine-pv-maia' : 'engine-pv-stockfish'}`)}
+                    <span className="engine-pv-score" title={maia ? undefined : 'Outside the displayed Maia suggestions'}>
+                      {maia?.scoreText ?? '—'}
+                    </span>
+                    <span className="engine-pv-score">{score?.scoreText ?? '—'}</span>
+                    {renderEngineContinuation(moves)}
+                    {showMaiaPopularity && maia && <MaiaPopularityChart uci={uci} elo={maiaStrengthElo} profile={maiaPopularity} />}
                   </div>
-                  <div className="mixed-engine-stockfish">
-                    <span>{score?.scoreText ?? '—'}</span>
-                    {score && renderEnginePv(maiaPositionFen, score.pv || uci)}
-                  </div>
-                  {showMaiaPopularity && maia && <MaiaPopularityChart uci={uci} elo={maiaStrengthElo} profile={maiaPopularity} />}
-                </div>
-              ))}
+                );
+              })}
               {maiaLines.length > 0 && engineRunning && (
                 (!comparison || comparison.pending) ? <div className="status" role="status">Stockfish is evaluating the moves…</div>
                   : maiaLines.some(line => !comparison.scores.has(line.bestMove)) &&
@@ -7773,9 +7780,9 @@ function App() {
               )}
             </div>
           ) : maiaLines.map(line => (
-            <div className={`table-row engine-pv-row ${showMaiaPopularity ? 'maia-popularity-row' : ''}`} key={line.multipv}>
+            <div className="table-row engine-pv-row" key={line.multipv}>
+              {renderEngineMove(buildEnginePvMoves(maiaPositionFen, line.bestMove, 1)[0], 'engine-pv-first engine-pv-maia')}
               <span className="engine-pv-score">{line.scoreText}</span>
-              {renderEnginePv(maiaPositionFen, line.pv)}
               {showMaiaPopularity && <MaiaPopularityChart uci={line.bestMove} elo={maiaStrengthElo} profile={maiaPopularity} />}
             </div>
           ))}
@@ -8320,23 +8327,23 @@ function App() {
                   </button>
                 )}
                 {!isTrainingActive && !isExampleReplayActive && (
-                  <div className="arrow-toggle-group">{arrowToggleButtons}</div>
-                )}
-                {!isTrainingActive && !isExampleReplayActive && (
-                  <button
-                    type="button"
-                    className="portrait-back-btn long-pressable-btn"
-                    onClick={handleBackClick}
-                    onPointerDown={handleBackPointerDown}
-                    onPointerUp={handleBackPointerEnd}
-                    onPointerCancel={handleBackPointerEnd}
-                    onPointerLeave={handleBackPointerEnd}
-                    disabled={!canGoBack}
-                    aria-label="Back 1 move"
-                    title="Back 1 move (long press: previous branch)"
-                  >
-                    <BackIcon />
-                  </button>
+                  <div className="portrait-navigation">
+                    <div className="arrow-toggle-group">{arrowToggleButtons}</div>
+                    <button
+                      type="button"
+                      className="portrait-back-btn long-pressable-btn"
+                      onClick={handleBackClick}
+                      onPointerDown={handleBackPointerDown}
+                      onPointerUp={handleBackPointerEnd}
+                      onPointerCancel={handleBackPointerEnd}
+                      onPointerLeave={handleBackPointerEnd}
+                      disabled={!canGoBack}
+                      aria-label="Back 1 move"
+                      title="Back 1 move (long press: previous branch)"
+                    >
+                      <BackIcon />
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
