@@ -1583,6 +1583,10 @@ select {
   gap: 0.35rem;
 }
 
+.portrait-panel-arrows {
+  display: none;
+}
+
 .desktop-navigation {
   display: inline-flex;
   flex: 0 0 auto;
@@ -1899,12 +1903,6 @@ select {
 .slider-stack label {
   display: grid;
   gap: 0.3rem;
-}
-
-.slider-stack label.inline-check {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
 }
 
 .threshold-slider {
@@ -2326,6 +2324,7 @@ select {
   }
 
   .board-row {
+    container: portrait-board / inline-size;
     grid-template-columns: 1fr;
     grid-template-rows: min-content minmax(0, 1fr);
     gap: 0.35rem;
@@ -2364,15 +2363,30 @@ select {
     position: relative;
   }
 
-  .portrait-tabbar.with-arrow-toggles {
-    flex-wrap: wrap;
-  }
-
   .portrait-navigation {
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
     margin-left: auto;
+  }
+
+  .portrait-navigation .arrow-toggle-group {
+    display: none;
+  }
+
+  .portrait-panel-arrows {
+    display: inline-flex;
+  }
+
+  /* Five toolbar buttons, three arrow buttons, Back, and all eight gaps. */
+  @container portrait-board (min-width: 28.4rem) {
+    .portrait-navigation .arrow-toggle-group {
+      display: inline-flex;
+    }
+
+    .portrait-panel-arrows {
+      display: none;
+    }
   }
 
   .portrait-tabbar .active {
