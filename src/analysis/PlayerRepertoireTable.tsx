@@ -4,6 +4,9 @@ export type PlayerMoveRow = {
   note?: string;
   score?: string;
   provisional?: boolean;
+  kind?: 'repertoire' | 'mistake';
+  frequency?: string;
+  detail?: string;
   results?: { wins: number; draws: number; losses: number };
 };
 
@@ -22,7 +25,7 @@ export function PlayerRepertoireTable({ rows, complete, onMove }: {
         const total = wins + draws + losses;
         const percentage = (count: number) => `${Math.round(count / total * 100)}%`;
         return (
-          <button type="button" className="player-repertoire-row" key={row.uci} onClick={() => onMove(row.uci)}>
+          <button type="button" className="player-repertoire-row" data-kind={row.kind} key={row.uci} onClick={() => onMove(row.uci)}>
             <span className="player-repertoire-move">
               <strong>{row.san}</strong>
               {row.score && <span title={row.provisional ? 'Provisional Stockfish evaluation' : undefined}>
@@ -30,8 +33,9 @@ export function PlayerRepertoireTable({ rows, complete, onMove }: {
               </span>}
               {row.note && <small>{row.note}</small>}
             </span>
-            <span>{total || (complete ? '0' : '—')}</span>
+            <span>{row.frequency ?? (total || (complete ? '0' : '—'))}</span>
             <span>{total ? `${percentage(wins)} / ${percentage(draws)} / ${percentage(losses)}` : '—'}</span>
+            {row.detail && <small className="player-repertoire-row-detail">{row.detail}</small>}
           </button>
         );
       })}

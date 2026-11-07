@@ -49,7 +49,7 @@ import {
 
 type Side = 'white' | 'black';
 type LichessSource = 'lichess' | 'masters' | 'player';
-type PlayerHistoryWindow = 'recent' | 'earlier';
+type ExplorerDates = { since?: string; until?: string };
 type DateRange = '1m' | '2m' | '3m' | '6m' | '1y' | '3y' | '5y' | '10y' | '20y' | '30y' | '50y' | null;
 type ThemeMode = 'light' | 'dark';
 type EngineChoice = 'stockfish' | 'maia';
@@ -182,6 +182,7 @@ type LichessMove = {
   black: number;
   averageRating?: number;
   averageElo?: number;
+  game?: LichessExampleGame;
 };
 
 type LichessExamplePlayer = {
@@ -191,6 +192,7 @@ type LichessExamplePlayer = {
 };
 
 type LichessExampleGame = {
+  uci?: string;
   id?: string;
   winner?: string;
   speed?: string;
@@ -217,14 +219,37 @@ type LichessResponseCacheEntry = {
   data: LichessResponse;
 };
 
-type FoundPlayerMistake = {
-  key: string;
-  san: string;
-  score: string;
+type MistakeReviewMove = {
+  uci: string;
+  inRepertoire: boolean;
+  score?: string;
+  provisional: boolean;
+  results: { wins: number; draws: number; losses: number };
   recent: number;
   earlier: number;
+  lastMonth?: string;
+};
+
+type MistakeReviewPosition = {
+  node: MoveNode;
+  moves: MistakeReviewMove[];
   recentGames: number;
   earlierGames: number;
+  recentSince: string;
+};
+
+type MistakeReview = {
+  positions: MistakeReviewPosition[];
+  index: number;
+  nextNode: number;
+  exhausted: boolean;
+};
+
+type OpponentFinding = {
+  node: MoveNode;
+  moves: Set<string>;
+  prepared: Set<string>;
+  data: LichessResponse;
 };
 
 type UndoSnapshot = {
@@ -455,13 +480,23 @@ function isPlayerExplorerUrl(url: string) {
   return url.startsWith('https://explorer.lichess.ovh/player?');
 }
 
-function playerHistoryDates(window: PlayerHistoryWindow) {
-  const now = new Date();
-  const month = (offset: number) => {
-    const date = new Date(now.getFullYear(), now.getMonth() + offset, 1);
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-  };
-  return window === 'recent' ? { since: month(-2), until: month(0) } : { until: month(-3) };
+function monthNumber(month: string) {
+  const [year, number] = month.split('-').map(Number);
+  return year * 12 + number - 1;
+}
+
+function monthKey(month: number) {
+  return `${Math.floor(month / 12)}-${String(month % 12 + 1).padStart(2, '0')}`;
+}
+
+function playerGameMonth(game: LichessExampleGame | undefined) {
+  const month = game?.month;
+  return month && /^\d{4}-(0[1-9]|1[0-2])$/.test(month) ? month : undefined;
+}
+
+function formatPlayerMonth(month: string) {
+  return new Intl.DateTimeFormat(undefined, { month: 'short', year: 'numeric', timeZone: 'UTC' })
+    .format(new Date(`${month}-01T00:00:00Z`));
 }
 
 function explorerGameCount(value: { white: number; draws: number; black: number }) {
@@ -2224,9 +2259,10 @@ function App() {
   const [explorerRefresh, setExplorerRefresh] = useState(0);
   const explorerRefreshHandledRef = useRef(0);
   const [playerSearchNote, setPlayerSearchNote] = useState('');
-  const [findCommonCursor, setFindCommonCursor] = useState<string | null>(null);
+  const [mistakeReview, setMistakeReview] = useState<MistakeReview | null>(null);
+  const [opponentFinding, setOpponentFinding] = useState<OpponentFinding | null>(null);
   const [isFindingCommonMistakes, setIsFindingCommonMistakes] = useState(false);
-  const [playerMistakeFinding, setPlayerMistakeFinding] = useState<FoundPlayerMistake | null>(null);
+  const [mistakeDateLookupFailed, setMistakeDateLookupFailed] = useState(false);
   const findMissingControllerRef = useRef<AbortController | null>(null);
   const [openingByFen, setOpeningByFen] = useState<Record<string, { eco: string; name: string }>>({});
   const [lichessStatus, setLichessStatus] = useState('idle');
@@ -2398,8 +2434,7 @@ function App() {
   const suddenDeathButtonLongPressHandledRef = useRef(false);
   const movesButtonLongPressTimeoutRef = useRef<number | null>(null);
   const movesButtonLongPressHandledRef = useRef(false);
-  const [findMissingSearchBaseNodeId, setFindMissingSearchBaseNodeId] = useState<string | null>(null);
-  const [findMissingSearchCursorNodeId, setFindMissingSearchCursorNodeId] = useState<string | null>(null);
+  const [opponentSearchCursor, setOpponentSearchCursor] = useState<string | null>(null);
   const findMissingSearchAutoNavigationRef = useRef(false);
   const [isFindMissingSearchRunning, setIsFindMissingSearchRunning] = useState(false);
   const lichessRateLimitedUntilRef = useRef(0);
@@ -2449,8 +2484,36 @@ function App() {
   const tree = trees[activeSide];
   const selectedNodeId = selectedNodeBySide[activeSide] ?? tree.rootId;
   const selectedNode = tree.nodes[selectedNodeId] ?? tree.nodes[tree.rootId];
+  const reviewPosition = mistakeReview?.positions[mistakeReview.index];
+  const browseMistakePosition = isBrowseMode ? reviewPosition : undefined;
+  const reviewPositionOnBoard = reviewPosition && (isBrowseMode || reviewPosition.node.id === selectedNode.id);
+  const browseOpponentPosition = isBrowseMode ? opponentFinding?.node : undefined;
+  const opponentFindingOnBoard = opponentFinding && (isBrowseMode || opponentFinding.node.id === selectedNode.id) &&
+    !analysisScratchPosition ? opponentFinding : null;
+  const reviewTrees = isBrowseMode ? activeRepertoireList : null;
+  const reviewTree = isBrowseMode ? null : tree;
+  const repertoireReviewNodes = useMemo(() => {
+    const positions = new Map<string, { node: MoveNode; prepared: Set<string> }>();
+    for (const source of reviewTree ? [reviewTree] : reviewTrees?.map(entry => entry.tree) ?? []) {
+      if (!repertoireHasMoves(source)) continue;
+      for (const node of repertoireBranchNodes(source, source.rootId)) {
+        const key = bookPositionFenKey(node.fen);
+        const position = positions.get(key) ?? { node, prepared: new Set<string>() };
+        for (const id of node.children) {
+          const move = source.nodes[id]?.moveUci;
+          if (move) position.prepared.add(move);
+        }
+        positions.set(key, position);
+      }
+    }
+    return [...positions.values()];
+  }, [reviewTree, reviewTrees]);
+  const mistakeReviewNodes = useMemo(() => repertoireReviewNodes.filter(({ node }) => toTurnColor(node.fen) === activeSide),
+    [activeSide, repertoireReviewNodes]);
+  const opponentReviewNodes = useMemo(() => repertoireReviewNodes.filter(({ node }) => toTurnColor(node.fen) !== activeSide),
+    [activeSide, repertoireReviewNodes]);
   const analysisScratchFen = analysisScratchPosition?.fen ?? null;
-  const selectedBoardFen = analysisScratchFen ?? selectedNode.fen;
+  const selectedBoardFen = analysisScratchFen ?? browseMistakePosition?.node.fen ?? browseOpponentPosition?.fen ?? selectedNode.fen;
   const playerPositionKey = bookPositionFenKey(selectedBoardFen);
   const playerReviewKey = playerAssessmentKey(playerHandle, activeSide, playerPositionKey);
   const playerAssessment = playerAssessments[playerReviewKey];
@@ -2566,7 +2629,13 @@ function App() {
   }, [selectedNode.fen, repertoiresBySide, boardOrientation, activeSide, activeRepertoireIdBySide]);
 
   const autoArrows = useMemo<DrawShape[]>(() => {
-    const treeChildUcis = new Set(
+    if (reviewPositionOnBoard && !analysisScratchFen) {
+      return softenOverlappingArrows(reviewPosition.moves.flatMap<DrawShape>(row => {
+        const move = parseUciMove(row.uci);
+        return move ? [{ orig: move[0], dest: move[1], brush: row.inRepertoire ? 'green' : 'red' }] : [];
+      }));
+    }
+    const treeChildUcis = opponentFindingOnBoard?.prepared ?? new Set(
       displayedChildNodes.map(node => node.moveUci).filter((uci): uci is string => Boolean(uci)),
     );
 
@@ -2577,14 +2646,17 @@ function App() {
           .map(([orig, dest]) => ({ orig, dest, brush: 'green' }))
       : [];
 
-    const data = lichessDataFen === selectedNode.fen ? lichessData : null;
+    const data = opponentFindingOnBoard?.data ?? (lichessDataFen === selectedNode.fen ? lichessData : null);
     const positionGames = data ? explorerGameCount(data) : 0;
     const thresholdShare = lichessArrowThreshold / 100;
     const lichessArrows =
       !analysisScratchFen && showLichessArrows && positionGames > 0
         ? (() => {
             let explorerMoves = data?.moves ?? [];
-            if (lichessSource === 'player') {
+            if (opponentFindingOnBoard) {
+              if (lichessSource === 'player') explorerMoves = playerExplorerMoves(opponentFindingOnBoard.node.fen, explorerMoves);
+              explorerMoves = explorerMoves.filter(move => opponentFindingOnBoard.moves.has(move.uci));
+            } else if (lichessSource === 'player') {
               explorerMoves = playerExplorerMoves(selectedNode.fen, explorerMoves);
               if (!isBrowseMode && toTurnColor(selectedNode.fen) !== activeSide && !playerRepertoireMoves?.size) {
                 explorerMoves = explorerMoves.filter(move => {
@@ -2606,7 +2678,7 @@ function App() {
             const maxShare = Math.max(...allEntries.map((item) => item.share), 0);
 
             const candidates = allEntries.filter(
-              (entry) => !entry.isHiddenByTreeFilter && entry.share >= thresholdShare,
+              (entry) => !entry.isHiddenByTreeFilter && (opponentFindingOnBoard || entry.share >= thresholdShare),
             );
 
             if (candidates.length === 0) return [];
@@ -2663,6 +2735,9 @@ function App() {
 
     return softenOverlappingArrows([...treeArrows, ...lichessArrows, ...maiaArrows, ...stockfishArrows]);
   }, [
+    reviewPosition,
+    reviewPositionOnBoard,
+    opponentFindingOnBoard,
     isBrowseMode,
     displayedChildNodes,
     showTreeArrows,
@@ -2760,8 +2835,7 @@ function App() {
     setSuddenDeathStartNodeId(null);
     setSuddenDeathCurrentFen(null);
     setSuddenDeathLastMove(null);
-    setFindMissingSearchBaseNodeId(null);
-    setFindMissingSearchCursorNodeId(null);
+    setOpponentSearchCursor(null);
   }, []);
 
   useEffect(() => {
@@ -3300,7 +3374,7 @@ function App() {
     setLichessStatus('limited');
   }, [applyPersistedDatabaseState, applyPersistedSettingsState]);
 
-  const waitForLichessRateSlot = useCallback(async () => {
+  const waitForLichessRateSlot = useCallback(async (signal?: AbortSignal) => {
     let release!: () => void;
     const previous = lichessRequestQueueRef.current;
     lichessRequestQueueRef.current = new Promise<void>((resolve) => {
@@ -3308,10 +3382,12 @@ function App() {
     });
     await previous;
     try {
+      signal?.throwIfAborted();
       const now = Date.now();
       if (now < lichessRateLimitedUntilRef.current) return false;
       const wait = Math.max(0, lichessNextRequestAtRef.current - now);
       if (wait > 0) await waitMs(wait);
+      signal?.throwIfAborted();
       lichessNextRequestAtRef.current = Date.now() + LICHESS_API_MIN_INTERVAL_MS;
       return true;
     } finally {
@@ -3416,30 +3492,31 @@ function App() {
     [ensureLichessResponseCacheLoaded, persistLichessResponseCache],
   );
 
-  const getExplorerUrl = useCallback((fen: string, historyWindow?: PlayerHistoryWindow) => {
+  const getExplorerUrl = useCallback((fen: string, historyDates?: ExplorerDates, source = lichessSource) => {
     const params = new URLSearchParams({ fen: fullBoardFen(fen), variant: FIXED_VARIANT, color: activeSide });
-    if (lichessSource === 'player') {
+    if (source === 'player') {
       params.set('fen', bookPositionFenKey(fen) + ' 0 1');
       params.set('player', playerHandle.trim().toLowerCase());
       if (playerSpeeds.length && playerSpeeds.length !== PLAYER_SPEEDS.length) params.set('speeds', [...playerSpeeds].sort().join(','));
       params.set('modes', [...(selectedModes.length ? selectedModes : MODES)].sort().join(','));
       params.set('source', FIXED_SOURCE);
-    } else if (lichessSource === 'lichess') {
+      if (historyDates) params.set('moves', '256');
+    } else if (source === 'lichess') {
       if (selectedSpeeds.length) params.set('speeds', selectedSpeeds.join(','));
       if (selectedRatings.length) params.set('ratings', selectedRatings.join(','));
     }
-    const dates = historyWindow ? playerHistoryDates(historyWindow) : explorerDateFilter(lichessSource, dateRange);
+    const dates = historyDates ?? explorerDateFilter(source, dateRange);
     if (dates?.since) params.set('since', dates.since);
     if (dates?.until) params.set('until', dates.until);
-    const top = maxTopGamesForSource(lichessSource), recent = maxRecentGamesForSource(lichessSource);
+    const top = maxTopGamesForSource(source), recent = maxRecentGamesForSource(source);
     if (top) params.set('topGames', String(top));
     if (recent) params.set('recentGames', String(recent));
-    return 'https://explorer.lichess.ovh/' + lichessSource + '?' + params;
+    return 'https://explorer.lichess.ovh/' + source + '?' + params;
   }, [activeSide, dateRange, lichessSource, playerHandle, playerSpeeds, selectedModes, selectedRatings, selectedSpeeds]);
 
   const requestExplorer = useCallback(async (url: string, signal: AbortSignal,
     publish?: (snapshot: LichessResponse) => void, onChunk?: () => void) => {
-    const allowed = await waitForLichessRateSlot();
+    const allowed = await waitForLichessRateSlot(signal);
     signal.throwIfAborted();
     if (!allowed) throw new Error("Lichess rate limit. Try again later.");
     const token = lichessApiToken.trim();
@@ -3463,15 +3540,17 @@ function App() {
     return result;
   }, [lichessApiToken, registerLichessRateLimit, setCachedLichessResponse, waitForLichessRateSlot]);
 
-  const explorerFen = lichessSource === 'player' ? selectedBoardFen : selectedNode.fen;
+  const explorerFen = lichessSource === 'player' ? selectedBoardFen : browseOpponentPosition?.fen ?? selectedNode.fen;
   const explorerUrl = getExplorerUrl(explorerFen);
   const explorerRequestKey = JSON.stringify([explorerUrl, lichessApiToken]);
+  const mistakeReviewOpen = mistakeReview !== null;
+  const showingOpponentResult = opponentFindingOnBoard !== null;
   useEffect(() => {
     const controller = new AbortController();
     const isPlayer = lichessSource === 'player';
     const skip = (isPlayer && !playerHandle.trim()) || trainingSession?.side === activeSide;
     if (skip) { setLichessStatus('idle'); return; }
-    if (isFindMissingSearchRunning) return;
+    if (isFindMissingSearchRunning || mistakeReviewOpen || showingOpponentResult) return;
     let disposed = false;
     let timedOut = false;
     let idle: number | undefined;
@@ -3534,7 +3613,8 @@ function App() {
       window.clearTimeout(idle);
       controller.abort();
     };
-  }, [activeSide, explorerFen, explorerRequestKey, explorerUrl, getCachedLichessResponse, isFindMissingSearchRunning,
+  }, [activeSide, explorerFen, explorerRequestKey, explorerUrl, getCachedLichessResponse, isFindMissingSearchRunning, mistakeReviewOpen,
+    showingOpponentResult,
     lichessRateLimitedUntil, lichessSource, playerHandle, requestExplorer, trainingSession?.side, explorerRefresh]);
 
   useEffect(() => {
@@ -3542,15 +3622,19 @@ function App() {
       findMissingSearchAutoNavigationRef.current = false;
       return;
     }
-    setFindMissingSearchBaseNodeId(selectedNode.id);
-    setFindMissingSearchCursorNodeId(null);
-    setFindCommonCursor(null);
+    setOpponentSearchCursor(null);
     setPlayerSearchNote('');
-    setPlayerMistakeFinding(null);
+    setOpponentFinding(null);
   }, [selectedNode.id, activeSide, activeRepertoireId, getExplorerUrl]);
 
+  useEffect(() => {
+    setMistakeReview(null);
+    setOpponentFinding(null);
+    setOpponentSearchCursor(null);
+  }, [repertoireReviewNodes, activeRepertoireId, getExplorerUrl, lichessApiToken, trainingSession]);
+
   useEffect(() => () => findMissingControllerRef.current?.abort(),
-    [selectedNode.id, activeRepertoireId, getExplorerUrl, trainingSession]);
+    [selectedNode.id, activeRepertoireId, mistakeReviewNodes, getExplorerUrl, lichessApiToken, trainingSession]);
 
   useEffect(() => {
     if (!isTrainingStatsMenuOpen) return;
@@ -3581,8 +3665,8 @@ function App() {
 
   const playerSearchQuery = (signal: AbortSignal) => {
     let networkRequests = 0;
-    return async (fen: string, window?: PlayerHistoryWindow) => {
-      const url = getExplorerUrl(fen, window);
+    return async (fen: string) => {
+      const url = getExplorerUrl(fen);
       const cached = await getCachedLichessResponse(url);
       signal.throwIfAborted();
       if (cached && cached.expiresAt > Date.now()) return cached.data;
@@ -3592,12 +3676,68 @@ function App() {
         return await requestExplorer(url, AbortSignal.any([signal, AbortSignal.timeout(20_000)]));
       } catch (error) {
         signal.throwIfAborted();
-        if (cached && !window) return cached.data;
+        if (cached) return cached.data;
         throw new Error(error instanceof DOMException && error.name === 'TimeoutError'
           ? 'Lichess timed out. Run the search again to retry.' : getErrorMessage(error, 'Explorer data unavailable.'));
       }
     };
   };
+
+  const queryMistakeExplorer = useCallback(async (fen: string, signal: AbortSignal, dates: ExplorerDates = {}) => {
+    const url = getExplorerUrl(fen, dates, 'player');
+    const cached = await getCachedLichessResponse(url);
+    signal.throwIfAborted();
+    if (cached && cached.expiresAt > Date.now()) return cached.data;
+    return requestExplorer(url, AbortSignal.any([signal, AbortSignal.timeout(20_000)]));
+  }, [getExplorerUrl, getCachedLichessResponse, requestExplorer]);
+
+  useEffect(() => {
+    setMistakeDateLookupFailed(false);
+    if (!reviewPosition || !reviewPositionOnBoard || isFindMissingSearchRunning) return;
+    const missing = reviewPosition.moves.filter(move => !move.lastMonth && move.recent + move.earlier > 0);
+    if (!missing.length) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    const fetchMonths = async () => {
+      const now = new Date();
+      const currentMonth = now.getUTCFullYear() * 12 + now.getUTCMonth();
+      const recentSince = monthNumber(reviewPosition.recentSince);
+      const countsBySince = new Map<number, Set<string>>();
+      for (const move of missing) {
+        // Query the original position: counting the resulting position would include other move orders.
+        let lower = move.recent ? recentSince : 2000 * 12;
+        let upper = move.recent ? currentMonth : recentSince - 1;
+        while (lower < upper) {
+          const mid = Math.floor((lower + upper + 1) / 2);
+          let played = countsBySince.get(mid);
+          if (!played) {
+            const data = await queryMistakeExplorer(reviewPosition.node.fen, signal, { since: monthKey(mid) });
+            played = new Set(playerExplorerMoves(reviewPosition.node.fen, data.moves)
+              .filter(entry => explorerGameCount(entry) > 0).map(entry => entry.uci));
+            countsBySince.set(mid, played);
+          }
+          if (played.has(move.uci)) lower = mid;
+          else upper = mid - 1;
+        }
+        signal.throwIfAborted();
+        moveMonths.set(move.uci, monthKey(lower));
+      }
+    };
+    const moveMonths = new Map<string, string>();
+    void fetchMonths().catch(() => {
+      if (!signal.aborted) setMistakeDateLookupFailed(true);
+    }).finally(() => {
+      if (signal.aborted || !moveMonths.size) return;
+      setMistakeReview(prev => prev && ({
+        ...prev,
+        positions: prev.positions.map(position => position === reviewPosition ? ({
+          ...position,
+          moves: position.moves.map(move => ({ ...move, lastMonth: move.lastMonth ?? moveMonths.get(move.uci) })),
+        }) : position),
+      }));
+    });
+    return () => controller.abort();
+  }, [reviewPosition, reviewPositionOnBoard, isFindMissingSearchRunning, queryMistakeExplorer]);
 
   const clearTrainingHint = () => {
     setTrainingSession((prev) =>
@@ -3900,7 +4040,7 @@ function App() {
       signal.throwIfAborted();
       const result = await runStockfishSingleQuery({
         fen: fullBoardFen(fen), depth: engineDepth, perspectiveSide: activeSide, movetimeMs,
-        searchMoves: searchMove ? [searchMove] : undefined, engineChoice: 'stockfish',
+        searchMoves: searchMove ? [searchMove] : undefined, engineChoice: 'stockfish', signal,
       });
       signal.throwIfAborted();
       return result;
@@ -4709,8 +4849,9 @@ function App() {
     const currentTree = trees[activeSide];
     const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
     const currentNode = currentTree.nodes[currentSelectedId] ?? currentTree.nodes[currentTree.rootId];
-    const moveSourceFen = analysisScratchPosition && !isTrainingActive
-      ? analysisScratchPosition.fen
+    const reviewBoard = Boolean(reviewPositionOnBoard || opponentFindingOnBoard);
+    const moveSourceFen = (analysisScratchPosition || reviewBoard) && !isTrainingActive
+      ? selectedBoardFen
       :
       trainingSession &&
       trainingSession.side === activeSide &&
@@ -4741,12 +4882,12 @@ function App() {
 
     // Engine-line previews stay separate from the move list. Review moves use
     // the working tree below; without an active repertoire it is not persisted.
-    if (!isTrainingActive && analysisScratchPosition) {
+    if (!isTrainingActive && (analysisScratchPosition || reviewBoard)) {
       setAnalysisScratchPosition({
         fen: chess.fen(),
         lastMove: [move.from as Key, move.to as Key],
-        playerMoves: analysisScratchPosition.playerMoves
-          ? [...analysisScratchPosition.playerMoves, uciFromMove(move)] : undefined,
+        playerMoves: analysisScratchPosition?.playerMoves || reviewBoard
+          ? [...(analysisScratchPosition?.playerMoves ?? []), uciFromMove(move)] : undefined,
       });
       return;
     }
@@ -5132,7 +5273,7 @@ function App() {
       setAnalysisScratchPosition(null);
       return;
     }
-    const chess = fenToChess(selectedNode.fen);
+    const chess = fenToChess(browseMistakePosition?.node.fen ?? browseOpponentPosition?.fen ?? selectedNode.fen);
     for (const uci of moves) chess.move(uci);
     setAnalysisScratchPosition({ fen: chess.fen(), lastMove: parseUciMove(moves.at(-1) ?? null) ?? null, playerMoves: moves });
   };
@@ -5217,16 +5358,15 @@ function App() {
   );
 
   const inspectPlayerReply = async (fen: string, query: ReturnType<typeof playerSearchQuery>, controller: AbortController) => {
-    if (playerReplyHasMistake(fen)) return true;
     const response = await query(fen);
-    const moves = playerExplorerMoves(fen, response.moves).sort((a, b) => explorerGameCount(b) - explorerGameCount(a)).slice(0, 4);
+    const moves = playerExplorerMoves(fen, response.moves).filter(move => explorerGameCount(move) > 0);
     if (!moves.length) return false;
     const counts = new Map(moves.map(move => [move.uci, explorerGameCount(move)]));
     for (const uci of playerRepertoire?.movesByFen.get(bookPositionFenKey(fen)) ?? []) {
       if (!counts.has(uci)) counts.set(uci, 0);
     }
     const assessment = await withPlayerEngine(controller, () => assessPlayerPosition(fen, counts, controller.signal, true));
-    return hasPlayedMistake(assessment);
+    return moves.some(move => (assessment.moves[move.uci]?.confirmedLoss ?? 0) >= PLAYER_MISTAKE_LOSS);
   };
 
   const checkPlayerReplies = async () => {
@@ -5245,128 +5385,160 @@ function App() {
 
   const jumpToNextMissingLichessMove = async () => {
     const player = lichessSource === 'player';
-    if (isBrowseMode || isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning ||
+    if (!opponentReviewNodes.length || isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning ||
       (player && !playerHandle.trim())) return;
-    const root = (findMissingSearchBaseNodeId && tree.nodes[findMissingSearchBaseNodeId]) || selectedNode;
-    if (!player && !root.children.length) return;
-    const branch = repertoireBranchNodes(tree, root.id);
-    const start = branch.findIndex(node => node.id === findMissingSearchCursorNodeId) + 1;
-    if (!player && start >= branch.length) return;
-    if (player) setPortraitTab('lichess');
+    closeMistakeReview();
+    setPortraitTab('lichess');
+    const start = opponentReviewNodes.findIndex(({ node }) => bookPositionFenKey(node.fen) === opponentSearchCursor) + 1;
     await runExplorerSearch(async controller => {
-      const query = playerSearchQuery(controller.signal);
-      const checked = new Set<string>();
-      setFindMissingSearchBaseNodeId(root.id);
-      for (const node of branch.slice(start >= branch.length ? 0 : start)) {
-        if (toTurnColor(node.fen) === activeSide) continue;
-        const position = bookPositionFenKey(node.fen);
-        if (player && checked.has(position)) continue;
-        checked.add(position);
-        if (player && !stockfishLoaded && !playerRepertoire?.movesByFen.get(position)?.size) continue;
+      const query = (fen: string) => queryMistakeExplorer(fen, controller.signal);
+      for (let i = start; i < opponentReviewNodes.length; i++) {
+        const { node, prepared } = opponentReviewNodes[i];
+        const key = bookPositionFenKey(node.fen);
+        controller.signal.throwIfAborted();
+        if (!prepared.size && (!player || !stockfishLoaded)) {
+          setOpponentSearchCursor(key);
+          continue;
+        }
+        setPlayerSearchNote(`Checking opponent position ${i + 1} / ${opponentReviewNodes.length}…`);
         const data = player ? await query(node.fen) : await fetchLichessNodeData(node.fen, controller.signal);
         controller.signal.throwIfAborted();
-        const total = data ? explorerGameCount(data) : 0;
-        const prepared = player ? playerRepertoire?.movesByFen.get(position)
-          : new Set(node.children.map(id => tree.nodes[id]?.moveUci));
-        const moves = player ? playerExplorerMoves(node.fen, data?.moves ?? []) : data?.moves ?? [];
-        let found = false;
+        if (!data) throw new Error('Could not check this position. Try again.');
+        const total = explorerGameCount(data);
+        const moves = player ? playerExplorerMoves(node.fen, data.moves) : data.moves;
+        const missing = new Set<string>();
         for (const move of moves) {
-          if (prepared?.has(move.uci) || explorerGameCount(move) === 0) continue;
-          if (!player && (!total || explorerGameCount(move) / total < lichessArrowThreshold / 100)) continue;
-          if (player && !prepared?.size) {
+          const count = explorerGameCount(move);
+          if (prepared.has(move.uci) || count === 0) continue;
+          if (!player && (!total || count / total < lichessArrowThreshold / 100)) continue;
+          if (player && !prepared.size) {
             const reply = explorerReplyFen(node.fen, move.uci);
             if (!reply || !await inspectPlayerReply(reply, query, controller)) continue;
           }
-          found = true;
-          break;
+          missing.add(move.uci);
         }
-        setFindMissingSearchCursorNodeId(node.id);
-        if (found) {
-          if (node.id !== selectedNode.id) findMissingSearchAutoNavigationRef.current = true;
-          navigateToNode(activeSide, node.id);
-          if (player) setPlayerSearchNote('Select an opponent move to inspect your replies.');
+        controller.signal.throwIfAborted();
+        setOpponentSearchCursor(key);
+        if (missing.size) {
+          setOpponentFinding({ node, moves: missing, prepared, data });
+          if (!isBrowseMode) {
+            if (node.id !== selectedNode.id) findMissingSearchAutoNavigationRef.current = true;
+            navigateToNode(activeSide, node.id);
+          } else setAnalysisScratchPosition(null);
+          setPlayerSearchNote('');
           return;
         }
       }
-      if (player) {
-        setFindMissingSearchCursorNodeId(branch.at(-1)?.id ?? root.id);
-        setPlayerSearchNote('No further opponent moves to review in this branch.');
-      }
+      setOpponentFinding(null);
+      setOpponentSearchCursor(null);
+      setPlayerSearchNote(isBrowseMode ? 'No further missing opponent moves in the database.'
+        : 'No further missing opponent moves in this repertoire.');
     });
   };
 
-  const findCommonMistakes = async () => {
-    if (lichessSource !== 'player' || isBrowseMode || !playerHandle.trim() || !stockfishLoaded ||
-      !hasHydratedAppState || trainingSession || isTreeEvalRunning || analysisGameProgress || isExampleReplayActive ||
+  const closeMistakeReview = () => {
+    if (isFindingCommonMistakes) findMissingControllerRef.current?.abort();
+    if (mistakeReview) setAnalysisScratchPosition(null);
+    setMistakeReview(null);
+    setPlayerSearchNote('');
+  };
+
+  const closeOpponentFinding = () => {
+    setOpponentFinding(null);
+    setAnalysisScratchPosition(null);
+    setPlayerSearchNote('');
+  };
+
+  const showMistakePosition = (position: MistakeReviewPosition) => {
+    setAnalysisScratchPosition(null);
+    if (!isBrowseMode && position.node.id !== selectedNode.id) {
+      findMissingSearchAutoNavigationRef.current = true;
+      navigateToNode(activeSide, position.node.id);
+    }
+  };
+
+  const findCommonMistakes = async (direction: -1 | 1 = 1) => {
+    if (!playerHandle.trim() || !stockfishLoaded || !mistakeReviewNodes.length || !hasHydratedAppState ||
+      trainingSession || isTreeEvalRunning || analysisGameProgress || isExampleReplayActive ||
       findMissingControllerRef.current || playerAssessmentJobRef.current) return;
-    const root = tree.nodes[tree.rootId];
-    const branch = repertoireBranchNodes(tree, root.id);
-    const start = branch.findIndex(node => node.id === findCommonCursor) + 1;
     setPortraitTab('lichess');
-    setPlayerMistakeFinding(null);
+    const review = mistakeReview ?? { positions: [], index: -1, nextNode: 0, exhausted: false };
+    const target = review.index + direction;
+    if (review.positions[target]) {
+      setPlayerSearchNote('');
+      setMistakeReview({ ...review, index: target });
+      showMistakePosition(review.positions[target]);
+      return;
+    }
+    if (direction === -1 || review.exhausted) return;
+    setOpponentFinding(null);
+    setAnalysisScratchPosition(null);
+    setMistakeReview(review);
     setIsFindingCommonMistakes(true);
     try {
       await runExplorerSearch(async controller => {
-        const query = playerSearchQuery(controller.signal);
-        let best: { nodeId: string; finding: FoundPlayerMistake; priority: number } | undefined;
-        let checkedPositions = 0;
-        const checked = new Set<string>();
-        let paused = '';
-        try {
-          for (const node of branch.slice(start >= branch.length ? 0 : start)) {
-            if (toTurnColor(node.fen) !== activeSide) continue;
-            const position = bookPositionFenKey(node.fen);
-            if (checked.has(position)) continue;
-            checked.add(position);
-            if (checkedPositions >= 3) {
-              paused = 'Checked three positions. Run Find common mistakes again to continue.';
-              break;
-            }
-            const recent = await query(node.fen, 'recent');
-            const earlier = await query(node.fen, 'earlier');
-            const recentMoves = new Map(playerExplorerMoves(node.fen, recent.moves).map(move => [move.uci, move]));
-            const earlierMoves = new Map(playerExplorerMoves(node.fen, earlier.moves).map(move => [move.uci, move]));
-            const candidates = [...new Set([...recentMoves.keys(), ...earlierMoves.keys()])].flatMap(uci => {
-              const now = recentMoves.get(uci), old = earlierMoves.get(uci);
-              const san = now?.san ?? old?.san;
-              return san ? [{ uci, san, recent: now ? explorerGameCount(now) : 0, earlier: old ? explorerGameCount(old) : 0 }] : [];
-            }).filter(move => move.recent + move.earlier > 0)
-              .sort((a, b) => playerMistakePriority(b) - playerMistakePriority(a)).slice(0, 4);
-            if (!candidates.length) { setFindCommonCursor(node.id); continue; }
-            checkedPositions++;
-            const counts = new Map(candidates.map(move => [move.uci, move.recent + move.earlier]));
-            for (const uci of playerRepertoire?.movesByFen.get(position) ?? []) {
-              if (!counts.has(uci)) counts.set(uci, 0);
-            }
-            const key = playerAssessmentKey(playerHandle, activeSide, position);
-            const assessment = await withPlayerEngine(controller, () => assessPlayerPosition(node.fen, counts, controller.signal, true));
-            for (const { uci, san, recent: recentCount, earlier: earlierCount } of candidates) {
-              const result = assessment.moves[uci];
-              const loss = result?.confirmedLoss ?? 0;
-              if (loss < PLAYER_MISTAKE_LOSS) continue;
-              const priority = playerMistakePriority({ recent: recentCount, earlier: earlierCount }) + loss / 100;
-              if (!best || priority > best.priority) best = {
-                nodeId: node.id, priority, finding: { key, san, score: result.score, recent: recentCount, earlier: earlierCount,
-                  recentGames: explorerGameCount(recent), earlierGames: explorerGameCount(earlier) },
+        const { signal } = controller;
+        const now = new Date();
+        const recentSince = monthKey(now.getUTCFullYear() * 12 + now.getUTCMonth() - 2);
+        for (let i = review.nextNode; i < mistakeReviewNodes.length; i++) {
+          signal.throwIfAborted();
+          const { node, prepared } = mistakeReviewNodes[i];
+          setPlayerSearchNote('Checking position ' + (i + 1) + ' / ' + mistakeReviewNodes.length + '…');
+          const data = await queryMistakeExplorer(node.fen, signal);
+          const all = new Map(playerExplorerMoves(node.fen, data.moves).map(move => [move.uci, move]));
+          const deviations = [...all.values()].filter(move => !prepared.has(move.uci) && explorerGameCount(move) > 0);
+          if (deviations.length) {
+            const counts = new Map(deviations.map(move => [move.uci, explorerGameCount(move)]));
+            for (const uci of prepared) counts.set(uci, all.has(uci) ? explorerGameCount(all.get(uci)!) : 0);
+            const assessment = await withPlayerEngine(controller, () => assessPlayerPosition(node.fen, counts, signal, true));
+            const mistakes = deviations.filter(move => (assessment.moves[move.uci]?.confirmedLoss ?? 0) >= PLAYER_MISTAKE_LOSS);
+            if (mistakes.length) {
+              const recentData = await queryMistakeExplorer(node.fen, signal, { since: recentSince });
+              const recent = new Map(playerExplorerMoves(node.fen, recentData.moves).map(move => [move.uci, explorerGameCount(move)]));
+              const latestByRawMove = new Map<string, string>();
+              for (const game of data.recentGames ?? []) {
+                const month = playerGameMonth(game);
+                if (game.uci && month && month > (latestByRawMove.get(game.uci) ?? '')) latestByRawMove.set(game.uci, month);
+              }
+              const rawUciBySan = new Map(data.moves.map(move => [move.san, move.uci]));
+              const makeRow = (uci: string, inRepertoire: boolean): MistakeReviewMove => {
+                const move = all.get(uci);
+                const total = move ? explorerGameCount(move) : 0;
+                const recentCount = Math.min(total, recent.get(uci) ?? 0);
+                const evaluation = assessment.moves[uci];
+                return {
+                  uci, inRepertoire, score: evaluation?.score, provisional: evaluation?.confirmedLoss === null,
+                  results: {
+                    wins: (activeSide === 'white' ? move?.white : move?.black) ?? 0,
+                    draws: move?.draws ?? 0,
+                    losses: (activeSide === 'white' ? move?.black : move?.white) ?? 0,
+                  },
+                  recent: recentCount, earlier: total - recentCount,
+                  lastMonth: playerGameMonth(move?.game) ?? (move ? latestByRawMove.get(rawUciBySan.get(move.san) ?? uci) : undefined),
+                };
               };
+              const recentGames = Math.min(explorerGameCount(data), explorerGameCount(recentData));
+              const position: MistakeReviewPosition = {
+                node, recentSince, recentGames, earlierGames: explorerGameCount(data) - recentGames,
+                moves: [
+                  ...[...prepared].map(uci => makeRow(uci, true)),
+                  ...mistakes.map(move => makeRow(move.uci, false))
+                    .sort((a, b) => playerMistakePriority(b) - playerMistakePriority(a)),
+                ],
+              };
+              signal.throwIfAborted();
+              setMistakeReview({ positions: [...review.positions, position], index: target, nextNode: i + 1,
+                exhausted: i + 1 === mistakeReviewNodes.length });
+              setPlayerSearchNote('');
+              showMistakePosition(position);
+              return;
             }
-            setFindCommonCursor(node.id);
-            if (best && best.finding.recent >= 2) break;
           }
-        } catch (error) {
-          controller.signal.throwIfAborted();
-          if (!best) throw error;
+          signal.throwIfAborted();
+          setMistakeReview(prev => prev && ({ ...prev, nextNode: i + 1 }));
         }
-        controller.signal.throwIfAborted();
-        if (!best) {
-          setPlayerSearchNote(paused || 'No further confirmed mistakes in the moves checked.');
-          if (!paused) setFindCommonCursor(branch.at(-1)?.id ?? root.id);
-          return;
-        }
-        setFindCommonCursor(best.nodeId);
-        setPlayerMistakeFinding(best.finding);
-        if (best.nodeId !== selectedNode.id) findMissingSearchAutoNavigationRef.current = true;
-        navigateToNode(activeSide, best.nodeId);
+        setMistakeReview(prev => prev && ({ ...prev, exhausted: true }));
+        setPlayerSearchNote(review.positions.length ? 'No further mistakes.' : 'No confirmed mistakes outside the repertoire.');
       });
     } finally {
       setIsFindingCommonMistakes(false);
@@ -6083,7 +6255,7 @@ function App() {
     }
   };
 
-  const lichessTotal = (lichessData?.white ?? 0) + (lichessData?.draws ?? 0) + (lichessData?.black ?? 0);
+  const lichessTotal = explorerGameCount(opponentFindingOnBoard?.data ?? lichessData ?? { white: 0, draws: 0, black: 0 });
   const isSuddenDeathActive = Boolean(
     trainingSession && trainingSession.side === activeSide && trainingSession.suddenDeathMode,
   );
@@ -6107,7 +6279,9 @@ function App() {
       ? suddenDeathLastMove ?? undefined
       : analysisScratchFen
         ? analysisScratchPosition?.lastMove ?? undefined
-        : lastMove;
+        : browseMistakePosition || browseOpponentPosition
+          ? parseUciMove((browseMistakePosition?.node ?? browseOpponentPosition)?.moveUci ?? null) ?? undefined
+          : lastMove;
   useEffect(() => {
     if (isTrainingActive) return;
     setIsTrainingStatsMenuOpen(false);
@@ -6198,16 +6372,17 @@ function App() {
     );
   }, [resolvedOpening]);
   const filteredLichessMoves = useMemo(() => {
+    if (opponentFindingOnBoard) return opponentFindingOnBoard.data.moves.filter(move => opponentFindingOnBoard.moves.has(move.uci));
     if (!lichessData?.moves || lichessTotal <= 0) return [];
     const thresholdShare = lichessArrowThreshold / 100;
     return lichessData.moves.filter((move) => {
       const total = move.white + move.draws + move.black;
       return total / lichessTotal >= thresholdShare;
     });
-  }, [lichessData, lichessTotal, lichessArrowThreshold]);
+  }, [lichessData, lichessTotal, lichessArrowThreshold, opponentFindingOnBoard]);
   const isPlayerExplorer = lichessSource === 'player';
-  const explorerData = lichessDataRequestKey === explorerRequestKey &&
-    (!isPlayerExplorer || playerHandle.trim()) ? lichessData : null;
+  const explorerData = opponentFindingOnBoard?.data ?? (lichessDataRequestKey === explorerRequestKey &&
+    (!isPlayerExplorer || playerHandle.trim()) ? lichessData : null);
   const playerToMove = isPlayerExplorer && toTurnColor(selectedBoardFen) === activeSide;
   const playerAfterLine = isPlayerExplorer && !isBrowseMode && !playerToMove && !playerRepertoireMoves?.size;
   const playerRows: PlayerMoveRow[] = [];
@@ -6215,7 +6390,8 @@ function App() {
   const playerBestMove = playerToMove ? playerAssessment?.best.bestMove : null;
   let playerBestSan: string | undefined;
   if (isPlayerExplorer) {
-    const moves = playerExplorerMoves(selectedBoardFen, explorerData?.moves ?? []);
+    const moves = playerExplorerMoves(selectedBoardFen, explorerData?.moves ?? [])
+      .filter(move => !opponentFindingOnBoard || opponentFindingOnBoard.moves.has(move.uci));
     const seen = new Map(moves.map(move => [move.uci, move]));
     const chess = fenToChess(selectedBoardFen);
     const legal = new Map(chess.moves({ verbose: true }).map(move => [uciFromMove(move), move.san]));
@@ -6367,13 +6543,27 @@ function App() {
       setExampleReplayLoadingId(null);
     }
   };
-  const activeFindMissingBaseNode =
-    (findMissingSearchBaseNodeId ? tree.nodes[findMissingSearchBaseNodeId] : null) ?? selectedNode;
   const canRunFindMissingSearch =
-    (isPlayerExplorer ? Boolean(playerHandle.trim() && activeRepertoire) : activeFindMissingBaseNode.children.length > 0) &&
+    opponentReviewNodes.length > 0 && (!isPlayerExplorer || Boolean(playerHandle.trim())) &&
     !isFindMissingSearchRunning && !isSuddenDeathActive && !isTreeEvalRunning && !playerAssessmentRunning;
-  const canFindCommonMistakes = isPlayerExplorer && !isBrowseMode && canRunFindMissingSearch && stockfishLoaded &&
+  const canFindCommonMistakes = Boolean(playerHandle.trim() && mistakeReviewNodes.length) && stockfishLoaded &&
+    !isFindMissingSearchRunning && !playerAssessmentRunning && !isTreeEvalRunning &&
     hasHydratedAppState && !trainingSession && !isExampleReplayActive && !analysisGameProgress;
+  const mistakeRows: PlayerMoveRow[] = reviewPosition?.moves.map(move => {
+    const total = move.recent + move.earlier;
+    const totalGames = reviewPosition.recentGames + reviewPosition.earlierGames;
+    const lastPlayed = move.lastMonth ? `Last played ${formatPlayerMonth(move.lastMonth)}`
+      : !total ? 'Never played' : mistakeDateLookupFailed ? 'Last played: unavailable' : 'Finding last played…';
+    const frequencyIn = (count: number, games: number) => games ? `${count}/${games}` : '—';
+    return {
+      uci: move.uci, san: uciToFigurineSan(reviewPosition.node.fen, move.uci),
+      score: move.score, provisional: move.provisional, results: move.results,
+      kind: move.inRepertoire ? 'repertoire' : 'mistake',
+      note: move.inRepertoire ? 'Repertoire' : playerMistakePattern(move, reviewPosition.recentGames),
+      frequency: `${formatGamesCount(total)} · ${formatPercent(total, totalGames)}`,
+      detail: `${lastPlayed} · Recent ${frequencyIn(move.recent, reviewPosition.recentGames)} · Earlier ${frequencyIn(move.earlier, reviewPosition.earlierGames)}`,
+    };
+  }) ?? [];
   const displayedMovePath = isBrowseMode && !isTrainingActive ? mainLinePath : path;
   const selectedMoveIndex = displayedMovePath.findIndex((node) => node.id === selectedNode.id);
   const canGoForward = isBrowseMode && !isTrainingActive && !isSuddenDeathActive &&
@@ -7796,16 +7986,62 @@ function App() {
         <section className="left-panel">
           <div className={`board-row ${isTrainingActive ? 'training-mode' : ''}`}>
             {!isTrainingActive && <aside className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}>
-              {isPlayerExplorer && (
+              {mistakeReview ? (
+                <div className="player-repertoire-panel">
+                  <div className="player-repertoire-controls mistake-review-controls">
+                    <span title={isBrowseMode ? 'All repertoires for this side' : activeRepertoireName}>
+                      {isBrowseMode ? 'Repertoire mistakes' : 'Opening mistakes'} {mistakeReview.index >= 0 &&
+                      `· ${mistakeReview.index + 1}/${mistakeReview.positions.length}`}</span>
+                    <button type="button" aria-label="Previous mistake position" title="Previous mistake position"
+                      disabled={mistakeReview.index <= 0 || isFindMissingSearchRunning}
+                      onClick={() => void findCommonMistakes(-1)}><PrevIcon /></button>
+                    <button type="button" aria-label="Next mistake position" title="Next mistake position"
+                      disabled={isFindMissingSearchRunning ||
+                        (mistakeReview.exhausted && mistakeReview.index >= mistakeReview.positions.length - 1)}
+                      onClick={() => void findCommonMistakes(1)}><NextIcon /></button>
+                    <button type="button" aria-label="Close mistake review" title="Close mistake review"
+                      onClick={closeMistakeReview}><QuitIcon /></button>
+                  </div>
+                  <div className="player-repertoire-status" role="status">{playerSearchNote}</div>
+                  {isFindMissingSearchRunning && (
+                    <button type="button" className="player-best-move" onClick={() => {
+                      findMissingControllerRef.current?.abort();
+                      setPlayerSearchNote('Search stopped. Use Next to continue.');
+                    }}>Stop search</button>
+                  )}
+                  {reviewPosition && !reviewPositionOnBoard && (
+                    <button type="button" className="player-best-move" onClick={() => showMistakePosition(reviewPosition)}>
+                      Return to mistake position
+                    </button>
+                  )}
+                  {reviewPositionOnBoard && (analysisScratchFen ? (
+                    <div className="player-repertoire-controls">
+                      <span>Preview</span>
+                      <button type="button" onClick={backPlayerPreview}>Back</button>
+                      <button type="button" onClick={() => setAnalysisScratchPosition(null)}>Return</button>
+                      {!isBrowseMode && analysisScratchPosition?.playerMoves?.length ? (
+                        <button type="button" onClick={savePlayerLine}>Save line</button>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <>
+                      {!reviewPosition.moves.some(move => move.inRepertoire) &&
+                        <div className="player-repertoire-status">No repertoire move saved for this position.</div>}
+                      <PlayerRepertoireTable rows={mistakeRows} complete onMove={playPlayerMove} />
+                      <div className="player-repertoire-status">Recent = last 3 calendar months.</div>
+                    </>
+                  ))}
+                </div>
+              ) : isPlayerExplorer && (
                 <div className="player-repertoire-panel">
                   <div className="player-repertoire-controls">
                     <span title={activeRepertoireName}>{activeSide} · {activeRepertoireName}</span>
                     <button type="button" onClick={() => setIsLichessFilterOpen(true)}>Player settings</button>
                   </div>
                   <div className="player-repertoire-controls">
-                    <button type="button"
+                    {!showingOpponentResult && <button type="button"
                       disabled={!playerHandle.trim() || isFindMissingSearchRunning || lichessStatus === 'refreshing'}
-                      onClick={() => setExplorerRefresh(value => value + 1)}>Refresh</button>
+                      onClick={() => setExplorerRefresh(value => value + 1)}>Refresh</button>}
                     {isFindMissingSearchRunning && <button type="button" onClick={() => findMissingControllerRef.current?.abort()}>
                       Stop search
                     </button>}
@@ -7832,7 +8068,7 @@ function App() {
                     </div>
                   )}
                   <div role="status" className="player-repertoire-status">
-                    {!playerHandle.trim() ? 'Enter your Lichess username in Player settings.'
+                    {showingOpponentResult ? '' : !playerHandle.trim() ? 'Enter your Lichess username in Player settings.'
                       : lichessStatus === 'indexing' ? (explorerData?.queuePosition
                         ? `Partial results · Lichess queue: ${explorerData.queuePosition}` : 'Partial results · Lichess is indexing.')
                       : lichessStatus === 'refreshing' ? 'Showing saved results · refreshing…'
@@ -7843,23 +8079,10 @@ function App() {
                       : ''}
                     {playerSearchNote && <div>{playerSearchNote}</div>}
                     {playerAssessmentNotice?.key === playerReviewKey && <div>{playerAssessmentNotice.message}</div>}
-                    {isFindMissingSearchRunning && <div>{isFindingCommonMistakes ? 'Checking your moves…' : 'Checking opponent moves…'}</div>}
+                    {isFindMissingSearchRunning && <div>Checking opponent moves…</div>}
                     {playerAfterLine && !playerRows.length && Boolean(explorerData?.moves.length) &&
                       !isFindMissingSearchRunning && !playerSearchNote && <div>End of the line · check your replies to reveal problems.</div>}
                   </div>
-                  {playerMistakeFinding?.key === playerReviewKey && (
-                    <div className="player-mistake-finding" role="status">
-                      <strong>{toFigurineSan(playerMistakeFinding.san)} {playerMistakeFinding.score} · {
-                        playerMistakePattern(playerMistakeFinding, playerMistakeFinding.recentGames)
-                      }</strong>
-                      <span>Last 3 calendar months · {playerMistakeFinding.recentGames
-                        ? `${playerMistakeFinding.recent}/${playerMistakeFinding.recentGames} (${formatPercent(playerMistakeFinding.recent, playerMistakeFinding.recentGames)})`
-                        : 'No games in this position'}</span>
-                      <span>Earlier · {playerMistakeFinding.earlierGames
-                        ? `${playerMistakeFinding.earlier}/${playerMistakeFinding.earlierGames} (${formatPercent(playerMistakeFinding.earlier, playerMistakeFinding.earlierGames)})`
-                        : 'No games in this position'}</span>
-                    </div>
-                  )}
                   {playerAssessment && playerBestMove && playerBestSan && (
                     <button type="button" className="player-best-move" onClick={() => playPlayerMove(playerBestMove)}>
                       {STOCKFISH_ENGINE_LABEL} best: {toFigurineSan(playerBestSan)} {playerAssessment.best.scoreText}
@@ -7871,21 +8094,37 @@ function App() {
                   )}
                 </div>
               )}
-              {!isPlayerExplorer && !lichessAuthRequired && (visibleLichessStatus || lichessStatus === 'loading') && (
+              {!mistakeReview && opponentFinding && !isFindMissingSearchRunning && (
+                <div className="player-repertoire-controls mistake-review-controls">
+                  <span>Missing opponent moves</span>
+                  <button type="button" onClick={closeOpponentFinding} aria-label="Close opponent move results"
+                    title="Close opponent move results"><QuitIcon /></button>
+                </div>
+              )}
+              {!mistakeReview && !isPlayerExplorer && (playerSearchNote || isFindMissingSearchRunning) && (
+                <div className="player-repertoire-controls">
+                  <span role="status">{playerSearchNote || 'Checking opponent moves…'}</span>
+                  {isFindMissingSearchRunning && (
+                    <button type="button" onClick={() => findMissingControllerRef.current?.abort()}>Stop search</button>
+                  )}
+                </div>
+              )}
+              {!mistakeReview && !showingOpponentResult && !isPlayerExplorer && !lichessAuthRequired &&
+                (visibleLichessStatus || lichessStatus === 'loading') && (
                 <div className="status lichess-status-row">
                   {lichessStatus === 'loading' && <span className="spinner" aria-hidden="true" />}
                   <span>{visibleLichessStatus || 'loading'}</span>
                 </div>
               )}
-              {lichessStatus === 'limited' && !explorerData && (
+              {!mistakeReview && lichessStatus === 'limited' && !explorerData && (
                 <div className="status lichess-rate-limit-note">
                   {`Lichess API error (429), ${lichessData ? 'showing cached data' : 'no cached data'}`}
                 </div>
               )}
-              {!lichessAuthRequired && lichessApiIssueNote && (!explorerData || isPlayerExplorer) && (
+              {!mistakeReview && !lichessAuthRequired && lichessApiIssueNote && (!explorerData || isPlayerExplorer) && (
                 <div className="status lichess-rate-limit-note">{lichessApiIssueNote}</div>
               )}
-              {lichessAuthRequired && (
+              {!mistakeReview && lichessAuthRequired && (
                 <div className="status lichess-auth-note">
                   <span>Lichess token missing or invalid (401).</span>
                   <button
@@ -7896,13 +8135,13 @@ function App() {
                   </button>
                 </div>
               )}
-              {!isPlayerExplorer && !explorerData && !lichessAuthRequired && (
+              {!mistakeReview && !isPlayerExplorer && !explorerData && !lichessAuthRequired && (
                 <div className="lichess-table-actions desktop-only">
                   <button className="gear-btn" type="button" aria-label="Filters" title="Filters"
                     onClick={() => setIsLichessFilterOpen(true)}>⚙</button>
                 </div>
               )}
-              {(explorerData || isPlayerExplorer) && (
+              {!mistakeReview && (explorerData || isPlayerExplorer) && (
                 <>
                   {!isPlayerExplorer && <div className="table">
                     {filteredLichessMoves.map((move) => {
@@ -8642,7 +8881,7 @@ function App() {
                             <BackIcon />
                           </button>
                         </div>
-                        {isBrowseMode ? <AnalysisButton
+                        {isBrowseMode && <AnalysisButton
                           dark={themeMode === 'dark'}
                           className={`analysis-game-btn mode-icon-btn ${analysisGameProgress ? 'active' : ''}`}
                           onQuick={() => { void analyzeCurrentGame(); }} onDeep={() => { void analyzeCurrentGame(true); }}
@@ -8652,7 +8891,7 @@ function App() {
                           running={Boolean(analysisGameProgress)}
                           disabled={isTrainingActive || isSuddenDeathActive || isTreeEvalRunning || (!analysisGameProgress && mainLinePath.length < 2)}>
                           {analysisGameProgress ? <StopIcon /> : <AnalysisIcon />}
-                        </AnalysisButton> : (
+                        </AnalysisButton>}
                           <button
                             type="button"
                             className="next-missing-btn mode-icon-btn"
@@ -8668,17 +8907,16 @@ function App() {
                               <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2" />
                             </svg>
                           </button>
-                        )}
-                        {!isBrowseMode && isPlayerExplorer && (
-                          <button type="button" className="mode-icon-btn find-mistakes-btn"
-                            onClick={() => void findCommonMistakes()} disabled={!canFindCommonMistakes}
-                            aria-label="Find common mistakes" title="Find common mistakes in your games">
+                          <button type="button" className={`mode-icon-btn find-mistakes-btn ${mistakeReview ? 'active' : ''}`}
+                            onClick={() => mistakeReview ? (closeMistakeReview(), setPortraitTab('lichess')) : void findCommonMistakes()}
+                            disabled={!mistakeReview && !canFindCommonMistakes} aria-pressed={mistakeReviewOpen}
+                            aria-label="Find common mistakes" title={playerHandle.trim()
+                              ? 'Find common mistakes in your games' : 'Set your Lichess username in Player settings'}>
                             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                               <circle cx="12" cy="12" r="8.5" />
                               <path d="m9 9 6 6m0-6-6 6" />
                             </svg>
                           </button>
-                        )}
                         <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
                           Undo
                         </button>

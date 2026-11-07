@@ -857,10 +857,38 @@ select {
   display: none;
 }
 
-.player-mistake-finding {
-  display: grid;
-  gap: 2px;
-  font-size: 0.8rem;
+.mistake-review-controls button {
+  width: 2rem;
+  height: 2rem;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+}
+
+.mistake-review-controls .tab-icon {
+  width: 1rem;
+  height: 1rem;
+}
+
+.player-repertoire-row[data-kind="mistake"] {
+  border-inline-start: 3px solid #b91c1c;
+}
+
+.player-repertoire-row[data-kind="repertoire"] {
+  border-inline-start: 3px solid #15803d;
+}
+
+.app.theme-dark .player-repertoire-row[data-kind="mistake"] {
+  border-inline-start-color: #f87171;
+}
+
+.app.theme-dark .player-repertoire-row[data-kind="repertoire"] {
+  border-inline-start-color: #4ade80;
+}
+
+.player-repertoire-row-detail {
+  grid-column: 1 / -1;
+  font-size: 0.7rem;
 }
 
 .player-repertoire-row {
