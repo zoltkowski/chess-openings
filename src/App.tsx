@@ -8670,20 +8670,22 @@ function App() {
                       </>
                     ) : (
                       <>
-                        <div className="arrow-toggle-group desktop-only">{arrowToggleButtons}</div>
-                        <button
-                          className="desktop-only back-btn"
-                          onClick={handleBackClick}
-                          onPointerDown={handleBackPointerDown}
-                          onPointerUp={handleBackPointerEnd}
-                          onPointerCancel={handleBackPointerEnd}
-                          onPointerLeave={handleBackPointerEnd}
-                          disabled={!canGoBack}
-                          aria-label="Back 1 move"
-                          title="Back 1 move"
-                        >
-                          <BackIcon />
-                        </button>
+                        <div className="desktop-navigation desktop-only">
+                          <div className="arrow-toggle-group">{arrowToggleButtons}</div>
+                          <button
+                            className="back-btn"
+                            onClick={handleBackClick}
+                            onPointerDown={handleBackPointerDown}
+                            onPointerUp={handleBackPointerEnd}
+                            onPointerCancel={handleBackPointerEnd}
+                            onPointerLeave={handleBackPointerEnd}
+                            disabled={!canGoBack}
+                            aria-label="Back 1 move"
+                            title="Back 1 move"
+                          >
+                            <BackIcon />
+                          </button>
+                        </div>
                         {isBrowseMode ? <AnalysisButton
                           dark={themeMode === 'dark'}
                           className={`analysis-game-btn mode-icon-btn ${analysisGameProgress ? 'active' : ''}`}
@@ -9024,7 +9026,7 @@ function App() {
               <label className="inline-check">
                 <input type="checkbox" checked={mobileMixedEngines}
                   onChange={event => setMobileMixedEngines(event.target.checked)} />
-                Enable Maia and Stockfish together on mobile
+                Allow both engines
               </label>
               <label>
                 {`${STOCKFISH_ENGINE_NAME} depth: ${engineDepth}`}

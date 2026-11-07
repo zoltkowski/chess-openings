@@ -1490,7 +1490,7 @@ select {
   color: #334155;
 }
 
-.move-list .controls-row > button.back-btn {
+.move-list .back-btn {
   width: 4.2rem;
   min-width: 4.2rem;
   height: 2.2rem;
@@ -1501,7 +1501,7 @@ select {
   line-height: 1;
 }
 
-.move-list .controls-row > button.back-btn .tab-icon {
+.move-list .back-btn .tab-icon {
   width: 1.55rem;
   height: 1.55rem;
 }
@@ -1576,7 +1576,14 @@ select {
   gap: 0.35rem;
 }
 
-.arrow-toggle-group.desktop-only {
+.desktop-navigation {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.desktop-navigation .arrow-toggle-group {
   margin-left: 0;
 }
 
