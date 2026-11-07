@@ -1894,6 +1894,12 @@ select {
   gap: 0.3rem;
 }
 
+.slider-stack label.inline-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .threshold-slider {
   width: 8rem;
 }
@@ -2351,6 +2357,26 @@ select {
     position: relative;
   }
 
+  .portrait-tabbar.with-arrow-toggles {
+    gap: 0.2rem;
+  }
+
+  .portrait-tabbar.with-arrow-toggles > button {
+    width: auto;
+    min-width: 0;
+    flex: 1 1 0;
+  }
+
+  .portrait-tabbar.with-arrow-toggles .arrow-toggle-group {
+    flex: 0 0 auto;
+    gap: 0.1rem;
+  }
+
+  .portrait-tabbar.with-arrow-toggles .icon-toggle-btn {
+    width: 1.7rem;
+    min-width: 1.7rem;
+  }
+
   .portrait-tabbar .active {
     background: #dbeafe;
     border-color: #93c5fd;
@@ -2405,8 +2431,10 @@ select {
     display: block;
   }
 
-  .arrow-toggle-group.portrait-only {
-    display: inline-flex;
+  .portrait-tabbar.with-arrow-toggles > button.portrait-back-btn {
+    width: auto;
+    min-width: 2.5rem;
+    margin-left: 0;
   }
 
   .portrait-pane {

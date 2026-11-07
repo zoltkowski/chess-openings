@@ -8163,7 +8163,7 @@ function App() {
                 arrows={trainingForActive ? trainingHintArrow : autoArrows}
                 onMove={makeMove}
               />
-              <div className="portrait-tabbar">
+              <div className={`portrait-tabbar ${!isTrainingActive && !isExampleReplayActive ? 'with-arrow-toggles' : ''}`}>
                 {!isTrainingActive && isExampleReplayActive && (
                   <>
                     <button
@@ -8318,6 +8318,9 @@ function App() {
                   >
                     Hint
                   </button>
+                )}
+                {!isTrainingActive && !isExampleReplayActive && (
+                  <div className="arrow-toggle-group">{arrowToggleButtons}</div>
                 )}
                 {!isTrainingActive && !isExampleReplayActive && (
                   <button
@@ -8769,7 +8772,6 @@ function App() {
                               <SuddenDeathIcon />
                             </button>
                           </>
-                        <div className="arrow-toggle-group portrait-only">{arrowToggleButtons}</div>
                       </>
                     )}
                   </div>
