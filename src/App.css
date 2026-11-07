@@ -834,6 +834,10 @@ select {
   gap: 5px;
 }
 
+.player-repertoire-controls:empty {
+  display: none;
+}
+
 .player-repertoire-controls > span {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -905,21 +909,38 @@ select {
 .player-repertoire-row {
   width: 100%;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 7rem);
+  grid-template-columns: minmax(0, 1fr) minmax(4.5rem, auto) minmax(0, 42%);
   align-items: center;
   gap: 5px;
-  padding: 4px;
+  padding: 0.35rem 0.25rem;
   text-align: left;
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   font-variant-numeric: tabular-nums;
-}
-
-.player-repertoire-head {
-  font-weight: 600;
 }
 
 .player-repertoire-table button {
   margin-bottom: 3px;
+}
+
+.player-repertoire-row:not([data-kind]) {
+  margin-bottom: 0;
+  border: 0;
+  border-bottom: 1px solid #eef1f5;
+  border-radius: 0;
+  background: transparent;
+}
+
+.player-repertoire-row:not([data-kind]):hover {
+  background: #eef5ff;
+}
+
+.app.theme-dark .player-repertoire-row:not([data-kind]) {
+  border-bottom-color: #334155;
+  background: transparent;
+}
+
+.app.theme-dark .player-repertoire-row:not([data-kind]):hover {
+  background: #24344f;
 }
 
 .player-repertoire-move {
@@ -935,13 +956,37 @@ select {
   overflow-wrap: anywhere;
 }
 
-.player-repertoire-filters {
+.player-history-summary {
   display: grid;
-  gap: 6px;
+  gap: 0.25rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid #d5dce7;
+  border-radius: 0.5rem;
+  font-size: 0.85rem;
 }
 
-.player-repertoire-filters select {
-  max-width: 100%;
+.player-history-summary-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.player-history-summary small {
+  color: #64748b;
+  line-height: 1.35;
+}
+
+.player-history-summary-error {
+  color: #b91c1c;
+}
+
+.app.theme-dark .player-history-summary {
+  border-color: #465267;
+}
+
+.app.theme-dark .player-history-summary small {
+  color: #aab5c7;
 }
 
 .move-inline-wrap {
@@ -1308,7 +1353,7 @@ select {
 
 .filters-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.5rem;
   align-items: start;
 }

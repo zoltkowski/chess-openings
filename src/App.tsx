@@ -35,6 +35,7 @@ import { HumanMoveDetails } from './analysis/HumanMoveDetails';
 import { MaiaPopularityChart, MaiaPopularityControls } from './MaiaPopularity';
 import { useMaiaPopularity } from './useMaiaPopularity';
 import { PlayerRepertoireTable, type PlayerMoveRow } from './analysis/PlayerRepertoireTable';
+import { LichessStatsBar } from './analysis/LichessStatsBar';
 import { indexPlayerGameHistory, syncPlayerGameHistory, type PlayerGameHistory } from './analysis/playerGameHistory';
 import {
   PLAYER_MISTAKE_LOSS,
@@ -201,6 +202,7 @@ type LichessExampleGame = {
   mode?: string;
   year?: number;
   month?: string;
+  createdAt?: number;
   white?: LichessExamplePlayer;
   black?: LichessExamplePlayer;
 };
@@ -220,6 +222,8 @@ type LichessResponseCacheEntry = {
   expiresAt: number;
   data: LichessResponse;
 };
+
+type RepertoireReviewNode = { node: MoveNode; prepared: Set<string> };
 
 type MistakeReviewMove = {
   uci: string;
@@ -243,6 +247,7 @@ type MistakeReviewPosition = {
 };
 
 type MistakeReview = {
+  nodes: RepertoireReviewNode[];
   positions: MistakeReviewPosition[];
   index: number;
   nextNode: number;
@@ -257,6 +262,7 @@ type OpponentFinding = {
 };
 
 type OpponentReview = {
+  nodes: RepertoireReviewNode[];
   findings: OpponentFinding[];
   index: number;
   nextNode: number;
@@ -1774,11 +1780,6 @@ function formatTrainedAt(timestamp: number | null) {
   return `${new Date(timestamp).toLocaleString()} (${formatRelativeTimeFromNow(timestamp)})`;
 }
 
-function percentValue(value: number, total: number) {
-  if (total <= 0) return 0;
-  return (value / total) * 100;
-}
-
 function formatAverageElo(move: LichessMove) {
   const raw = move.averageRating ?? move.averageElo;
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return '';
@@ -1807,6 +1808,16 @@ function formatLichessExampleResult(game: LichessExampleGame) {
   if (game.winner === 'white') return '1-0';
   if (game.winner === 'black') return '0-1';
   return '½-½';
+}
+
+function formatLichessExampleLine(game: LichessExampleGame) {
+  const ranks = game.white || game.black
+    ? `${formatLichessExampleRank(game.white)} – ${formatLichessExampleRank(game.black)}` : '';
+  const month = playerGameMonth(game);
+  const date = typeof game.createdAt === 'number' && Number.isFinite(game.createdAt)
+    ? new Date(game.createdAt).toLocaleString()
+    : month ? formatPlayerMonth(month) : game.year;
+  return [ranks, game.speed, formatLichessExampleResult(game), date].filter(Boolean).join(' · ');
 }
 
 function normalizeMoveThreshold(value: unknown) {
@@ -2050,29 +2061,6 @@ function removeBranch(tree: MoveTree, branchRootId: string): MoveTree {
   }
 
   return { ...tree, nodes: nextNodes };
-}
-
-function LichessStatsBar(props: { white: number; draws: number; black: number; total: number }) {
-  const { white, draws, black, total } = props;
-  const whitePct = percentValue(white, total);
-  const drawsPct = percentValue(draws, total);
-  const blackPct = percentValue(black, total);
-
-  const label = (pct: number) => (pct >= 8 ? `${Math.round(pct)}%` : '');
-
-  return (
-    <div className="stats-bar" aria-label="Lichess outcome distribution">
-      <span className="seg seg-white" style={{ flexGrow: whitePct, flexBasis: 0 }}>
-        {label(whitePct)}
-      </span>
-      <span className="seg seg-draw" style={{ flexGrow: drawsPct, flexBasis: 0 }}>
-        {label(drawsPct)}
-      </span>
-      <span className="seg seg-black" style={{ flexGrow: blackPct, flexBasis: 0 }}>
-        {label(blackPct)}
-      </span>
-    </div>
-  );
 }
 
 async function readExplorerResponse(
@@ -2515,7 +2503,7 @@ function App() {
   const reviewTrees = isBrowseMode ? activeRepertoireList : null;
   const reviewTree = isBrowseMode ? null : tree;
   const repertoireReviewNodes = useMemo(() => {
-    const positions = new Map<string, { node: MoveNode; prepared: Set<string> }>();
+    const positions = new Map<string, RepertoireReviewNode>();
     for (const source of reviewTree ? [reviewTree] : reviewTrees?.map(entry => entry.tree) ?? []) {
       if (!repertoireHasMoves(source)) continue;
       for (const node of repertoireBranchNodes(source, source.rootId)) {
@@ -2530,10 +2518,8 @@ function App() {
     }
     return [...positions.values()];
   }, [reviewTree, reviewTrees]);
-  const mistakeReviewNodes = useMemo(() => repertoireReviewNodes.filter(({ node }) => toTurnColor(node.fen) === activeSide),
-    [activeSide, repertoireReviewNodes]);
-  const opponentReviewNodes = useMemo(() => repertoireReviewNodes.filter(({ node }) => toTurnColor(node.fen) !== activeSide),
-    [activeSide, repertoireReviewNodes]);
+  const hasMistakeReviewNodes = repertoireReviewNodes.some(({ node }) => toTurnColor(node.fen) === activeSide);
+  const hasOpponentReviewNodes = repertoireReviewNodes.some(({ node }) => toTurnColor(node.fen) !== activeSide);
   const analysisScratchFen = analysisScratchPosition?.fen ?? null;
   const selectedBoardFen = analysisScratchFen ?? browseMistakePosition?.node.fen ?? browseOpponentPosition?.fen ?? selectedNode.fen;
   const playerPositionKey = bookPositionFenKey(selectedBoardFen);
@@ -2650,6 +2636,72 @@ function App() {
       });
   }, [selectedNode.fen, repertoiresBySide, boardOrientation, activeSide, activeRepertoireIdBySide]);
 
+  const historyPlayer = playerHandle.trim().toLowerCase();
+  const savedPlayerHistory = playerHistory?.player === historyPlayer ? playerHistory.data : null;
+  const getExplorerUrl = useCallback((fen: string, historyDates?: ExplorerDates, source = lichessSource) => {
+    const params = new URLSearchParams({ fen: fullBoardFen(fen), variant: FIXED_VARIANT, color: activeSide });
+    if (source === 'player') {
+      params.set('fen', bookPositionFenKey(fen) + ' 0 1');
+      params.set('player', playerHandle.trim().toLowerCase());
+      if (playerSpeeds.length && playerSpeeds.length !== PLAYER_SPEEDS.length) params.set('speeds', [...playerSpeeds].sort().join(','));
+      params.set('modes', [...(selectedModes.length ? selectedModes : MODES)].sort().join(','));
+      params.set('source', FIXED_SOURCE);
+      if (historyDates) params.set('moves', '256');
+    } else if (source === 'lichess') {
+      if (selectedSpeeds.length) params.set('speeds', selectedSpeeds.join(','));
+      if (selectedRatings.length) params.set('ratings', selectedRatings.join(','));
+    }
+    const dates = historyDates ?? explorerDateFilter(source, dateRange);
+    if (dates?.since) params.set('since', dates.since);
+    if (dates?.until) params.set('until', dates.until);
+    const top = maxTopGamesForSource(source), recent = maxRecentGamesForSource(source);
+    if (top) params.set('topGames', String(top));
+    if (recent) params.set('recentGames', String(recent));
+    return 'https://explorer.lichess.ovh/' + source + '?' + params;
+  }, [activeSide, dateRange, lichessSource, playerHandle, playerSpeeds, selectedModes, selectedRatings, selectedSpeeds]);
+
+  const explorerFen = lichessSource === 'player' ? selectedBoardFen : browseOpponentPosition?.fen ?? selectedNode.fen;
+  const explorerUrl = getExplorerUrl(explorerFen);
+  const explorerRequestKey = JSON.stringify([explorerUrl, lichessApiToken]);
+  const isPlayerExplorer = lichessSource === 'player';
+  const playerToMove = isPlayerExplorer && toTurnColor(selectedBoardFen) === activeSide;
+  const playerAfterLine = isPlayerExplorer && !isBrowseMode && !playerToMove && !playerRepertoireMoves?.size;
+  const [localExplorer, setLocalExplorer] = useState<{
+    requestKey: string; games: PlayerGameHistory['games']; data: LichessResponse;
+  } | null>(null);
+  useEffect(() => {
+    if (!isPlayerExplorer || !savedPlayerHistory || mistakeReview || opponentReview || trainingSession) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    void indexPlayerGameHistory(savedPlayerHistory, new Set([playerPositionKey]), activeSide, playerSpeeds, selectedModes, signal, false)
+      .then(query => {
+        if (signal.aborted) return;
+        const data = query(playerPositionKey, explorerDateFilter('player', dateRange) ?? undefined);
+        setLocalExplorer({ requestKey: explorerRequestKey, games: savedPlayerHistory.games, data });
+      })
+      .catch(error => { if (!signal.aborted) console.error('Could not read local Lichess games', error); });
+    return () => controller.abort();
+  }, [isPlayerExplorer, savedPlayerHistory, mistakeReview, opponentReview, trainingSession, playerPositionKey,
+    activeSide, playerSpeeds, selectedModes, dateRange, explorerRequestKey]);
+  const networkExplorerData = lichessDataRequestKey === explorerRequestKey &&
+    (!isPlayerExplorer || historyPlayer) ? lichessData : null;
+  const localExplorerData = isPlayerExplorer && localExplorer?.requestKey === explorerRequestKey &&
+    localExplorer.games === savedPlayerHistory?.games ? localExplorer.data : null;
+  const usingLocalExplorer = !opponentFindingOnBoard && Boolean(localExplorerData && (dateRange !== '3y' || !networkExplorerData));
+  const explorerData = opponentFindingOnBoard?.data ?? (usingLocalExplorer ? localExplorerData : networkExplorerData);
+  const lichessTotal = explorerData ? explorerGameCount(explorerData) : 0;
+  const playerExplorerPositionMoves = useMemo(() => {
+    if (!isPlayerExplorer || !explorerData) return [];
+    const moves = playerExplorerMoves(selectedBoardFen, explorerData.moves);
+    if (opponentFindingOnBoard) return moves.filter(move => opponentFindingOnBoard.moves.has(move.uci));
+    if (!playerAfterLine) return moves;
+    return moves.filter(move => {
+      const reply = explorerReplyFen(selectedBoardFen, move.uci);
+      return reply && hasPlayedMistake(playerAssessments[playerAssessmentKey(playerHandle, activeSide, bookPositionFenKey(reply))]);
+    });
+  }, [isPlayerExplorer, explorerData, selectedBoardFen, opponentFindingOnBoard,
+    playerAfterLine, playerAssessments, playerHandle, activeSide]);
+
   const autoArrows = useMemo<DrawShape[]>(() => {
     if (reviewPositionOnBoard && !analysisScratchFen) {
       return softenOverlappingArrows(reviewPosition.moves.flatMap<DrawShape>(row => {
@@ -2657,7 +2709,7 @@ function App() {
         return move ? [{ orig: move[0], dest: move[1], brush: row.inRepertoire ? 'green' : 'red' }] : [];
       }));
     }
-    const treeChildUcis = opponentFindingOnBoard?.prepared ?? new Set(
+    const treeChildUcis = opponentFindingOnBoard?.prepared ?? new Set(analysisScratchFen ? [] :
       displayedChildNodes.map(node => node.moveUci).filter((uci): uci is string => Boolean(uci)),
     );
 
@@ -2668,29 +2720,15 @@ function App() {
           .map(([orig, dest]) => ({ orig, dest, brush: 'green' }))
       : [];
 
-    const data = opponentFindingOnBoard?.data ?? (lichessDataFen === selectedNode.fen ? lichessData : null);
-    const positionGames = data ? explorerGameCount(data) : 0;
     const thresholdShare = lichessArrowThreshold / 100;
     const lichessArrows =
-      !analysisScratchFen && showLichessArrows && positionGames > 0
+      (!analysisScratchFen || isPlayerExplorer) && showLichessArrows && lichessTotal > 0
         ? (() => {
-            let explorerMoves = data?.moves ?? [];
-            if (opponentFindingOnBoard) {
-              if (lichessSource === 'player') explorerMoves = playerExplorerMoves(opponentFindingOnBoard.node.fen, explorerMoves);
-              explorerMoves = explorerMoves.filter(move => opponentFindingOnBoard.moves.has(move.uci));
-            } else if (lichessSource === 'player') {
-              explorerMoves = playerExplorerMoves(selectedNode.fen, explorerMoves);
-              if (!isBrowseMode && toTurnColor(selectedNode.fen) !== activeSide && !playerRepertoireMoves?.size) {
-                explorerMoves = explorerMoves.filter(move => {
-                  const reply = explorerReplyFen(selectedNode.fen, move.uci);
-                  return reply && hasPlayedMistake(playerAssessments[playerAssessmentKey(playerHandle, activeSide, bookPositionFenKey(reply))]);
-                });
-              }
-            }
+            const explorerMoves = isPlayerExplorer ? playerExplorerPositionMoves : (explorerData?.moves ?? [])
+              .filter(move => !opponentFindingOnBoard || opponentFindingOnBoard.moves.has(move.uci));
             const allEntries = explorerMoves
               .map((move) => {
-                const moveGames = move.white + move.draws + move.black;
-                const share = moveGames / positionGames;
+                const share = explorerGameCount(move) / lichessTotal;
                 const keyPair = parseUciMove(move.uci);
                 const isHiddenByTreeFilter = !showLichessOnTreeMoves && treeChildUcis.has(move.uci);
                 return { share, keyPair, isHiddenByTreeFilter };
@@ -2700,7 +2738,7 @@ function App() {
             const maxShare = Math.max(...allEntries.map((item) => item.share), 0);
 
             const candidates = allEntries.filter(
-              (entry) => !entry.isHiddenByTreeFilter && (opponentFindingOnBoard || entry.share >= thresholdShare),
+              (entry) => entry.share > 0 && !entry.isHiddenByTreeFilter && (opponentFindingOnBoard || entry.share >= thresholdShare),
             );
 
             if (candidates.length === 0) return [];
@@ -2760,12 +2798,12 @@ function App() {
     reviewPosition,
     reviewPositionOnBoard,
     opponentFindingOnBoard,
-    isBrowseMode,
     displayedChildNodes,
     showTreeArrows,
-    lichessData,
-    lichessDataFen,
-    lichessSource,
+    explorerData,
+    isPlayerExplorer,
+    playerExplorerPositionMoves,
+    lichessTotal,
     lichessArrowThreshold,
     engineLines,
     engineRunning,
@@ -2781,11 +2819,6 @@ function App() {
     showStockfishArrows,
     showLichessOnTreeMoves,
     analysisScratchFen,
-    activeSide,
-    selectedNode.fen,
-    playerAssessments,
-    playerHandle,
-    playerRepertoireMoves,
   ]);
 
   const lastMove = parseUciMove(selectedNode.moveUci);
@@ -3417,10 +3450,23 @@ function App() {
     }
   }, []);
 
-  const historyPlayer = playerHandle.trim().toLowerCase();
-  const savedPlayerHistory = playerHistory?.player === historyPlayer ? playerHistory.data : null;
+  const playerHistoryStats = savedPlayerHistory?.games.reduce((stats, game) => ({
+    count: stats.count + 1,
+    first: Math.min(stats.first, game.createdAt),
+    last: Math.max(stats.last, game.createdAt),
+  }), { count: 0, first: Number.POSITIVE_INFINITY, last: 0 });
   useEffect(() => {
-    if (!hasHydratedAppState || !historyPlayer || isLichessFilterOpen) {
+    if (!hasHydratedAppState || !isLichessFilterOpen || lichessSource !== 'player' || !historyPlayer ||
+      playerHistory?.player === historyPlayer) return;
+    let cancelled = false;
+    void idbGet<PlayerGameHistory>(`player-game-history-v1:${historyPlayer}`).then(data => {
+      if (!cancelled && data) setPlayerHistory({ player: historyPlayer, data });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [hasHydratedAppState, historyPlayer, isLichessFilterOpen, lichessSource, playerHistory?.player]);
+  useEffect(() => {
+    const force = playerHistoryRefresh !== playerHistoryRefreshHandledRef.current;
+    if (!hasHydratedAppState || !historyPlayer || (isLichessFilterOpen && !force)) {
       setPlayerHistorySyncing(false);
       setPlayerHistoryError('');
       return;
@@ -3466,6 +3512,8 @@ function App() {
           return stored;
         });
         publish(stored);
+        if (force || !saved || stored.games.length !== saved.games.length ||
+          stored.games.some((game, i) => game.id !== saved?.games[i]?.id)) setExplorerRefresh(value => value + 1);
         return stored;
       };
       const job = { player: historyPlayer, promise: run().catch(error => {
@@ -3473,22 +3521,23 @@ function App() {
         return saved;
       }).finally(() => {
         if (playerHistoryJobRef.current === job) playerHistoryJobRef.current = null;
-        if (!signal.aborted) setPlayerHistorySyncing(false);
+        if (!signal.aborted) {
+          if (force) playerHistoryRefreshHandledRef.current = playerHistoryRefresh;
+          setPlayerHistorySyncing(false);
+        }
       }) };
       playerHistoryJobRef.current = job;
     };
-    const force = playerHistoryRefresh !== playerHistoryRefreshHandledRef.current;
-    playerHistoryRefreshHandledRef.current = playerHistoryRefresh;
     setPlayerHistorySyncing(false);
     setPlayerHistoryError('');
     sync(force);
     const onVisible = () => {
       if (document.visibilityState === 'visible') sync(false, PLAYER_HISTORY_SYNC_CHECK_MS);
     };
-    const timer = window.setInterval(() => {
+    const timer = isLichessFilterOpen ? undefined : window.setInterval(() => {
       if (document.visibilityState === 'visible') sync(false);
     }, PLAYER_HISTORY_SYNC_CHECK_MS);
-    document.addEventListener('visibilitychange', onVisible);
+    if (!isLichessFilterOpen) document.addEventListener('visibilitychange', onVisible);
     return () => {
       controller.abort();
       if (playerHistoryJobRef.current?.player === historyPlayer) playerHistoryJobRef.current = null;
@@ -3595,28 +3644,6 @@ function App() {
     [ensureLichessResponseCacheLoaded, persistLichessResponseCache],
   );
 
-  const getExplorerUrl = useCallback((fen: string, historyDates?: ExplorerDates, source = lichessSource) => {
-    const params = new URLSearchParams({ fen: fullBoardFen(fen), variant: FIXED_VARIANT, color: activeSide });
-    if (source === 'player') {
-      params.set('fen', bookPositionFenKey(fen) + ' 0 1');
-      params.set('player', playerHandle.trim().toLowerCase());
-      if (playerSpeeds.length && playerSpeeds.length !== PLAYER_SPEEDS.length) params.set('speeds', [...playerSpeeds].sort().join(','));
-      params.set('modes', [...(selectedModes.length ? selectedModes : MODES)].sort().join(','));
-      params.set('source', FIXED_SOURCE);
-      if (historyDates) params.set('moves', '256');
-    } else if (source === 'lichess') {
-      if (selectedSpeeds.length) params.set('speeds', selectedSpeeds.join(','));
-      if (selectedRatings.length) params.set('ratings', selectedRatings.join(','));
-    }
-    const dates = historyDates ?? explorerDateFilter(source, dateRange);
-    if (dates?.since) params.set('since', dates.since);
-    if (dates?.until) params.set('until', dates.until);
-    const top = maxTopGamesForSource(source), recent = maxRecentGamesForSource(source);
-    if (top) params.set('topGames', String(top));
-    if (recent) params.set('recentGames', String(recent));
-    return 'https://explorer.lichess.ovh/' + source + '?' + params;
-  }, [activeSide, dateRange, lichessSource, playerHandle, playerSpeeds, selectedModes, selectedRatings, selectedSpeeds]);
-
   const requestExplorer = useCallback(async (url: string, signal: AbortSignal,
     publish?: (snapshot: LichessResponse) => void, onChunk?: () => void) => {
     const allowed = await waitForLichessRateSlot(signal);
@@ -3643,9 +3670,6 @@ function App() {
     return result;
   }, [lichessApiToken, registerLichessRateLimit, setCachedLichessResponse, waitForLichessRateSlot]);
 
-  const explorerFen = lichessSource === 'player' ? selectedBoardFen : browseOpponentPosition?.fen ?? selectedNode.fen;
-  const explorerUrl = getExplorerUrl(explorerFen);
-  const explorerRequestKey = JSON.stringify([explorerUrl, lichessApiToken]);
   const mistakeReviewOpen = mistakeReview !== null;
   const opponentReviewOpen = opponentReview !== null;
   const showingOpponentResult = opponentFindingOnBoard !== null;
@@ -5501,10 +5525,6 @@ function App() {
     }
   };
 
-  const playerReplyHasMistake = (fen: string) => hasPlayedMistake(
-    playerAssessments[playerAssessmentKey(playerHandle, activeSide, bookPositionFenKey(fen))],
-  );
-
   const inspectPlayerReply = async (fen: string, query: ReturnType<typeof playerSearchQuery>, controller: AbortController) => {
     const response = await query(fen);
     const moves = playerExplorerMoves(fen, response.moves).filter(move => explorerGameCount(move) > 0);
@@ -5531,9 +5551,30 @@ function App() {
     });
   };
 
+  const reviewNodesFromBoard = (turn: Side): RepertoireReviewNode[] => {
+    const preparedByFen = new Map(repertoireReviewNodes.map(({ node, prepared }) => [bookPositionFenKey(node.fen), prepared]));
+    const ordered = (isBrowseMode ? repertoireReviewNodes.map(({ node }) => node) : repertoireBranchNodes(tree, tree.rootId))
+      .map(node => ({ node, key: bookPositionFenKey(node.fen) }));
+    const baseNode = browseMistakePosition?.node ?? browseOpponentPosition ?? selectedNode;
+    const baseKey = bookPositionFenKey(baseNode.fen);
+    const baseIndex = ordered.findIndex(({ node, key }) => isBrowseMode ? key === baseKey : node.id === baseNode.id);
+    const boardIndex = playerPositionKey === baseKey ? baseIndex : ordered.findIndex(({ key }) => key === playerPositionKey);
+    const start = Math.max(0, boardIndex >= 0 ? boardIndex : baseIndex);
+
+    // Keep the whole scope, but visit it from the board position once per review.
+    const result: RepertoireReviewNode[] = [];
+    for (const { node, key } of [...ordered.slice(start), ...ordered.slice(0, start)]) {
+      const prepared = preparedByFen.get(key);
+      if (!prepared || toTurnColor(node.fen) !== turn) continue;
+      result.push({ node, prepared });
+      preparedByFen.delete(key);
+    }
+    return result;
+  };
+
   const jumpToNextMissingLichessMove = async () => {
     const player = lichessSource === 'player';
-    if (!opponentReviewNodes.length || isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning ||
+    if (!hasOpponentReviewNodes || isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning ||
       (player && !playerHandle.trim())) return;
     if (opponentReview && isFindMissingSearchRunning) {
       setOpponentReview(prev => prev && (prev.index + 1 < prev.findings.length
@@ -5548,20 +5589,23 @@ function App() {
     if (opponentReview?.exhausted || findMissingControllerRef.current || playerAssessmentJobRef.current) return;
     if (mistakeReview) closeMistakeReview();
     setPortraitTab('lichess');
-    const review = opponentReview ?? { findings: [], index: -1, nextNode: 0, waitingForNext: true, exhausted: false };
+    const review: OpponentReview = opponentReview ?? {
+      nodes: reviewNodesFromBoard(activeSide === 'white' ? 'black' : 'white'),
+      findings: [], index: -1, nextNode: 0, waitingForNext: true, exhausted: false,
+    };
     setOpponentReview({ ...review, waitingForNext: true });
     await runExplorerSearch(async controller => {
       if (player) setPlayerSearchNote('Preparing your game history…');
       const personal = player ? await preparePersonalReviewQuery(controller.signal) : null;
       setOpponentReview(prev => prev && ({ ...prev, fromHistory: personal?.fromHistory }));
-      for (let i = review.nextNode; i < opponentReviewNodes.length; i++) {
-        const { node, prepared } = opponentReviewNodes[i];
+      for (let i = review.nextNode; i < review.nodes.length; i++) {
+        const { node, prepared } = review.nodes[i];
         controller.signal.throwIfAborted();
         if (!prepared.size && (!player || !stockfishLoaded)) {
           setOpponentReview(prev => prev && ({ ...prev, nextNode: i + 1 }));
           continue;
         }
-        setPlayerSearchNote(`Checking opponent position ${i + 1} / ${opponentReviewNodes.length}…`);
+        setPlayerSearchNote(`Checking opponent position ${i + 1} / ${review.nodes.length}…`);
         const data = personal ? await personal.query(node.fen) : await fetchLichessNodeData(node.fen, controller.signal);
         controller.signal.throwIfAborted();
         if (!data) throw new Error('Could not check this position. Try again.');
@@ -5624,11 +5668,14 @@ function App() {
   };
 
   const findCommonMistakes = async (direction: -1 | 1 = 1) => {
-    if (!playerHandle.trim() || !stockfishLoaded || !mistakeReviewNodes.length || !hasHydratedAppState ||
+    if (!playerHandle.trim() || !stockfishLoaded || !hasMistakeReviewNodes || !hasHydratedAppState ||
       trainingSession || isTreeEvalRunning || analysisGameProgress || isExampleReplayActive ||
       findMissingControllerRef.current || playerAssessmentJobRef.current) return;
     setPortraitTab('lichess');
-    const review = mistakeReview ?? { positions: [], index: -1, nextNode: 0, exhausted: false };
+    const review: MistakeReview = mistakeReview ?? {
+      nodes: reviewNodesFromBoard(activeSide),
+      positions: [], index: -1, nextNode: 0, exhausted: false,
+    };
     const target = review.index + direction;
     if (review.positions[target]) {
       setPlayerSearchNote('');
@@ -5648,10 +5695,10 @@ function App() {
         const { query, fromHistory } = await preparePersonalReviewQuery(signal);
         const now = new Date();
         const recentSince = monthKey(now.getUTCFullYear() * 12 + now.getUTCMonth() - 2);
-        for (let i = review.nextNode; i < mistakeReviewNodes.length; i++) {
+        for (let i = review.nextNode; i < review.nodes.length; i++) {
           signal.throwIfAborted();
-          const { node, prepared } = mistakeReviewNodes[i];
-          setPlayerSearchNote('Checking position ' + (i + 1) + ' / ' + mistakeReviewNodes.length + '…');
+          const { node, prepared } = review.nodes[i];
+          setPlayerSearchNote('Checking position ' + (i + 1) + ' / ' + review.nodes.length + '…');
           const data = await query(node.fen);
           const all = new Map(playerExplorerMoves(node.fen, data.moves).map(move => [move.uci, move]));
           const deviations = [...all.values()].filter(move => !prepared.has(move.uci) && explorerGameCount(move) > 0);
@@ -5696,8 +5743,8 @@ function App() {
                 ],
               };
               signal.throwIfAborted();
-              setMistakeReview({ positions: [...review.positions, position], index: target, nextNode: i + 1,
-                exhausted: i + 1 === mistakeReviewNodes.length });
+              setMistakeReview({ ...review, positions: [...review.positions, position], index: target, nextNode: i + 1,
+                exhausted: i + 1 === review.nodes.length });
               setPlayerSearchNote('');
               showMistakePosition(position);
               return;
@@ -6424,7 +6471,6 @@ function App() {
     }
   };
 
-  const lichessTotal = explorerGameCount(opponentFindingOnBoard?.data ?? lichessData ?? { white: 0, draws: 0, black: 0 });
   const isSuddenDeathActive = Boolean(
     trainingSession && trainingSession.side === activeSide && trainingSession.suddenDeathMode,
   );
@@ -6542,26 +6588,19 @@ function App() {
   }, [resolvedOpening]);
   const filteredLichessMoves = useMemo(() => {
     if (opponentFindingOnBoard) return opponentFindingOnBoard.data.moves.filter(move => opponentFindingOnBoard.moves.has(move.uci));
-    if (!lichessData?.moves || lichessTotal <= 0) return [];
+    if (!explorerData?.moves || lichessTotal <= 0) return [];
     const thresholdShare = lichessArrowThreshold / 100;
-    return lichessData.moves.filter((move) => {
+    return explorerData.moves.filter((move) => {
       const total = move.white + move.draws + move.black;
       return total / lichessTotal >= thresholdShare;
     });
-  }, [lichessData, lichessTotal, lichessArrowThreshold, opponentFindingOnBoard]);
-  const isPlayerExplorer = lichessSource === 'player';
-  const explorerData = opponentFindingOnBoard?.data ?? (lichessDataRequestKey === explorerRequestKey &&
-    (!isPlayerExplorer || playerHandle.trim()) ? lichessData : null);
-  const playerToMove = isPlayerExplorer && toTurnColor(selectedBoardFen) === activeSide;
-  const playerAfterLine = isPlayerExplorer && !isBrowseMode && !playerToMove && !playerRepertoireMoves?.size;
+  }, [explorerData, lichessTotal, lichessArrowThreshold, opponentFindingOnBoard]);
   const playerRows: PlayerMoveRow[] = [];
   const playerMoveCounts = new Map<string, number>();
   const playerBestMove = playerToMove ? playerAssessment?.best.bestMove : null;
   let playerBestSan: string | undefined;
   if (isPlayerExplorer) {
-    const moves = playerExplorerMoves(selectedBoardFen, explorerData?.moves ?? [])
-      .filter(move => !opponentFindingOnBoard || opponentFindingOnBoard.moves.has(move.uci));
-    const seen = new Map(moves.map(move => [move.uci, move]));
+    const seen = new Map(playerExplorerPositionMoves.map(move => [move.uci, move]));
     const chess = fenToChess(selectedBoardFen);
     const legal = new Map(chess.moves({ verbose: true }).map(move => [uciFromMove(move), move.san]));
     if (playerBestMove) playerBestSan = legal.get(playerBestMove);
@@ -6584,7 +6623,6 @@ function App() {
         const reply = explorerReplyFen(selectedBoardFen, uci);
         if (!reply) continue;
         if (playerAfterLine) {
-          if (!playerReplyHasMistake(reply)) continue;
           note = 'Mistake in your replies';
         } else if (!playerRepertoire?.movesByFen.get(bookPositionFenKey(reply))?.size) {
           note = inRepertoire ? 'In repertoire · no reply' : 'No saved reply';
@@ -6596,9 +6634,16 @@ function App() {
         provisional: evaluation?.confirmedLoss === null, results,
       });
     }
+    playerRows.sort((a, b) => (b.results ? b.results.wins + b.results.draws + b.results.losses : 0) -
+      (a.results ? a.results.wins + a.results.draws + a.results.losses : 0));
   }
   const lichessTopGames = explorerData?.topGames ?? [];
-  const lichessRecentGames = explorerData?.recentGames ?? [];
+  const lichessRecentGames = (explorerData?.recentGames ?? []).map(game => {
+    if (!isPlayerExplorer) return game;
+    const details = networkExplorerData?.recentGames?.find(entry => entry.id === game.id);
+    const createdAt = game.createdAt ?? savedPlayerHistory?.games.find(entry => entry.id === game.id)?.createdAt;
+    return { ...details, ...game, createdAt };
+  });
   const hasLichessExampleGames = lichessTopGames.length > 0 || lichessRecentGames.length > 0;
   const isExampleReplayActive = Boolean(exampleReplay && exampleReplay.side === activeSide);
 
@@ -6652,16 +6697,22 @@ function App() {
     setExampleReplayLoadingId(gameId);
     setExampleReplayError('');
     try {
-      const response = await fetch(`https://lichess.org/game/export/${gameId}?moves=true&tags=true&clocks=false&evals=false`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const pgn = await response.text();
-      const headerFenMatch = pgn.match(/\[FEN\s+"([^"]+)"\]/i);
-      const gameStartFen = headerFenMatch ? headerFenMatch[1] : START_POS_FEN;
-      const fullGame = fenToChess(gameStartFen);
-      try {
-        fullGame.loadPgn(pgn);
-      } catch {
-        throw new Error('Invalid PGN');
+      const localGame = savedPlayerHistory?.games.find(entry => entry.id === gameId);
+      let gameStartFen = START_POS_FEN;
+      let fullGame = fenToChess(gameStartFen);
+      if (localGame) {
+        for (const san of localGame.moves.split(' ')) fullGame.move(san);
+      } else {
+        const response = await fetch(`https://lichess.org/game/export/${gameId}?moves=true&tags=true&clocks=false&evals=false`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const pgn = await response.text();
+        gameStartFen = pgn.match(/\[FEN\s+"([^"]+)"\]/i)?.[1] ?? START_POS_FEN;
+        fullGame = fenToChess(gameStartFen);
+        try {
+          fullGame.loadPgn(pgn);
+        } catch {
+          throw new Error('Invalid PGN');
+        }
       }
       const verboseMoves = fullGame.history({ verbose: true }) as Move[];
       const targetFen = fullBoardFen(explorerFen);
@@ -6695,7 +6746,9 @@ function App() {
       }
       if (fens.length <= 1) throw new Error('No continuation available from current position.');
 
-      const playerText = `${formatLichessExamplePlayer(game.white)} vs ${formatLichessExamplePlayer(game.black)}`;
+      const playerText = game.white || game.black
+        ? `${formatLichessExamplePlayer(game.white)} vs ${formatLichessExamplePlayer(game.black)}`
+        : formatLichessExampleLine(game);
       setExampleReplay({
         side: activeSide,
         gameId,
@@ -6713,10 +6766,10 @@ function App() {
     }
   };
   const canRunFindMissingSearch =
-    opponentReviewNodes.length > 0 && (!isPlayerExplorer || Boolean(playerHandle.trim())) &&
+    hasOpponentReviewNodes && (!isPlayerExplorer || Boolean(playerHandle.trim())) &&
     !isFindMissingSearchRunning && !isSuddenDeathActive && !isTreeEvalRunning && !playerAssessmentRunning;
   const hasNextOpponentFinding = Boolean(opponentReview && opponentReview.index + 1 < opponentReview.findings.length);
-  const canFindCommonMistakes = Boolean(playerHandle.trim() && mistakeReviewNodes.length) && stockfishLoaded &&
+  const canFindCommonMistakes = Boolean(playerHandle.trim() && hasMistakeReviewNodes) && stockfishLoaded &&
     !isFindMissingSearchRunning && !playerAssessmentRunning && !isTreeEvalRunning &&
     hasHydratedAppState && !trainingSession && !isExampleReplayActive && !analysisGameProgress;
   const mistakeRows: PlayerMoveRow[] = reviewPosition?.moves.map(move => {
@@ -8234,7 +8287,7 @@ function App() {
                     <>
                       {!reviewPosition.moves.some(move => move.inRepertoire) &&
                         <div className="player-repertoire-status">No repertoire move saved for this position.</div>}
-                      <PlayerRepertoireTable rows={mistakeRows} complete onMove={playPlayerMove} />
+                      <PlayerRepertoireTable rows={mistakeRows} complete side={activeSide} onMove={playPlayerMove} />
                       <div className="player-repertoire-status">
                         {reviewPosition.fromHistory && 'Local game history · last 12 months. Dates show game start. '}
                         Recent = last 3 calendar months.
@@ -8245,17 +8298,6 @@ function App() {
               ) : isPlayerExplorer && (
                 <div className="player-repertoire-panel">
                   {!opponentReviewOpen && <div className="player-repertoire-controls">
-                    <span title={activeRepertoireName}>{activeSide} · {isBrowseMode ? 'Player explorer' : activeRepertoireName}</span>
-                    <button type="button" onClick={() => setIsLichessFilterOpen(true)}>Player settings</button>
-                  </div>}
-                  {!opponentReviewOpen && <div className="player-repertoire-controls">
-                    <button type="button"
-                      disabled={!playerHandle.trim() || isFindMissingSearchRunning || lichessStatus === 'refreshing'}
-                      onClick={() => setExplorerRefresh(value => value + 1)}>Refresh</button>
-                    <button type="button" disabled={!historyPlayer || playerHistorySyncing || isFindMissingSearchRunning}
-                      onClick={() => setPlayerHistoryRefresh(value => value + 1)}>
-                      {playerHistorySyncing ? 'Syncing games…' : 'Sync games'}
-                    </button>
                     {isFindMissingSearchRunning && <button type="button" onClick={() => findMissingControllerRef.current?.abort()}>
                       Stop search
                     </button>}
@@ -8282,7 +8324,8 @@ function App() {
                     </div>
                   )}
                   {!opponentReviewOpen && <div role="status" className="player-repertoire-status">
-                    {!playerHandle.trim() ? 'Enter your Lichess username in Player settings.'
+                    {!playerHandle.trim() ? 'Enter your Lichess username in the database options.'
+                      : usingLocalExplorer ? (!lichessTotal ? 'No synced games in this position.' : dateRange === '3y' ? 'Showing synced games from the last 12 months.' : '')
                       : lichessStatus === 'indexing' ? (explorerData?.queuePosition
                         ? `Partial results · Lichess queue: ${explorerData.queuePosition}` : 'Partial results · Lichess is indexing.')
                       : lichessStatus === 'refreshing' ? 'Showing saved results · refreshing…'
@@ -8292,9 +8335,6 @@ function App() {
                       : lichessStatus === 'done' && explorerData && !explorerData.moves.length ? 'No games in this position.'
                       : ''}
                     {playerSearchNote && <div>{playerSearchNote}</div>}
-                    {playerHistoryError ? <div>{playerHistoryError}</div> : savedPlayerHistory && (
-                      <div>Games synced {new Date(savedPlayerHistory.syncedAt).toLocaleString()} · last 12 months</div>
-                    )}
                     {playerAssessmentNotice?.key === playerReviewKey && <div>{playerAssessmentNotice.message}</div>}
                     {isFindMissingSearchRunning && <div>Checking opponent moves…</div>}
                     {playerAfterLine && !playerRows.length && Boolean(explorerData?.moves.length) &&
@@ -8306,8 +8346,9 @@ function App() {
                     </button>
                   )}
                   {(!opponentReviewOpen || showingOpponentResult) && playerRows.length > 0 && (
-                    <PlayerRepertoireTable rows={playerRows} complete={Boolean(explorerData) &&
-                      ['done', 'cached', 'refreshing'].includes(lichessStatus)} onMove={playPlayerMove} />
+                    <PlayerRepertoireTable rows={playerRows} complete={usingLocalExplorer || showingOpponentResult ||
+                      Boolean(explorerData) && ['done', 'cached', 'refreshing'].includes(lichessStatus)}
+                      side={activeSide} positionGames={lichessTotal} onMove={playPlayerMove} />
                   )}
                 </div>
               )}
@@ -8331,10 +8372,10 @@ function App() {
                   {`Lichess API error (429), ${lichessData ? 'showing cached data' : 'no cached data'}`}
                 </div>
               )}
-              {!mistakeReview && !lichessAuthRequired && lichessApiIssueNote && (!explorerData || isPlayerExplorer) && (
+              {!mistakeReview && !usingLocalExplorer && !lichessAuthRequired && lichessApiIssueNote && (!explorerData || isPlayerExplorer) && (
                 <div className="status lichess-rate-limit-note">{lichessApiIssueNote}</div>
               )}
-              {!mistakeReview && lichessAuthRequired && (
+              {!mistakeReview && !usingLocalExplorer && lichessAuthRequired && (
                 <div className="status lichess-auth-note">
                   <span>Lichess token missing or invalid (401).</span>
                   <button
@@ -8376,7 +8417,7 @@ function App() {
                           </span>
                           <span className="lichess-cell-elo">{formatAverageElo(move)}</span>
                           <span className="lichess-cell-bar">
-                            <LichessStatsBar white={move.white} draws={move.draws} black={move.black} total={total} />
+                            <LichessStatsBar white={move.white} draws={move.draws} black={move.black} />
                           </span>
                         </div>
                       );
@@ -8390,8 +8431,7 @@ function App() {
                       <div className="lichess-example-lists">
                         {lichessTopGames.map((game, index) => {
                           const gameId = typeof game.id === 'string' ? game.id.trim() : '';
-                          const gameType = typeof game.speed === 'string' && game.speed.trim().length > 0 ? game.speed.trim() : '?';
-                          const gameLine = `${formatLichessExampleRank(game.white)} - ${formatLichessExampleRank(game.black)} - ${gameType}, ${formatLichessExampleResult(game)}`;
+                          const gameLine = formatLichessExampleLine(game);
                           return (
                             <div key={`top-${gameId || index}`} className="lichess-example-item">
                               <button
@@ -8407,8 +8447,7 @@ function App() {
                         })}
                         {lichessRecentGames.map((game, index) => {
                           const gameId = typeof game.id === 'string' ? game.id.trim() : '';
-                          const gameType = typeof game.speed === 'string' && game.speed.trim().length > 0 ? game.speed.trim() : '?';
-                          const gameLine = `${formatLichessExampleRank(game.white)} - ${formatLichessExampleRank(game.black)} - ${gameType}, ${formatLichessExampleResult(game)}`;
+                          const gameLine = formatLichessExampleLine(game);
                           return (
                             <div key={`recent-${gameId || index}`} className="lichess-example-item">
                               <button
@@ -8550,7 +8589,6 @@ function App() {
                     white={explorerData?.white ?? 0}
                     draws={explorerData?.draws ?? 0}
                     black={explorerData?.black ?? 0}
-                    total={explorerData ? lichessTotal : 0}
                   />
                   <span className="games-total">
                     {formatGamesCount(explorerData ? lichessTotal : 0)}
@@ -10158,9 +10196,18 @@ function App() {
                         className="player-handle-input"
                         type="text"
                         value={playerHandle}
+                        disabled={playerHistorySyncing}
                         onChange={(e) => setPlayerHandle(e.target.value)}
                         placeholder="Lichess handle"
                       />
+                    </span>
+                  )}
+                  {isPlayerExplorer && historyPlayer && (
+                    <span className="player-handle-row">
+                      <button type="button" disabled={playerHistorySyncing || isFindMissingSearchRunning}
+                        onClick={() => setPlayerHistoryRefresh(value => value + 1)}>
+                        {playerHistorySyncing ? 'Syncing games…' : 'Sync games'}
+                      </button>
                     </span>
                   )}
                   {shouldShowLichessAddTokenButton && (
@@ -10172,28 +10219,24 @@ function App() {
                   )}
                 </label>
                 {isPlayerExplorer && (
-                  <div className="player-repertoire-filters">
-                    <label>
-                      Player color
-                      <select value={activeSide} onChange={event => {
-                        setRepertoireSide(event.target.value === 'black' ? 'black' : 'white');
-                        setIsTempBoardFlipped(false);
-                      }}>
-                        <option value="white">White</option>
-                        <option value="black">Black</option>
-                      </select>
-                    </label>
-                    <label>
-                      Repertoire
-                      <select value={activeRepertoireId ?? ''} onChange={event => {
-                        if (event.target.value) loadRepertoire(event.target.value);
-                        else enterBrowseMode();
-                      }}>
-                        <option value="">Review mode</option>
-                        {activeRepertoireList.map(entry => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
-                      </select>
-                    </label>
-                  </div>
+                  <section className="player-history-summary" aria-label="Synced game history">
+                    <div className="player-history-summary-head">
+                      <strong>Synced games · last 12 months</strong>
+                      {savedPlayerHistory && <span>{(playerHistoryStats?.count ?? 0).toLocaleString()} games</span>}
+                    </div>
+                    {!historyPlayer ? <span>Enter a Lichess handle to sync your games.</span>
+                      : playerHistorySyncing ? <span>Syncing games…</span>
+                      : playerHistoryError ? <span className="player-history-summary-error">{playerHistoryError}</span>
+                      : !savedPlayerHistory ? <span>No games synced yet.</span>
+                      : playerHistoryStats?.count ? (
+                        <>
+                          <span>Game dates: {new Date(playerHistoryStats.first).toLocaleDateString()} – {new Date(playerHistoryStats.last).toLocaleDateString()}</span>
+                          <span>Last game: {new Date(playerHistoryStats.last).toLocaleString()}</span>
+                          <span>Last sync: {new Date(savedPlayerHistory.syncedAt).toLocaleString()}</span>
+                        </>
+                      ) : <span>No completed games in the stored period.</span>}
+                    <small>Date, speed, and mode filters change the displayed results. Game sync keeps all standard games from the last 12 months.</small>
+                  </section>
                 )}
                 <label>
                   Date range

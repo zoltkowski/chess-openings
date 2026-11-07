@@ -97,7 +97,7 @@ export async function syncPlayerGameHistory(
   return { syncedAt, oldestOngoing, games: [...games.values()] };
 }
 
-type Occurrence = Pick<Game, 'createdAt' | 'winner'> & { uci: string; san: string };
+type Occurrence = Pick<Game, 'id' | 'createdAt' | 'winner' | 'speed'> & { uci: string; san: string };
 type MoveStats = { uci: string; san: string; white: number; draws: number; black: number; lastPlayedAt: number };
 
 export async function indexPlayerGameHistory(
@@ -107,6 +107,7 @@ export async function indexPlayerGameHistory(
   speeds: readonly string[],
   modes: readonly string[],
   signal: AbortSignal,
+  includeReplies = true,
 ) {
   const index = new Map<string, Occurrence[]>();
   const pieceCount = (fen: string) => fen.split(' ', 1)[0].match(/[a-z]/gi)?.length ?? 0;
@@ -132,21 +133,24 @@ export async function indexPlayerGameHistory(
       if ((inRepertoire || afterRepertoirePosition) && !seen.has(fen)) {
         seen.add(fen);
         const occurrences = index.get(fen) ?? [];
-        occurrences.push({ createdAt: game.createdAt, winner: game.winner,
+        occurrences.push({ id: game.id, createdAt: game.createdAt, winner: game.winner, speed: game.speed,
           uci: move.from + move.to + (move.promotion ?? ''), san: move.san });
         index.set(fen, occurrences);
       }
-      // Include replies to departures at the end of a saved line.
-      afterRepertoirePosition = inRepertoire;
+      if (!includeReplies && inRepertoire && positions.size === 1) break;
+      // Reviews also check replies to departures at the end of a saved line.
+      afterRepertoirePosition = includeReplies && inRepertoire;
     }
   }
 
   return (fen: string, dates: { since?: string; until?: string } = {}) => {
     const totals = { white: 0, draws: 0, black: 0 };
     const moves = new Map<string, MoveStats>();
+    const matchedGames: Occurrence[] = [];
     for (const game of index.get(fen) ?? []) {
       const month = new Date(game.createdAt).toISOString().slice(0, 7);
       if ((dates.since && month < dates.since) || (dates.until && month > dates.until)) continue;
+      matchedGames.push(game);
       const result = game.winner ?? 'draws';
       totals[result]++;
       const move = moves.get(game.uci) ?? {
@@ -156,6 +160,7 @@ export async function indexPlayerGameHistory(
       move.lastPlayedAt = Math.max(move.lastPlayedAt, game.createdAt);
       moves.set(move.uci, move);
     }
-    return { ...totals, moves: [...moves.values()] };
+    const recentGames = matchedGames.sort((a, b) => b.createdAt - a.createdAt).slice(0, 8);
+    return { ...totals, moves: [...moves.values()], recentGames };
   };
 }
