@@ -2541,6 +2541,21 @@ function App() {
     }
     return [...positions.values()];
   }, [reviewTree, reviewTrees]);
+  const mistakePreparedByFen = useMemo(() => {
+    const preparedByFen = new Map(repertoireReviewNodes.map(({ node, prepared }) => [bookPositionFenKey(node.fen), prepared]));
+    if (isBrowseMode) return preparedByFen;
+
+    // Keep the loaded opening's positions, but accept prepared replies from the other openings for this side.
+    const otherRepertoireIds = new Set(activeRepertoireList.filter(entry => entry.id !== activeRepertoireId).map(entry => entry.id));
+    for (const repertoire of bookRepertoireIndex) {
+      if (!otherRepertoireIds.has(repertoire.id)) continue;
+      for (const [fen, moves] of repertoire.movesByFen) {
+        const prepared = preparedByFen.get(fen);
+        if (prepared) preparedByFen.set(fen, new Set([...prepared, ...moves]));
+      }
+    }
+    return preparedByFen;
+  }, [repertoireReviewNodes, isBrowseMode, activeRepertoireList, activeRepertoireId, bookRepertoireIndex]);
   const hasMistakeReviewNodes = repertoireReviewNodes.some(({ node }) => toTurnColor(node.fen) === activeSide);
   const hasOpponentReviewNodes = repertoireReviewNodes.some(({ node }) => toTurnColor(node.fen) !== activeSide);
   const analysisScratchFen = analysisScratchPosition?.fen ?? null;
@@ -2681,10 +2696,9 @@ function App() {
   const savedPlayerHistory = playerHistory?.player === historyPlayer ? playerHistory.data : null;
   const repertoireDeviations = useMemo(() => {
     if (!showMistakeArrows || isBrowseMode || !savedPlayerHistory?.reviewIndex) return null;
-    const positions = repertoireReviewNodes.map(({ node, prepared }) => [bookPositionFenKey(node.fen), prepared] as const);
-    return playerRepertoireDeviations(savedPlayerHistory, positions, activeSide, playerSpeeds, selectedModes,
+    return playerRepertoireDeviations(savedPlayerHistory, mistakePreparedByFen, activeSide, playerSpeeds, selectedModes,
       playerGameHistoryStart(Date.now(), mistakeHistoryMonths));
-  }, [showMistakeArrows, isBrowseMode, savedPlayerHistory, repertoireReviewNodes, activeSide, playerSpeeds,
+  }, [showMistakeArrows, isBrowseMode, savedPlayerHistory, mistakePreparedByFen, activeSide, playerSpeeds,
     selectedModes, mistakeHistoryMonths]);
   const currentDeviations = boardFen === selectedNode.fen && !analysisScratchFen
     ? repertoireDeviations?.get(bookPositionFenKey(selectedNode.fen)) : undefined;
@@ -5803,7 +5817,8 @@ function App() {
           setPlayerSearchNote('Checking position ' + (i + 1) + ' / ' + review.nodes.length + '…');
           const data = await query(node.fen, dates);
           const all = new Map(playerExplorerMoves(node.fen, data.moves).map(move => [move.uci, move]));
-          const deviations = [...all.values()].filter(move => !prepared.has(move.uci) && explorerGameCount(move) > 0);
+          const knownMoves = mistakePreparedByFen.get(bookPositionFenKey(node.fen)) ?? prepared;
+          const deviations = [...all.values()].filter(move => !knownMoves.has(move.uci) && explorerGameCount(move) > 0);
           if (deviations.length) {
             const counts = new Map(deviations.map(move => [move.uci, explorerGameCount(move)]));
             for (const uci of prepared) counts.set(uci, all.has(uci) ? explorerGameCount(all.get(uci)!) : 0);
