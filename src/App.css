@@ -1768,6 +1768,30 @@ select {
   pointer-events: none;
 }
 
+.icon-toggle-btn.compact-engine-arrows {
+  gap: 0.08rem;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.compact-arrow {
+  color: #94a3b8;
+  font-size: 1.18rem;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.compact-engine-arrows:enabled .compact-arrow.stockfish {
+  color: #2563eb;
+  text-shadow: 0 0 2px #111827;
+}
+
+.compact-engine-arrows:enabled .compact-arrow.maia {
+  color: #9333ea;
+  text-shadow: 0 0 2px #111827;
+}
+
 .icon-toggle-btn.with-diagonal-arrow::after {
   content: "➚";
   position: absolute;

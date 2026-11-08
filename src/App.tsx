@@ -36,6 +36,7 @@ import { MaiaPopularityChart, MaiaPopularityControls } from './MaiaPopularity';
 import { useMaiaPopularity } from './useMaiaPopularity';
 import { PlayerRepertoireTable, type PlayerMoveRow } from './analysis/PlayerRepertoireTable';
 import { LichessStatsBar } from './analysis/LichessStatsBar';
+import { CompactEngineArrowsButton } from './CompactEngineArrowsButton';
 import {
   indexPlayerGameHistory, playerHistoryCovers, playerHistoryIndexIsCurrent, preprocessPlayerGameHistory,
   syncPlayerGameHistory, type PlayerGameHistory,
@@ -383,6 +384,7 @@ type PersistedSettingsState = {
   showLichessArrows: boolean;
   showStockfishArrows: boolean;
   showMaiaArrows: boolean;
+  combineCompactEngineArrows: boolean;
   stockfishEvalSeconds: number;
   trainingStatsQueueLength: number;
   suddenDeathThreshold: number;
@@ -763,6 +765,7 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
     bothEngines: normalizedSelectedEngine === 'maia' && parsed.bothEngines === true,
     showStockfishArrows: parsed.showStockfishArrows ?? true,
     showMaiaArrows: parsed.showMaiaArrows ?? parsed.showStockfishArrows ?? true,
+    combineCompactEngineArrows: parsed.combineCompactEngineArrows === true,
     analysisBenchmarkElo: clampInt((parsed as Partial<PersistedSettingsState>).analysisBenchmarkElo, 1100, 3000, 1800),
     maiaStrengthElo: clampInt(
       (parsed as Partial<PersistedSettingsState>).maiaStrengthElo,
@@ -2248,6 +2251,10 @@ function App() {
   const [engineMultiPv, setEngineMultiPv] = useState(3);
   const [showStockfishArrows, setShowStockfishArrows] = useState(true);
   const [showMaiaArrows, setShowMaiaArrows] = useState(true);
+  const [combineCompactEngineArrows, setCombineCompactEngineArrows] = useState(false);
+  const [movesArrowGroupNeedsCompact, setMovesArrowGroupNeedsCompact] = useState(false);
+  const topArrowGroupRef = useRef<HTMLDivElement>(null);
+  const movesArrowGroupRef = useRef<HTMLDivElement>(null);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
   const [maiaStockfishComparison, setMaiaStockfishComparison] = useState<MaiaStockfishComparison | null>(null);
   const [stockfishLinesFen, setStockfishLinesFen] = useState(START_POS_FEN);
@@ -2532,6 +2539,12 @@ function App() {
   const currentMaiaKey = `${maiaPositionFen}|${maiaStrengthElo}`;
   const maiaComparisonKey = `${currentMaiaKey}|${engineMultiPv}`;
   const showMixedEngines = bothEngines && selectedEngine === 'maia';
+  const useCompactEngineArrows = showMixedEngines && movesArrowGroupNeedsCompact;
+  const anyEngineArrows = showStockfishArrows || showMaiaArrows;
+  const stockfishArrowsVisible = useCompactEngineArrows && combineCompactEngineArrows ? anyEngineArrows : showStockfishArrows;
+  const maiaArrowsVisible = useCompactEngineArrows
+    ? combineCompactEngineArrows ? anyEngineArrows : showMaiaArrows && !showStockfishArrows
+    : showMaiaArrows;
   const comparison = maiaStockfishComparison?.key === maiaComparisonKey ? maiaStockfishComparison : null;
   const isGameReviewRunning = Boolean(analysisGameProgress);
   const maiaPopularity = useMaiaPopularity(maiaPositionFen, maiaStrengthElo,
@@ -2769,7 +2782,7 @@ function App() {
           })()
         : [];
 
-    const maiaLines = engineRunning && showMaiaArrows && selectedEngine === 'maia' && maiaResultKey === currentMaiaKey
+    const maiaLines = engineRunning && maiaArrowsVisible && selectedEngine === 'maia' && maiaResultKey === currentMaiaKey
       ? engineLines : [];
     const maxPopularity = Math.max(0, ...maiaLines.map(line => line.evalValue));
     const maiaArrows = maiaLines.flatMap<DrawShape>(line => {
@@ -2780,7 +2793,7 @@ function App() {
       return [{ orig, dest, brush: 'purple', modifiers: { lineWidth: 6 + ratio * 12 } }];
     });
 
-    const stockfishLines = engineRunning && showStockfishArrows
+    const stockfishLines = engineRunning && stockfishArrowsVisible
       ? showMixedEngines
         ? (comparison?.stockfishMoves ?? []).map(candidate => ({
             bestMove: candidate.uci,
@@ -2824,8 +2837,8 @@ function App() {
     maiaResultKey,
     currentMaiaKey,
     showLichessArrows,
-    showMaiaArrows,
-    showStockfishArrows,
+    maiaArrowsVisible,
+    stockfishArrowsVisible,
     showLichessOnTreeMoves,
     analysisScratchFen,
   ]);
@@ -2860,6 +2873,7 @@ function App() {
     setShowLichessArrows(persistedSettings.showLichessArrows);
     setShowStockfishArrows(persistedSettings.showStockfishArrows);
     setShowMaiaArrows(persistedSettings.showMaiaArrows);
+    setCombineCompactEngineArrows(persistedSettings.combineCompactEngineArrows);
     setStockfishEvalSeconds(persistedSettings.stockfishEvalSeconds);
     setTrainingStatsQueueLength(persistedSettings.trainingStatsQueueLength);
     setSuddenDeathThreshold(persistedSettings.suddenDeathThreshold);
@@ -3035,6 +3049,7 @@ function App() {
       showLichessArrows,
       showStockfishArrows,
       showMaiaArrows,
+      combineCompactEngineArrows,
       stockfishEvalSeconds,
       trainingStatsQueueLength,
       suddenDeathThreshold,
@@ -3078,6 +3093,7 @@ function App() {
     showLichessArrows,
     showStockfishArrows,
     showMaiaArrows,
+    combineCompactEngineArrows,
     stockfishEvalSeconds,
     trainingStatsQueueLength,
     suddenDeathThreshold,
@@ -5905,6 +5921,7 @@ function App() {
       showLichessArrows,
       showStockfishArrows,
       showMaiaArrows,
+      combineCompactEngineArrows,
       stockfishEvalSeconds,
       trainingStatsQueueLength,
       suddenDeathThreshold,
@@ -6832,6 +6849,39 @@ function App() {
   const selectedMoveIndex = displayedMovePath.findIndex((node) => node.id === selectedNode.id);
   const canGoForward = isBrowseMode && !isTrainingActive && !isSuddenDeathActive &&
     selectedMoveIndex >= 0 && selectedMoveIndex < displayedMovePath.length - 1;
+  useLayoutEffect(() => {
+    const group = movesArrowGroupRef.current;
+    const row = group?.parentElement;
+    const topGroup = topArrowGroupRef.current;
+    if (!showMixedEngines || !group || !row || !topGroup) {
+      setMovesArrowGroupNeedsCompact(false);
+      return;
+    }
+
+    const preceding = [...row.children].filter(child => child !== group);
+    const update = () => {
+      if (getComputedStyle(topGroup).display !== 'none') {
+        setMovesArrowGroupNeedsCompact(false);
+        return;
+      }
+      const firstArrow = group.firstElementChild;
+      if (!firstArrow || !group.getClientRects().length) return;
+
+      const rowStyle = getComputedStyle(row);
+      const rowRight = row.getBoundingClientRect().right - parseFloat(rowStyle.paddingRight) - parseFloat(rowStyle.borderRightWidth);
+      const lastControl = preceding.filter(child => child.getClientRects().length > 0).at(-1);
+      const available = lastControl
+        ? rowRight - lastControl.getBoundingClientRect().right - parseFloat(rowStyle.columnGap)
+        : row.clientWidth - parseFloat(rowStyle.paddingLeft) - parseFloat(rowStyle.paddingRight);
+      // Measure the full group even while the two engine buttons are replaced by one.
+      const fullWidth = 4 * firstArrow.getBoundingClientRect().width + 3 * parseFloat(getComputedStyle(group).columnGap);
+      setMovesArrowGroupNeedsCompact(available < fullWidth);
+    };
+    const observer = new ResizeObserver(update);
+    [row, topGroup, ...preceding].forEach(element => observer.observe(element));
+    update();
+    return () => observer.disconnect();
+  }, [showMixedEngines, canGoForward, portraitTab, isTrainingActive, isExampleReplayActive]);
   const displayedBookMoves = useMemo(
     () => findBookMovesForGame(displayedMovePath, bookRepertoireIndex),
     [displayedMovePath, bookRepertoireIndex],
@@ -8191,7 +8241,7 @@ function App() {
     </div>
   );
 
-  const arrowToggleButtons = (
+  const renderArrowToggleButtons = (compact = false) => (
     <>
       <button
         type="button"
@@ -8205,7 +8255,29 @@ function App() {
         aria-label="Toggle Lichess arrows"
         title="Toggle Lichess arrows (hold for options)"
       />
-      {selectedEngine === 'maia' && (
+      {compact && (
+        <CompactEngineArrowsButton
+          stockfish={stockfishArrowsVisible}
+          maia={maiaArrowsVisible}
+          combined={combineCompactEngineArrows}
+          disabled={!canToggleStockfishArrows && !canToggleMaiaArrows}
+          onCycle={() => {
+            if (combineCompactEngineArrows) {
+              setShowStockfishArrows(!anyEngineArrows);
+              setShowMaiaArrows(!anyEngineArrows);
+            } else {
+              setShowStockfishArrows(!anyEngineArrows);
+              setShowMaiaArrows(stockfishArrowsVisible);
+            }
+          }}
+          onSwitchMode={() => {
+            setCombineCompactEngineArrows(!combineCompactEngineArrows);
+            setShowStockfishArrows(anyEngineArrows);
+            setShowMaiaArrows(!combineCompactEngineArrows && anyEngineArrows);
+          }}
+        />
+      )}
+      {!compact && selectedEngine === 'maia' && (
         <button
           type="button"
           className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-maia ${showMaiaArrows && canToggleMaiaArrows ? 'active' : ''}`}
@@ -8216,7 +8288,7 @@ function App() {
           title={`Toggle ${MAIA_ENGINE_LABEL} arrows`}
         />
       )}
-      {(selectedEngine === 'stockfish' || showMixedEngines) && (
+      {!compact && (selectedEngine === 'stockfish' || showMixedEngines) && (
         <button
           type="button"
           className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-stockfish ${showStockfishArrows && canToggleStockfishArrows ? 'active' : ''}`}
@@ -8800,7 +8872,7 @@ function App() {
                 )}
                 {!isTrainingActive && !isExampleReplayActive && (
                   <div className="portrait-navigation">
-                    <div className={`arrow-toggle-group ${showMixedEngines ? 'mixed-engine-arrows' : ''}`}>{arrowToggleButtons}</div>
+                    <div ref={topArrowGroupRef} className={`arrow-toggle-group ${showMixedEngines ? 'mixed-engine-arrows' : ''}`}>{renderArrowToggleButtons()}</div>
                     <button
                       type="button"
                       className="portrait-back-btn long-pressable-btn"
@@ -9153,7 +9225,7 @@ function App() {
                     ) : (
                       <>
                         <div className="desktop-navigation desktop-only">
-                          <div className="arrow-toggle-group">{arrowToggleButtons}</div>
+                          <div className="arrow-toggle-group">{renderArrowToggleButtons()}</div>
                           <button
                             className="back-btn"
                             onClick={handleBackClick}
@@ -9239,7 +9311,7 @@ function App() {
                               <SuddenDeathIcon />
                             </button>
                           </>
-                        <div className={`arrow-toggle-group portrait-panel-arrows ${showMixedEngines ? 'mixed-engine-arrows' : ''}`}>{arrowToggleButtons}</div>
+                        <div ref={movesArrowGroupRef} className={`arrow-toggle-group portrait-panel-arrows ${showMixedEngines ? 'mixed-engine-arrows' : ''}`}>{renderArrowToggleButtons(useCompactEngineArrows)}</div>
                       </>
                     )}
                   </div>
