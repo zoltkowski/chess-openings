@@ -1167,20 +1167,6 @@ function repertoireBranchNodes(tree: MoveTree, rootId: string) {
   return nodes;
 }
 
-function AnalysisIcon() {
-  return (
-    <TabIconBase>
-      <circle cx="10" cy="10" r="7.3" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="m15.5 15.5 5.7 5.7" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
-      <g fill="currentColor">
-        <circle cx="10" cy="7" r="1.8" />
-        <path d="M8.8 9.7h2.4c-.25 1.5.15 2.6 1.45 3.8h-5.3c1.3-1.2 1.7-2.3 1.45-3.8Z" />
-        <rect x="6.8" y="14" width="6.4" height="1.3" rx=".65" />
-      </g>
-    </TabIconBase>
-  );
-}
-
 function BackIcon() {
   return (
     <TabIconBase>
@@ -9138,17 +9124,6 @@ function App() {
                             <BackIcon />
                           </button>
                         </div>
-                        {isBrowseMode && <AnalysisButton
-                          dark={themeMode === 'dark'}
-                          className={`analysis-game-btn mode-icon-btn ${analysisGameProgress ? 'active' : ''}`}
-                          onQuick={() => { void analyzeCurrentGame(); }} onDeep={() => { void analyzeCurrentGame(true); }}
-                          onReport={gameAnalysisReport && gameAnalysisReportMatchesLine ? () => setShowAnalysisReport(true) : undefined}
-                          benchmark={analysisBenchmarkElo} onBenchmarkChange={setAnalysisBenchmarkElo}
-                          context={analysisContext} onContextChange={updateAnalysisContext}
-                          running={Boolean(analysisGameProgress)}
-                          disabled={isTrainingActive || isSuddenDeathActive || isTreeEvalRunning || (!analysisGameProgress && mainLinePath.length < 2)}>
-                          {analysisGameProgress ? <StopIcon /> : <AnalysisIcon />}
-                        </AnalysisButton>}
                           <button
                             type="button"
                             className="next-missing-btn mode-icon-btn"
@@ -9887,6 +9862,17 @@ function App() {
               {isBrowseMode ? activeRepertoireName : `${activeSide}: ${activeRepertoireName}`}
             </div>
             <div className="options-grid">
+              {isBrowseMode && <AnalysisButton
+                dark={themeMode === 'dark'}
+                onQuick={() => { setIsOptionsOpen(false); void analyzeCurrentGame(); }}
+                onDeep={() => { setIsOptionsOpen(false); void analyzeCurrentGame(true); }}
+                onReport={gameAnalysisReport && gameAnalysisReportMatchesLine ? () => { setIsOptionsOpen(false); setShowAnalysisReport(true); } : undefined}
+                benchmark={analysisBenchmarkElo} onBenchmarkChange={setAnalysisBenchmarkElo}
+                context={analysisContext} onContextChange={updateAnalysisContext}
+                running={Boolean(analysisGameProgress)}
+                disabled={isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning || (!analysisGameProgress && mainLinePath.length < 2)}>
+                {analysisGameProgress ? 'Stop analysis' : 'Analyze game'}
+              </AnalysisButton>}
               <button
                 disabled={isTreeEvalRunning}
                 onClick={() => {

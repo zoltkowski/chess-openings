@@ -86,11 +86,6 @@ select {
   justify-content: center;
 }
 
-.analysis-game-btn .tab-icon {
-  width: 1.5rem;
-  height: 1.5rem;
-}
-
 .move-list .controls-row > button.replay-control-btn {
   width: 2.2rem;
   min-width: 2.2rem;
