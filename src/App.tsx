@@ -44,6 +44,7 @@ import {
   playerMistakePattern,
   playerMistakePriority,
   playerPositionLoss,
+  playerScoreForWhite,
   playerTrainingBonus,
   type PlayerAssessment,
   type PlayerAssessments,
@@ -8337,7 +8338,7 @@ function App() {
                   </div>}
                   {!opponentReviewOpen && playerAssessment && playerBestMove && playerBestSan && (
                     <button type="button" className="player-best-move" onClick={() => playPlayerMove(playerBestMove)}>
-                      {STOCKFISH_ENGINE_LABEL} best: {toFigurineSan(playerBestSan)} {playerAssessment.best.scoreText}
+                      {STOCKFISH_ENGINE_LABEL} best: {toFigurineSan(playerBestSan)} {playerScoreForWhite(playerAssessment.best.scoreText, activeSide)}
                     </button>
                   )}
                   {(!opponentReviewOpen || showingOpponentResult) && playerRows.length > 0 && (

@@ -12,6 +12,18 @@ export type PlayerAssessments = Record<string, PlayerAssessment>;
 export const PLAYER_MISTAKE_LOSS = 10;
 const SOUND_LOSS = 5;
 
+// Assessments, including cached ones, use the player's perspective for loss calculations.
+export function playerScoreForWhite(score: string, side: 'white' | 'black') {
+  if (side === 'white') return score;
+  const numeric = score.match(/^([+-]?)(\d+(?:\.\d+)?)$/);
+  if (numeric) {
+    if (Number(numeric[2]) === 0) return `+${numeric[2]}`;
+    return `${numeric[1] === '-' ? '+' : '-'}${numeric[2]}`;
+  }
+  const mate = score.match(/^([+-])M(\d+)$/i);
+  return mate ? `${mate[1] === '-' ? '+' : '-'}M${mate[2]}` : score;
+}
+
 export type PlayerMistakeFrequency = {
   recent: number;
   earlier: number;

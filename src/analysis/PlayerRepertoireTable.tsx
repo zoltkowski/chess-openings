@@ -1,4 +1,5 @@
 import { LichessStatsBar } from './LichessStatsBar';
+import { playerScoreForWhite } from './playerRepertoire';
 
 export type PlayerMoveRow = {
   uci: string;
@@ -33,7 +34,7 @@ export function PlayerRepertoireTable({ rows, complete, side, positionGames, onM
             <span className="player-repertoire-move">
               <strong>{row.san}</strong>
               {row.score && <span title={row.provisional ? 'Provisional Stockfish evaluation' : undefined}>
-                {row.provisional && '≈'}{row.score}
+                {row.provisional && '≈'}{playerScoreForWhite(row.score, side)}
               </span>}
               {row.note && <small>{row.note}</small>}
             </span>

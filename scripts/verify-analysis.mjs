@@ -28,6 +28,14 @@ function moduleUrl(file) {
 }
 const { classifyRatingSignal, compareMaiaLevels } = await import(moduleUrl('src/analysis/performanceModel.ts'));
 const { moveLoss, buildReport } = await import(moduleUrl('src/analysis/reportModel.ts'));
+const { playerScoreForWhite } = await import(moduleUrl('src/analysis/playerRepertoire.ts'));
+for (const [score, white, black] of [
+  ['+1.25', '+1.25', '-1.25'], ['-0.75', '-0.75', '+0.75'],
+  ['+0.00', '+0.00', '+0.00'], ['+M3', '+M3', '-M3'], ['-M4', '-M4', '+M4'], ['M0', 'M0', 'M0'],
+]) {
+  assert.equal(playerScoreForWhite(score, 'white'), white);
+  assert.equal(playerScoreForWhite(score, 'black'), black);
+}
 const { profileLevels } = await import(moduleUrl('src/analysis/decisionMetrics.ts'));
 const samples = (probabilities, levels = [1400,1800,2200]) => probabilities.map((probability,i) => ({rating:levels[i],probability}));
 const row = probabilities => ({ mover:'white',status:'complete',maiaStatus:'complete',lossPoints:0,
