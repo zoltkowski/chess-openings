@@ -4142,6 +4142,9 @@ function App() {
       try {
         top = (await query(engineMultiPv, 300)).candidates ?? [];
         if (!top.length) throw new Error('Stockfish returned no candidate moves.');
+        if (!signal.aborted) {
+          setMaiaStockfishComparison({ key: maiaComparisonKey, scores: new Map(), stockfishMoves: top, alternatives: [], pending: true });
+        }
         const stockfishMoves = new Set(top.map(candidate => candidate.uci));
         const union = [...new Set([...stockfishMoves, ...maiaMoves])];
         // A common root search scores both sets at the same depth.
@@ -6550,8 +6553,14 @@ function App() {
   const canToggleStockfishArrows = stockfishLoaded && engineRunning;
   const visibleEngineStatus =
     engineStatus === 'done' || engineStatus === 'stopped' || engineStatus === 'analyzing' ? '' : engineStatus;
-  const currentEngineEvalRaw = engineLines[0]?.scoreText ?? selectedNode.stockfishEval ?? null;
-  const currentEngineEval = selectedEngine === 'maia' ? null : currentEngineEvalRaw ? normalizeEvalSignText(currentEngineEvalRaw) : null;
+  const currentEngineEvalRaw = engineRunning
+    ? showMixedEngines
+      ? comparison?.stockfishMoves[0]?.scoreText ?? null
+      : selectedEngine === 'stockfish' && enginePvFen === maiaPositionFen
+        ? engineLines[0]?.scoreText ?? null
+        : null
+    : null;
+  const currentEngineEval = currentEngineEvalRaw ? normalizeEvalSignText(currentEngineEvalRaw) : null;
   const visibleEngineEval = currentEngineEval ? `(${currentEngineEval})` : '';
   const visibleLichessStatus = (() => {
     if (lichessData && lichessStatus === 'error') return '';
