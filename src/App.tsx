@@ -380,6 +380,7 @@ type PersistedSettingsState = {
   selectedRatings: number[];
   selectedModes: string[];
   showLichessOnTreeMoves: boolean;
+  lichessArrowsOpponentOnly: boolean;
   showTreeArrows: boolean;
   showLichessArrows: boolean;
   showStockfishArrows: boolean;
@@ -766,6 +767,7 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
     showStockfishArrows: parsed.showStockfishArrows ?? true,
     showMaiaArrows: parsed.showMaiaArrows ?? parsed.showStockfishArrows ?? true,
     combineCompactEngineArrows: parsed.combineCompactEngineArrows === true,
+    lichessArrowsOpponentOnly: parsed.lichessArrowsOpponentOnly === true,
     analysisBenchmarkElo: clampInt((parsed as Partial<PersistedSettingsState>).analysisBenchmarkElo, 1100, 3000, 1800),
     maiaStrengthElo: clampInt(
       (parsed as Partial<PersistedSettingsState>).maiaStrengthElo,
@@ -2284,6 +2286,7 @@ function App() {
   const [showTreeArrows, setShowTreeArrows] = useState(true);
   const [showLichessArrows, setShowLichessArrows] = useState(true);
   const [showLichessOnTreeMoves, setShowLichessOnTreeMoves] = useState(true);
+  const [lichessArrowsOpponentOnly, setLichessArrowsOpponentOnly] = useState(false);
   const [isLichessFilterOpen, setIsLichessFilterOpen] = useState(false);
   const [exampleReplay, setExampleReplay] = useState<ExampleReplayState | null>(null);
   const [exampleReplayLoadingId, setExampleReplayLoadingId] = useState<string | null>(null);
@@ -2530,6 +2533,18 @@ function App() {
   const hasOpponentReviewNodes = repertoireReviewNodes.some(({ node }) => toTurnColor(node.fen) !== activeSide);
   const analysisScratchFen = analysisScratchPosition?.fen ?? null;
   const selectedBoardFen = analysisScratchFen ?? browseMistakePosition?.node.fen ?? browseOpponentPosition?.fen ?? selectedNode.fen;
+  const hasSuddenDeathBoardOverride = Boolean(
+    suddenDeathCurrentFen &&
+      ((trainingSession && trainingSession.side === activeSide && trainingSession.suddenDeathMode) ||
+        (suddenDeathGameOver && suddenDeathGameOver.side === activeSide)),
+  );
+  const hasExampleReplayBoardOverride = Boolean(exampleReplay && exampleReplay.side === activeSide);
+  const boardFen = hasExampleReplayBoardOverride
+    ? (exampleReplay as ExampleReplayState).fens[(exampleReplay as ExampleReplayState).currentIndex]
+    : hasSuddenDeathBoardOverride
+      ? (suddenDeathCurrentFen as string)
+      : selectedBoardFen;
+  const showLichessArrowsOnBoard = showLichessArrows && (!lichessArrowsOpponentOnly || toTurnColor(boardFen) !== activeSide);
   const playerPositionKey = bookPositionFenKey(selectedBoardFen);
   const playerReviewKey = playerAssessmentKey(playerHandle, activeSide, playerPositionKey);
   const playerAssessment = playerAssessments[playerReviewKey];
@@ -2744,7 +2759,7 @@ function App() {
 
     const thresholdShare = lichessArrowThreshold / 100;
     const lichessArrows =
-      (!analysisScratchFen || isPlayerExplorer) && showLichessArrows && lichessTotal > 0
+      (!analysisScratchFen || isPlayerExplorer) && showLichessArrowsOnBoard && lichessTotal > 0
         ? (() => {
             const explorerMoves = isPlayerExplorer ? playerExplorerPositionMoves : (explorerData?.moves ?? [])
               .filter(move => !opponentFindingOnBoard || opponentFindingOnBoard.moves.has(move.uci));
@@ -2836,7 +2851,7 @@ function App() {
     maiaPositionFen,
     maiaResultKey,
     currentMaiaKey,
-    showLichessArrows,
+    showLichessArrowsOnBoard,
     maiaArrowsVisible,
     stockfishArrowsVisible,
     showLichessOnTreeMoves,
@@ -2869,6 +2884,7 @@ function App() {
     setSelectedRatings(persistedSettings.selectedRatings.length > 0 ? persistedSettings.selectedRatings : [2000, 2200, 2500]);
     setSelectedModes(persistedSettings.selectedModes.length > 0 ? persistedSettings.selectedModes : [...MODES]);
     setShowLichessOnTreeMoves(persistedSettings.showLichessOnTreeMoves);
+    setLichessArrowsOpponentOnly(persistedSettings.lichessArrowsOpponentOnly);
     setShowTreeArrows(persistedSettings.showTreeArrows);
     setShowLichessArrows(persistedSettings.showLichessArrows);
     setShowStockfishArrows(persistedSettings.showStockfishArrows);
@@ -3045,6 +3061,7 @@ function App() {
       selectedRatings,
       selectedModes,
       showLichessOnTreeMoves,
+      lichessArrowsOpponentOnly,
       showTreeArrows,
       showLichessArrows,
       showStockfishArrows,
@@ -3089,6 +3106,7 @@ function App() {
     selectedRatings,
     selectedModes,
     showLichessOnTreeMoves,
+    lichessArrowsOpponentOnly,
     showTreeArrows,
     showLichessArrows,
     showStockfishArrows,
@@ -5917,6 +5935,7 @@ function App() {
       selectedRatings,
       selectedModes,
       showLichessOnTreeMoves,
+      lichessArrowsOpponentOnly,
       showTreeArrows,
       showLichessArrows,
       showStockfishArrows,
@@ -6527,17 +6546,6 @@ function App() {
   const isTrainingActive = Boolean(
     trainingSession && trainingSession.side === activeSide && !trainingSession.suddenDeathMode,
   );
-  const hasSuddenDeathBoardOverride = Boolean(
-    suddenDeathCurrentFen &&
-      ((trainingSession && trainingSession.side === activeSide && trainingSession.suddenDeathMode) ||
-        (suddenDeathGameOver && suddenDeathGameOver.side === activeSide)),
-  );
-  const hasExampleReplayBoardOverride = Boolean(exampleReplay && exampleReplay.side === activeSide);
-  const boardFen = hasExampleReplayBoardOverride
-    ? (exampleReplay as ExampleReplayState).fens[(exampleReplay as ExampleReplayState).currentIndex]
-    : hasSuddenDeathBoardOverride
-      ? (suddenDeathCurrentFen as string)
-      : selectedBoardFen;
   const boardLastMove = hasExampleReplayBoardOverride
     ? (exampleReplay as ExampleReplayState).lastMoves[(exampleReplay as ExampleReplayState).currentIndex] ?? undefined
     : hasSuddenDeathBoardOverride
@@ -9610,6 +9618,10 @@ function App() {
             <label className="inline-check">
               <input type="checkbox" checked={showLichessOnTreeMoves} onChange={(event) => setShowLichessOnTreeMoves(event.target.checked)} />
               Show Lichess arrows for tree moves
+            </label>
+            <label className="inline-check">
+              <input type="checkbox" checked={lichessArrowsOpponentOnly} onChange={(event) => setLichessArrowsOpponentOnly(event.target.checked)} />
+              Show Lichess arrows only on the opponent’s turn
             </label>
           </div>
         </div>
