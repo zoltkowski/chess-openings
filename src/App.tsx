@@ -36,7 +36,10 @@ import { MaiaPopularityChart, MaiaPopularityControls } from './MaiaPopularity';
 import { useMaiaPopularity } from './useMaiaPopularity';
 import { PlayerRepertoireTable, type PlayerMoveRow } from './analysis/PlayerRepertoireTable';
 import { LichessStatsBar } from './analysis/LichessStatsBar';
-import { indexPlayerGameHistory, syncPlayerGameHistory, type PlayerGameHistory } from './analysis/playerGameHistory';
+import {
+  indexPlayerGameHistory, playerHistoryCovers, playerHistoryIndexIsCurrent, preprocessPlayerGameHistory,
+  syncPlayerGameHistory, type PlayerGameHistory,
+} from './analysis/playerGameHistory';
 import {
   PLAYER_MISTAKE_LOSS,
   hasPlayedMistake,
@@ -1168,6 +1171,17 @@ function repertoireBranchNodes(tree: MoveTree, rootId: string) {
   return nodes;
 }
 
+const historyPositionsByTree = new WeakMap<MoveTree, Set<string>>();
+
+function historyPositionsForTree(tree: MoveTree) {
+  let positions = historyPositionsByTree.get(tree);
+  if (!positions) {
+    positions = new Set(repertoireBranchNodes(tree, tree.rootId).map(node => bookPositionFenKey(node.fen)));
+    historyPositionsByTree.set(tree, positions);
+  }
+  return positions;
+}
+
 function BackIcon() {
   return (
     <TabIconBase>
@@ -2275,7 +2289,7 @@ function App() {
   const [playerHistoryError, setPlayerHistoryError] = useState('');
   const [playerHistoryRefresh, setPlayerHistoryRefresh] = useState(0);
   const playerHistoryRefreshHandledRef = useRef(0);
-  const playerHistoryJobRef = useRef<{ player: string; promise: Promise<PlayerGameHistory | null> } | null>(null);
+  const playerHistoryJobRef = useRef<{ player: string; ready: Promise<PlayerGameHistory | null> } | null>(null);
   const [playerSpeeds, setPlayerSpeeds] = useState<string[]>([...PLAYER_SPEEDS]);
   const [playerAssessments, setPlayerAssessments] = useState<PlayerAssessments>({});
   const [playerAssessmentRunning, setPlayerAssessmentRunning] = useState(false);
@@ -2625,6 +2639,14 @@ function App() {
 
   const historyPlayer = playerHandle.trim().toLowerCase();
   const savedPlayerHistory = playerHistory?.player === historyPlayer ? playerHistory.data : null;
+  const historyRepertoireKey = useMemo(() => {
+    const positions = new Set<string>();
+    for (const entry of [...repertoiresBySide.white, ...repertoiresBySide.black]) {
+      if (!repertoireHasMoves(entry.tree)) continue;
+      for (const fen of historyPositionsForTree(entry.tree)) positions.add(fen);
+    }
+    return JSON.stringify([...positions].sort());
+  }, [repertoiresBySide]);
   const getExplorerUrl = useCallback((fen: string, historyDates?: ExplorerDates, source = lichessSource) => {
     const params = new URLSearchParams({ fen: fullBoardFen(fen), variant: FIXED_VARIANT, color: activeSide });
     if (source === 'player') {
@@ -3461,23 +3483,44 @@ function App() {
     const controller = new AbortController();
     const { signal } = controller;
     const key = `player-game-history-v1:${historyPlayer}`;
+    const positions = new Set<string>(JSON.parse(historyRepertoireKey));
     const publish = (data: PlayerGameHistory) => {
       if (signal.aborted) return;
       setPlayerHistory(previous => {
         if (previous?.player !== historyPlayer) return { player: historyPlayer, data };
-        if (previous.data.syncedAt >= data.syncedAt) return previous;
-        const priorGames = previous.data.games;
-        const sameGames = priorGames.length === data.games.length && priorGames.every((game, i) => game.id === data.games[i].id);
-        return { player: historyPlayer, data: sameGames ? { ...data, games: priorGames } : data };
+        if (previous.data.syncedAt > data.syncedAt || (previous.data.syncedAt === data.syncedAt &&
+          (playerHistoryIndexIsCurrent(previous.data, positions) || !playerHistoryIndexIsCurrent(data, positions)))) return previous;
+        return { player: historyPlayer, data };
       });
+    };
+    const store = async (data: PlayerGameHistory) => {
+      signal.throwIfAborted();
+      let stored = data;
+      await idbUpdate<PlayerGameHistory>(key, previous => {
+        if (previous && (signal.aborted || previous.syncedAt > data.syncedAt)) stored = previous;
+        return stored;
+      });
+      signal.throwIfAborted();
+      publish(stored);
+      return stored;
     };
     const sync = (force: boolean, maxAge = PLAYER_HISTORY_SYNC_INTERVAL_MS) => {
       if (signal.aborted || playerHistoryJobRef.current || findMissingControllerRef.current) return;
       let saved: PlayerGameHistory | null = null;
+      let releaseHistory: (data: PlayerGameHistory | null) => void;
+      const ready = new Promise<PlayerGameHistory | null>(resolve => { releaseHistory = resolve; });
+      const job = { player: historyPlayer, ready };
+      playerHistoryJobRef.current = job;
       const run = async () => {
         saved = await idbGet<PlayerGameHistory>(key);
         signal.throwIfAborted();
         if (saved) publish(saved);
+        if (saved && !playerHistoryIndexIsCurrent(saved, positions)) {
+          setPlayerHistorySyncing(true);
+          setPlayerHistoryError('');
+          saved = await store(await preprocessPlayerGameHistory(saved, positions, signal));
+        }
+        if (saved) releaseHistory(saved);
         if (!force && saved && Date.now() - saved.syncedAt < maxAge) return saved;
         setPlayerHistorySyncing(true);
         setPlayerHistoryError('');
@@ -3493,27 +3536,21 @@ function App() {
           return response;
         });
         signal.throwIfAborted();
-        let stored = latest;
-        await idbUpdate<PlayerGameHistory>(key, previous => {
-          if (previous && previous.syncedAt > latest.syncedAt) stored = previous;
-          return stored;
-        });
-        publish(stored);
+        const stored = await store(await preprocessPlayerGameHistory(latest, positions, signal, saved ?? latest));
         if (force || !saved || stored.games.length !== saved.games.length ||
           stored.games.some((game, i) => game.id !== saved?.games[i]?.id)) setExplorerRefresh(value => value + 1);
         return stored;
       };
-      const job = { player: historyPlayer, promise: run().catch(error => {
+      void run().catch(error => {
         if (!signal.aborted) setPlayerHistoryError(getErrorMessage(error, 'Could not sync Lichess games.'));
         return saved;
-      }).finally(() => {
+      }).then(releaseHistory!).finally(() => {
         if (playerHistoryJobRef.current === job) playerHistoryJobRef.current = null;
         if (!signal.aborted) {
           if (force) playerHistoryRefreshHandledRef.current = playerHistoryRefresh;
           setPlayerHistorySyncing(false);
         }
-      }) };
-      playerHistoryJobRef.current = job;
+      });
     };
     setPlayerHistorySyncing(false);
     setPlayerHistoryError('');
@@ -3532,7 +3569,7 @@ function App() {
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, [hasHydratedAppState, historyPlayer, isLichessFilterOpen, lichessApiToken, playerHistoryRefresh,
-    registerLichessRateLimit, waitForLichessRateSlot]);
+    historyRepertoireKey, registerLichessRateLimit, waitForLichessRateSlot]);
 
   const ensureLichessResponseCacheLoaded = useCallback(async () => {
     if (lichessResponseCacheLoadedRef.current) return;
@@ -3806,17 +3843,22 @@ function App() {
   }, [getExplorerUrl, getCachedLichessResponse, requestExplorer]);
 
   const historyIndexRef = useRef<{
-    games: PlayerGameHistory['games'];
+    history: PlayerGameHistory;
     nodes: typeof repertoireReviewNodes;
+    includeReplies: boolean;
     side: Side;
     speeds: string[];
     modes: string[];
     query: Awaited<ReturnType<typeof indexPlayerGameHistory>>;
   } | null>(null);
-  const preparePersonalReviewQuery = async (signal: AbortSignal) => {
+  useEffect(() => {
+    if (historyIndexRef.current?.history !== savedPlayerHistory) historyIndexRef.current = null;
+  }, [savedPlayerHistory]);
+  const preparePersonalReviewQuery = async (signal: AbortSignal, includeReplies = false) => {
     let history = savedPlayerHistory;
+    const positions = new Set(repertoireReviewNodes.map(({ node }) => bookPositionFenKey(node.fen)));
     const job = playerHistoryJobRef.current;
-    if (!history && job?.player === historyPlayer) {
+    if (job?.player === historyPlayer && (!history || (!includeReplies && !playerHistoryCovers(history, positions)))) {
       let onAbort: () => void = () => {};
       const cancelled = new Promise<null>(resolve => {
         onAbort = () => resolve(null);
@@ -3824,22 +3866,23 @@ function App() {
       });
       try {
         signal.throwIfAborted();
-        history = await Promise.race([job.promise, cancelled]);
+        history = await Promise.race([job.ready, cancelled]) ?? history;
       } finally {
         signal.removeEventListener('abort', onAbort);
       }
     }
     signal.throwIfAborted();
     if (!history) return { fromHistory: false, query: (fen: string, dates?: ExplorerDates) => queryMistakeExplorer(fen, signal, dates) };
+    const preprocessed = !includeReplies && playerHistoryCovers(history, positions);
     const cached = historyIndexRef.current;
-    const index = cached?.games === history.games && cached.nodes === repertoireReviewNodes && cached.side === activeSide &&
+    const index = cached?.history === history && cached.nodes === repertoireReviewNodes && cached.side === activeSide &&
+      cached.includeReplies === includeReplies &&
       cached.speeds === playerSpeeds && cached.modes === selectedModes
       ? cached.query
-      : await indexPlayerGameHistory(history, new Set(repertoireReviewNodes.map(({ node }) => bookPositionFenKey(node.fen))),
-        activeSide, playerSpeeds, selectedModes, signal);
+      : await indexPlayerGameHistory(history, positions, activeSide, playerSpeeds, selectedModes, signal, includeReplies);
     signal.throwIfAborted();
-    historyIndexRef.current = {
-      games: history.games, nodes: repertoireReviewNodes, side: activeSide, speeds: playerSpeeds, modes: selectedModes, query: index,
+    historyIndexRef.current = preprocessed ? null : {
+      history, nodes: repertoireReviewNodes, includeReplies, side: activeSide, speeds: playerSpeeds, modes: selectedModes, query: index,
     };
     return {
       fromHistory: true,
@@ -5586,7 +5629,7 @@ function App() {
     setOpponentReview({ ...review, waitingForNext: true });
     await runExplorerSearch(async controller => {
       if (player) setPlayerSearchNote('Preparing your game history…');
-      const personal = player ? await preparePersonalReviewQuery(controller.signal) : null;
+      const personal = player ? await preparePersonalReviewQuery(controller.signal, true) : null;
       setOpponentReview(prev => prev && ({ ...prev, fromHistory: personal?.fromHistory }));
       for (let i = review.nextNode; i < review.nodes.length; i++) {
         const { node, prepared } = review.nodes[i];

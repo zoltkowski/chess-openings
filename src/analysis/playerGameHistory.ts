@@ -15,6 +15,11 @@ export type PlayerGameHistory = {
   syncedAt: number;
   oldestOngoing?: number;
   games: Game[];
+  reviewIndex?: {
+    version: 1;
+    positions: Set<string>;
+    postings: Postings;
+  };
 };
 
 type ExportedGame = {
@@ -74,6 +79,9 @@ export async function syncPlayerGameHistory(
     const color = playerId('white') === player ? 'white' : playerId('black') === player ? 'black' : undefined;
     if (!color) return;
     const { id, createdAt, speed, rated, winner, moves } = game;
+    const saved = games.get(id);
+    if (saved && saved.createdAt === createdAt && saved.color === color && saved.speed === speed &&
+      saved.rated === rated && saved.winner === winner && saved.moves === moves) return;
     games.set(id, { id, createdAt, speed, rated, winner, moves, color });
   };
   const decoder = new TextDecoder();
@@ -94,11 +102,165 @@ export async function syncPlayerGameHistory(
     await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
-  return { syncedAt, oldestOngoing, games: [...games.values()] };
+  const imported = [...games.values()];
+  const unchanged = previous && previous.games.length === imported.length &&
+    imported.every((game, index) => previous.games[index] === game);
+  return unchanged ? { ...previous, syncedAt, oldestOngoing } : { syncedAt, oldestOngoing, games: imported };
 }
 
-type Occurrence = Pick<Game, 'id' | 'createdAt' | 'winner' | 'speed'> & { uci: string; san: string };
 type MoveStats = { uci: string; san: string; white: number; draws: number; black: number; lastPlayedAt: number };
+type Posting = { san: string; games: number[] };
+// Store SAN once per position and move, and reference the game metadata by array offset.
+type Postings = Map<string, Map<string, Posting>>;
+type Dates = { since?: string; until?: string };
+
+export function playerHistoryCovers(history: PlayerGameHistory, positions: Iterable<string>) {
+  const index = history.reviewIndex;
+  if (index?.version !== 1) return false;
+  for (const fen of positions) if (!index.positions.has(fen)) return false;
+  return true;
+}
+
+export function playerHistoryIndexIsCurrent(history: PlayerGameHistory, positions: ReadonlySet<string>) {
+  return history.reviewIndex?.positions.size === positions.size && playerHistoryCovers(history, positions);
+}
+
+const pieceCount = (fen: string) => fen.split(' ', 1)[0].match(/[a-z]/gi)?.length ?? 0;
+const positionKey = (fen: string) => fen.split(' ', 4).join(' ');
+
+async function collectPostings(
+  games: Game[],
+  positions: ReadonlySet<string>,
+  includeReplies: boolean,
+  signal: AbortSignal,
+  shouldReplay: (game: Game, offset: number) => boolean,
+): Promise<Postings> {
+  signal.throwIfAborted();
+  const postings: Postings = new Map();
+  if (!positions.size) return postings;
+  let minimumPieces = 32;
+  for (const fen of positions) minimumPieces = Math.min(minimumPieces, pieceCount(fen));
+  let sliceStart = performance.now();
+  const chess = new Chess();
+  for (const [offset, game] of games.entries()) {
+    if (!shouldReplay(game, offset)) continue;
+    if (performance.now() - sliceStart >= 12) {
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      signal.throwIfAborted();
+      sliceStart = performance.now();
+    }
+    chess.reset();
+    let fen = positionKey(chess.fen());
+    let pieces = 32;
+    let afterRepertoirePosition = false;
+    const seen = new Set<string>();
+    for (const san of game.moves.trim().split(/\s+/)) {
+      if (!afterRepertoirePosition && pieces < minimumPieces) break;
+      const inRepertoire = positions.has(fen);
+      let move;
+      try {
+        move = chess.move(san);
+      } catch {
+        // Keep the valid prefix if a move in the export cannot be read.
+        break;
+      }
+      if ((inRepertoire || afterRepertoirePosition) && !seen.has(fen)) {
+        seen.add(fen);
+        let moves = postings.get(fen);
+        if (!moves) postings.set(fen, moves = new Map());
+        const uci = move.from + move.to + (move.promotion ?? '');
+        let posting = moves.get(uci);
+        if (!posting) moves.set(uci, posting = { san: move.san, games: [] });
+        posting.games.push(offset);
+      }
+      if (!includeReplies && inRepertoire && positions.size === 1) break;
+      afterRepertoirePosition = includeReplies && inRepertoire;
+      fen = positionKey(move.after);
+      if (move.captured) pieces--;
+    }
+  }
+  return postings;
+}
+
+export async function preprocessPlayerGameHistory(
+  history: PlayerGameHistory,
+  positions: ReadonlySet<string>,
+  signal: AbortSignal,
+  previous = history,
+): Promise<PlayerGameHistory> {
+  signal.throwIfAborted();
+  if (playerHistoryIndexIsCurrent(history, positions)) return history;
+
+  const priorIndex = playerHistoryCovers(previous, positions) ? previous.reviewIndex : undefined;
+  const coveredPositions = new Set(positions);
+  if (priorIndex && history.games === previous.games) {
+    const postings = new Map([...priorIndex.postings].filter(([fen]) => positions.has(fen)));
+    return { ...history, reviewIndex: { version: 1, positions: coveredPositions, postings } };
+  }
+  const retained = priorIndex ? new Map(history.games.map((game, offset) => [game, offset])) : null;
+  const oldOffsets = priorIndex ? previous.games.map(game => retained?.get(game) ?? -1) : [];
+  const indexed = new Set(oldOffsets.filter(offset => offset >= 0));
+
+  const additions = await collectPostings(history.games, coveredPositions, false, signal, (_, offset) => !indexed.has(offset));
+  if (priorIndex) {
+    const sameOffsets = oldOffsets.every((offset, oldOffset) => offset === oldOffset);
+    for (const [fen, priorMoves] of priorIndex.postings) {
+      if (!positions.has(fen)) continue;
+      const moves = additions.get(fen) ?? new Map<string, Posting>();
+      for (const [uci, prior] of priorMoves) {
+        const offsets = sameOffsets ? prior.games : prior.games.map(offset => oldOffsets[offset]).filter(offset => offset >= 0);
+        if (!offsets.length) continue;
+        const added = moves.get(uci);
+        moves.set(uci, added ? { san: prior.san, games: offsets.concat(added.games) } : { san: prior.san, games: offsets });
+      }
+      if (moves.size) additions.set(fen, moves);
+    }
+  }
+  return { ...history, reviewIndex: { version: 1, positions: coveredPositions, postings: additions } };
+}
+
+function gameMatches(game: Game, cutoff: number, color: Color, speeds: readonly string[], modes: readonly string[]) {
+  return game.createdAt >= cutoff && game.color === color && (!speeds.length || speeds.includes(game.speed)) &&
+    (!modes.length || modes.includes(game.rated ? 'rated' : 'casual'));
+}
+
+function createPlayerHistoryQuery(
+  history: PlayerGameHistory,
+  color: Color,
+  speeds: readonly string[],
+  modes: readonly string[],
+  postings = history.reviewIndex?.postings,
+) {
+  return (fen: string, dates: Dates = {}) => {
+    const cutoff = playerGameHistoryStart(Date.now());
+    const totals = { white: 0, draws: 0, black: 0 };
+    const moves: MoveStats[] = [];
+    const recent: { game: Game; uci: string }[] = [];
+    for (const [uci, posting] of postings?.get(fen) ?? []) {
+      const move = { uci, san: posting.san, white: 0, draws: 0, black: 0, lastPlayedAt: 0 };
+      for (const offset of posting.games) {
+        const game = history.games[offset];
+        if (!gameMatches(game, cutoff, color, speeds, modes)) continue;
+        if (dates.since || dates.until) {
+          const month = new Date(game.createdAt).toISOString().slice(0, 7);
+          if ((dates.since && month < dates.since) || (dates.until && month > dates.until)) continue;
+        }
+        const result = game.winner ?? 'draws';
+        totals[result]++;
+        move[result]++;
+        move.lastPlayedAt = Math.max(move.lastPlayedAt, game.createdAt);
+        if (recent.length < 8 || game.createdAt > recent[7].game.createdAt) {
+          const before = recent.findIndex(entry => game.createdAt > entry.game.createdAt);
+          recent.splice(before < 0 ? recent.length : before, 0, { game, uci });
+          if (recent.length > 8) recent.pop();
+        }
+      }
+      if (move.white || move.draws || move.black) moves.push(move);
+    }
+    const recentGames = recent.map(({ game: { id, createdAt, winner, speed }, uci }) => ({ id, createdAt, winner, speed, uci }));
+    return { ...totals, moves, recentGames };
+  };
+}
 
 export async function indexPlayerGameHistory(
   history: PlayerGameHistory,
@@ -109,58 +271,10 @@ export async function indexPlayerGameHistory(
   signal: AbortSignal,
   includeReplies = true,
 ) {
-  const index = new Map<string, Occurrence[]>();
-  const pieceCount = (fen: string) => fen.split(' ', 1)[0].match(/[a-z]/gi)?.length ?? 0;
-  let minimumPieces = 32;
-  for (const fen of positions) minimumPieces = Math.min(minimumPieces, pieceCount(fen));
-  let processed = 0;
+  signal.throwIfAborted();
+  if (!includeReplies && playerHistoryCovers(history, positions)) return createPlayerHistoryQuery(history, color, speeds, modes);
   const cutoff = playerGameHistoryStart(Date.now());
-  for (const game of history.games) {
-    if (game.createdAt < cutoff || game.color !== color || (speeds.length && !speeds.includes(game.speed)) ||
-      (modes.length && !modes.includes(game.rated ? 'rated' : 'casual'))) continue;
-    if (processed++ % 24 === 0) {
-      await new Promise<void>(resolve => setTimeout(resolve, 0));
-      signal.throwIfAborted();
-    }
-    const chess = new Chess();
-    const seen = new Set<string>();
-    let afterRepertoirePosition = false;
-    for (const san of game.moves.split(' ')) {
-      const fen = chess.fen().split(' ', 4).join(' ');
-      const inRepertoire = positions.has(fen);
-      if (!afterRepertoirePosition && pieceCount(fen) < minimumPieces) break;
-      const move = chess.move(san);
-      if ((inRepertoire || afterRepertoirePosition) && !seen.has(fen)) {
-        seen.add(fen);
-        const occurrences = index.get(fen) ?? [];
-        occurrences.push({ id: game.id, createdAt: game.createdAt, winner: game.winner, speed: game.speed,
-          uci: move.from + move.to + (move.promotion ?? ''), san: move.san });
-        index.set(fen, occurrences);
-      }
-      if (!includeReplies && inRepertoire && positions.size === 1) break;
-      // Reviews also check replies to departures at the end of a saved line.
-      afterRepertoirePosition = includeReplies && inRepertoire;
-    }
-  }
-
-  return (fen: string, dates: { since?: string; until?: string } = {}) => {
-    const totals = { white: 0, draws: 0, black: 0 };
-    const moves = new Map<string, MoveStats>();
-    const matchedGames: Occurrence[] = [];
-    for (const game of index.get(fen) ?? []) {
-      const month = new Date(game.createdAt).toISOString().slice(0, 7);
-      if ((dates.since && month < dates.since) || (dates.until && month > dates.until)) continue;
-      matchedGames.push(game);
-      const result = game.winner ?? 'draws';
-      totals[result]++;
-      const move = moves.get(game.uci) ?? {
-        uci: game.uci, san: game.san, white: 0, draws: 0, black: 0, lastPlayedAt: 0,
-      };
-      move[result]++;
-      move.lastPlayedAt = Math.max(move.lastPlayedAt, game.createdAt);
-      moves.set(move.uci, move);
-    }
-    const recentGames = matchedGames.sort((a, b) => b.createdAt - a.createdAt).slice(0, 8);
-    return { ...totals, moves: [...moves.values()], recentGames };
-  };
+  const postings = await collectPostings(history.games, positions, includeReplies, signal,
+    game => gameMatches(game, cutoff, color, speeds, modes));
+  return createPlayerHistoryQuery(history, color, speeds, modes, postings);
 }

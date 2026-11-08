@@ -37,6 +37,51 @@ for (const [score, white, black] of [
   assert.equal(playerScoreForWhite(score, 'black'), black);
 }
 const { profileLevels } = await import(moduleUrl('src/analysis/decisionMetrics.ts'));
+const { indexPlayerGameHistory, playerHistoryCovers, preprocessPlayerGameHistory, syncPlayerGameHistory } =
+  await import(moduleUrl('src/analysis/playerGameHistory.ts'));
+{
+  const signal = new AbortController().signal;
+  const chess = new Chess();
+  const start = chess.fen().split(' ', 4).join(' ');
+  chess.move('e4');
+  const afterE4 = chess.fen().split(' ', 4).join(' ');
+  const now = Date.now();
+  const game = { id: 'saved', createdAt: now - 2_000, color: 'white', speed: 'blitz', rated: true,
+    winner: 'black', moves: 'Nf3 Nf6 Ng1 Ng8 e4 e5' };
+  const legacy = { syncedAt: now - 1_000, games: [{ ...game, id: 'expired', createdAt: 1 }, game] };
+  const positions = new Set([start]);
+  const prepared = structuredClone(await preprocessPlayerGameHistory(legacy, positions, signal));
+  assert(playerHistoryCovers(prepared, positions));
+  assert(!playerHistoryCovers(prepared, [afterE4]), 'a position added to the repertoire needs backfill');
+  const exported = { ...game, variant: 'standard', status: 'mate', players: { white: { user: { id: 'test' } } } };
+  const imported = await syncPlayerGameHistory('test', prepared, signal, async () => new Response([
+    JSON.stringify(exported),
+    JSON.stringify({ ...exported, id: 'new', createdAt: now, winner: 'white', moves: 'e4 c5' }),
+  ].join('\n')));
+  assert.equal(imported.games[0], prepared.games[1], 'overlapping exports retain unchanged games');
+  const played = [];
+  const play = Chess.prototype.move;
+  Chess.prototype.move = function (move, ...options) {
+    played.push(move);
+    return play.call(this, move, ...options);
+  };
+  let updated;
+  try {
+    updated = await preprocessPlayerGameHistory(imported, positions, signal, prepared);
+  } finally {
+    Chess.prototype.move = play;
+  }
+  assert(played.includes('e4') && !played.includes('Nf3'), 'only new games are replayed during an incremental sync');
+  const query = await indexPlayerGameHistory(updated, positions, 'white', ['blitz'], ['rated'], signal, false);
+  const result = query(start);
+  assert.equal(result.black, 1);
+  assert.equal(result.white, 1);
+  assert.deepEqual(result.recentGames.map(({ id, uci }) => [id, uci]), [['new', 'e2e4'], ['saved', 'g1f3']]);
+  assert.equal(query(start, { until: '2000-01' }).moves.length, 0);
+  const expanded = await preprocessPlayerGameHistory(updated, new Set([start, afterE4]), signal);
+  const replies = await indexPlayerGameHistory(expanded, new Set([afterE4]), 'white', [], [], signal, false);
+  assert.deepEqual(replies(afterE4).moves.map(({ san }) => san), ['e5', 'c5']);
+}
 const samples = (probabilities, levels = [1400,1800,2200]) => probabilities.map((probability,i) => ({rating:levels[i],probability}));
 const row = probabilities => ({ mover:'white',status:'complete',maiaStatus:'complete',lossPoints:0,
   decisionWeight:1,significanceScore:1,profileProbabilities:samples(probabilities) });
