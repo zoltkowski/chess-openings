@@ -37,7 +37,7 @@ import { useMaiaPopularity } from './useMaiaPopularity';
 import { PlayerRepertoireTable, type PlayerMoveRow } from './analysis/PlayerRepertoireTable';
 import { LichessStatsBar } from './analysis/LichessStatsBar';
 import { CompactEngineArrowsButton } from './CompactEngineArrowsButton';
-import { useLongPressMenu } from './useLongPressMenu';
+import { isTouchContextMenu, useLongPressMenu } from './useLongPressMenu';
 import { mainMoveId, repertoireMoveStatus, setRepertoireMoveStatus, trainingMoveIds,
   type MoveNode, type MoveTree, type RepertoireMoveStatus } from './repertoireMoves';
 import {
@@ -2452,19 +2452,11 @@ function App() {
   const treeOptionLongPressHandledNodeRef = useRef<string | null>(null);
   const inlineMoveLongPressTimeoutRef = useRef<number | null>(null);
   const inlineMoveLongPressHandledNodeRef = useRef<string | null>(null);
-  const stockfishButtonLongPressTimeoutRef = useRef<number | null>(null);
-  const stockfishButtonLongPressHandledRef = useRef(false);
   const [isStockfishQuickOpen, setIsStockfishQuickOpen] = useState(false);
   const [isTrainingStatsMenuOpen, setIsTrainingStatsMenuOpen] = useState(false);
   const [isSuddenDeathSettingsOpen, setIsSuddenDeathSettingsOpen] = useState(false);
   const [isMoveToolsOpen, setIsMoveToolsOpen] = useState(false);
   const [isLichessArrowOptionsOpen, setIsLichessArrowOptionsOpen] = useState(false);
-  const dbButtonLongPressTimeoutRef = useRef<number | null>(null);
-  const dbButtonLongPressHandledRef = useRef(false);
-  const suddenDeathButtonLongPressTimeoutRef = useRef<number | null>(null);
-  const suddenDeathButtonLongPressHandledRef = useRef(false);
-  const movesButtonLongPressTimeoutRef = useRef<number | null>(null);
-  const movesButtonLongPressHandledRef = useRef(false);
   const findMissingSearchAutoNavigationRef = useRef(false);
   const [isFindMissingSearchRunning, setIsFindMissingSearchRunning] = useState(false);
   const lichessRateLimitedUntilRef = useRef(0);
@@ -7996,6 +7988,13 @@ function App() {
     goBackOneMove();
   };
 
+  const handleBackContextMenu: MouseEventHandler<HTMLButtonElement> = (event) => {
+    event.preventDefault();
+    if (isTouchContextMenu(event.nativeEvent) || !canGoBack) return;
+    handleBackPointerEnd();
+    goBackToPreviousBranchMove();
+  };
+
   const goForward = (toEnd = false) => {
     if (!canGoForward || isTreeEvalRunning) return;
     const nextNode = displayedMovePath[toEnd ? displayedMovePath.length - 1 : selectedMoveIndex + 1];
@@ -8033,148 +8032,45 @@ function App() {
     goForward();
   };
 
+  const handleForwardContextMenu: MouseEventHandler<HTMLButtonElement> = (event) => {
+    event.preventDefault();
+    if (isTouchContextMenu(event.nativeEvent)) return;
+    clearForwardLongPress();
+    goForward(true);
+  };
+
   const trainButtonMenu = useLongPressMenu(() => {
     setIsTrainingStatsMenuOpen(true);
     setIsMoveToolsOpen(false);
   }, () => startTraining());
 
-  const clearSuddenDeathButtonLongPress = () => {
-    if (suddenDeathButtonLongPressTimeoutRef.current !== null) {
-      window.clearTimeout(suddenDeathButtonLongPressTimeoutRef.current);
-      suddenDeathButtonLongPressTimeoutRef.current = null;
-    }
-  };
-
-  const handleSuddenDeathButtonPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    clearSuddenDeathButtonLongPress();
-    suddenDeathButtonLongPressHandledRef.current = false;
-    suddenDeathButtonLongPressTimeoutRef.current = window.setTimeout(() => {
-      suddenDeathButtonLongPressHandledRef.current = true;
-      setPortraitTab('moves');
-      setIsSuddenDeathSettingsOpen(true);
-      setIsTrainingStatsMenuOpen(false);
-      setIsMoveToolsOpen(false);
-    }, 420);
-  };
-
-  const handleSuddenDeathButtonPointerEnd = () => {
-    clearSuddenDeathButtonLongPress();
-    if (suddenDeathButtonLongPressHandledRef.current) {
-      window.setTimeout(() => {
-        suddenDeathButtonLongPressHandledRef.current = false;
-      }, 0);
-    }
-  };
-
-  const handleSuddenDeathButtonClick: MouseEventHandler<HTMLButtonElement> = (event) => {
-    if (suddenDeathButtonLongPressHandledRef.current) {
-      event.preventDefault();
-      suddenDeathButtonLongPressHandledRef.current = false;
-      return;
-    }
-    toggleSuddenDeathMode();
-  };
-
-  const clearMovesButtonLongPress = () => {
-    if (movesButtonLongPressTimeoutRef.current !== null) {
-      window.clearTimeout(movesButtonLongPressTimeoutRef.current);
-      movesButtonLongPressTimeoutRef.current = null;
-    }
-  };
-
-  const handleLichessArrowPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    clearMovesButtonLongPress();
-    movesButtonLongPressHandledRef.current = false;
-    movesButtonLongPressTimeoutRef.current = window.setTimeout(() => {
-      movesButtonLongPressHandledRef.current = true;
-      setIsLichessArrowOptionsOpen(true);
-    }, 420);
-  };
-
-  const handleLichessArrowPointerEnd = () => {
-    clearMovesButtonLongPress();
-  };
-
-  const handleLichessArrowClick: MouseEventHandler<HTMLButtonElement> = (event) => {
-    if (movesButtonLongPressHandledRef.current) {
-      event.preventDefault();
-      movesButtonLongPressHandledRef.current = false;
-      return;
-    }
-    setShowLichessArrows((prev) => !prev);
-  };
-
-  const clearDbButtonLongPress = () => {
-    if (dbButtonLongPressTimeoutRef.current !== null) {
-      window.clearTimeout(dbButtonLongPressTimeoutRef.current);
-      dbButtonLongPressTimeoutRef.current = null;
-    }
-  };
-
-  const handlePortraitDbPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    clearDbButtonLongPress();
-    dbButtonLongPressHandledRef.current = false;
-    dbButtonLongPressTimeoutRef.current = window.setTimeout(() => {
-      dbButtonLongPressHandledRef.current = true;
-      setIsLichessFilterOpen(true);
-    }, 420);
-  };
-
-  const handlePortraitDbPointerEnd = () => {
-    clearDbButtonLongPress();
-  };
-
-  const handlePortraitDbClick: MouseEventHandler<HTMLButtonElement> = (event) => {
-    if (dbButtonLongPressHandledRef.current) {
-      event.preventDefault();
-      dbButtonLongPressHandledRef.current = false;
-      return;
-    }
-    setPortraitTab('lichess');
-  };
-
-  const clearStockfishButtonLongPress = () => {
-    if (stockfishButtonLongPressTimeoutRef.current !== null) {
-      window.clearTimeout(stockfishButtonLongPressTimeoutRef.current);
-      stockfishButtonLongPressTimeoutRef.current = null;
-    }
-  };
-
-  const handlePortraitStockfishPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    clearStockfishButtonLongPress();
-    stockfishButtonLongPressHandledRef.current = false;
-    stockfishButtonLongPressTimeoutRef.current = window.setTimeout(() => {
-      stockfishButtonLongPressHandledRef.current = true;
-      setIsStockfishQuickOpen(true);
-    }, 420);
-  };
-
-  const handlePortraitStockfishPointerEnd = () => {
-    clearStockfishButtonLongPress();
-  };
-
-  const handlePortraitStockfishClick: MouseEventHandler<HTMLButtonElement> = (event) => {
-    if (stockfishButtonLongPressHandledRef.current) {
-      event.preventDefault();
-      stockfishButtonLongPressHandledRef.current = false;
-      return;
-    }
-    setPortraitTab('stockfish');
-  };
+  const suddenDeathMenu = useLongPressMenu(() => {
+    setPortraitTab('moves');
+    setIsSuddenDeathSettingsOpen(true);
+    setIsTrainingStatsMenuOpen(false);
+    setIsMoveToolsOpen(false);
+  }, toggleSuddenDeathMode, 420);
+  const lichessArrowMenu = useLongPressMenu(
+    () => setIsLichessArrowOptionsOpen(true),
+    () => setShowLichessArrows(prev => !prev),
+    420,
+  );
+  const lichessTabMenu = useLongPressMenu(
+    () => setIsLichessFilterOpen(true),
+    () => setPortraitTab('lichess'),
+    420,
+  );
+  const aiTabMenu = useLongPressMenu(
+    () => setIsStockfishQuickOpen(true),
+    () => setPortraitTab('stockfish'),
+    420,
+  );
 
   useEffect(
     () => () => {
       clearBackLongPress();
       clearTreeOptionLongPress();
       clearInlineMoveLongPress();
-      clearDbButtonLongPress();
-      clearStockfishButtonLongPress();
-      clearSuddenDeathButtonLongPress();
-      clearMovesButtonLongPress();
     },
     [],
   );
@@ -8316,12 +8212,7 @@ function App() {
       <button
         type="button"
         className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-lichess arrow-options-dot ${showLichessArrows ? 'active' : ''}`}
-        onClick={handleLichessArrowClick}
-        onPointerDown={handleLichessArrowPointerDown}
-        onPointerUp={handleLichessArrowPointerEnd}
-        onPointerCancel={handleLichessArrowPointerEnd}
-        onPointerLeave={handleLichessArrowPointerEnd}
-        onContextMenu={(event) => { event.preventDefault(); movesButtonLongPressHandledRef.current = true; clearMovesButtonLongPress(); setIsLichessArrowOptionsOpen(true); }}
+        {...lichessArrowMenu}
         aria-label="Toggle Lichess arrows"
         title="Toggle Lichess arrows (hold for options)"
       />
@@ -8841,11 +8732,7 @@ function App() {
                     <button
                       type="button"
                       className={`long-pressable-btn ${portraitTab === 'lichess' ? 'active' : ''}`}
-                      onClick={handlePortraitDbClick}
-                      onPointerDown={handlePortraitDbPointerDown}
-                      onPointerUp={handlePortraitDbPointerEnd}
-                      onPointerCancel={handlePortraitDbPointerEnd}
-                      onPointerLeave={handlePortraitDbPointerEnd}
+                      {...lichessTabMenu}
                       aria-label="Lichess"
                       title="Lichess (long press: filters)"
                     >
@@ -8854,11 +8741,7 @@ function App() {
                     <button
                       type="button"
                       className={`long-pressable-btn ${portraitTab === 'stockfish' ? 'active' : ''}`}
-                      onClick={handlePortraitStockfishClick}
-                      onPointerDown={handlePortraitStockfishPointerDown}
-                      onPointerUp={handlePortraitStockfishPointerEnd}
-                      onPointerCancel={handlePortraitStockfishPointerEnd}
-                      onPointerLeave={handlePortraitStockfishPointerEnd}
+                      {...aiTabMenu}
                       aria-label="AI"
                       title="AI (long press: options)"
                     >
@@ -8895,11 +8778,7 @@ function App() {
                         ? 'active sudden-death-toggle-btn mode-icon-btn has-submenu-dot'
                         : 'sudden-death-toggle-btn mode-icon-btn has-submenu-dot'
                     }
-                    onClick={handleSuddenDeathButtonClick}
-                    onPointerDown={handleSuddenDeathButtonPointerDown}
-                    onPointerUp={handleSuddenDeathButtonPointerEnd}
-                    onPointerCancel={handleSuddenDeathButtonPointerEnd}
-                    onPointerLeave={handleSuddenDeathButtonPointerEnd}
+                    {...suddenDeathMenu}
                     aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
                     title={isSuddenDeathActive ? 'Restart sudden death round (long press: options)' : 'Start sudden death training (long press: options)'}
                     disabled={suddenDeathThinking}
@@ -8944,6 +8823,7 @@ function App() {
                       type="button"
                       className="portrait-back-btn long-pressable-btn"
                       onClick={handleBackClick}
+                      onContextMenu={handleBackContextMenu}
                       onPointerDown={handleBackPointerDown}
                       onPointerUp={handleBackPointerEnd}
                       onPointerCancel={handleBackPointerEnd}
@@ -9194,6 +9074,7 @@ function App() {
                           <button
                             className="back-btn"
                             onClick={handleBackClick}
+                            onContextMenu={handleBackContextMenu}
                             onPointerDown={handleBackPointerDown}
                             onPointerUp={handleBackPointerEnd}
                             onPointerCancel={handleBackPointerEnd}
@@ -9238,6 +9119,7 @@ function App() {
                             type="button"
                             className="review-forward-btn mode-icon-btn has-submenu-dot"
                             onClick={handleForwardClick}
+                            onContextMenu={handleForwardContextMenu}
                             onPointerDown={handleForwardPointerDown}
                             onPointerUp={clearForwardLongPress}
                             onPointerCancel={clearForwardLongPress}
@@ -9268,10 +9150,10 @@ function App() {
                             </button>
                             <button
                               type="button"
-                              className="sudden-death-toggle-btn mode-icon-btn desktop-only"
-                              onClick={handleSuddenDeathButtonClick}
+                              className="sudden-death-toggle-btn mode-icon-btn has-submenu-dot desktop-only"
+                              {...suddenDeathMenu}
                               aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
-                              title={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
+                              title={isSuddenDeathActive ? 'Restart sudden death round (long press: options)' : 'Start sudden death training (long press: options)'}
                               disabled={suddenDeathThinking}
                             >
                               <SuddenDeathIcon />
