@@ -37,7 +37,8 @@ for (const [score, white, black] of [
   assert.equal(playerScoreForWhite(score, 'black'), black);
 }
 const { profileLevels } = await import(moduleUrl('src/analysis/decisionMetrics.ts'));
-const { indexPlayerGameHistory, playerHistoryCovers, preprocessPlayerGameHistory, syncPlayerGameHistory } =
+const { indexPlayerGameHistory, playerGameHistoryStart, playerHistoryCovers, playerRepertoireDeviations,
+  preprocessPlayerGameHistory, syncPlayerGameHistory } =
   await import(moduleUrl('src/analysis/playerGameHistory.ts'));
 {
   const signal = new AbortController().signal;
@@ -81,6 +82,13 @@ const { indexPlayerGameHistory, playerHistoryCovers, preprocessPlayerGameHistory
   const expanded = await preprocessPlayerGameHistory(updated, new Set([start, afterE4]), signal);
   const replies = await indexPlayerGameHistory(expanded, new Set([afterE4]), 'white', [], [], signal, false);
   assert.deepEqual(replies(afterE4).moves.map(({ san }) => san), ['e5', 'c5']);
+  const repertoire = [[start, new Set(['e2e4'])], [afterE4, new Set()]];
+  assert.deepEqual([...playerRepertoireDeviations(expanded, repertoire, 'white', ['blitz'], ['rated'], now - 3_000)],
+    [[start, ['g1f3']]], 'only the player’s own moves outside the loaded repertoire are marked');
+  assert.equal(playerRepertoireDeviations(expanded, repertoire, 'white', [], [], now - 1_000).size, 0);
+  assert.deepEqual(query(start, { sinceTimestamp: now - 1_000 }).moves.map(move => move.uci), ['e2e4']);
+  assert.equal(playerGameHistoryStart(Date.UTC(2024, 2, 31), 1), Date.UTC(2024, 1, 29));
+  assert.equal(playerGameHistoryStart(Date.UTC(2024, 1, 29)), Date.UTC(2023, 1, 28));
 }
 const samples = (probabilities, levels = [1400,1800,2200]) => probabilities.map((probability,i) => ({rating:levels[i],probability}));
 const row = probabilities => ({ mover:'white',status:'complete',maiaStatus:'complete',lossPoints:0,

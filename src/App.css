@@ -2399,6 +2399,19 @@ select {
 .app.theme-dark .move-inline-maia-tag.above { color: #d8b4fe; background: #3b2455; }
 .app.theme-dark .move-inline-maia-tag.below { color: #fca5a5; background: #4a2429; }
 
+.move-inline-item.missed-in-games > span:not(.move-inline-prefix):not(.move-inline-maia-tag),
+.tree-option-btn.missed-in-games {
+  color: #b91c1c;
+}
+
+.app.theme-dark .move-inline-item.missed-in-games > span:not(.move-inline-prefix):not(.move-inline-maia-tag),
+.app.theme-dark .tree-option-btn.missed-in-games {
+  color: #f87171;
+}
+
+.find-mistakes-btn.has-submenu-dot { touch-action: manipulation; }
+.find-mistakes-btn[aria-disabled="true"] { opacity: 0.55; }
+
 .app.theme-dark .modal-backdrop {
   background: rgba(2, 6, 23, 0.7);
 }

@@ -37,9 +37,10 @@ import { useMaiaPopularity } from './useMaiaPopularity';
 import { PlayerRepertoireTable, type PlayerMoveRow } from './analysis/PlayerRepertoireTable';
 import { LichessStatsBar } from './analysis/LichessStatsBar';
 import { CompactEngineArrowsButton } from './CompactEngineArrowsButton';
+import { useLongPressMenu } from './useLongPressMenu';
 import {
-  indexPlayerGameHistory, playerHistoryCovers, playerHistoryIndexIsCurrent, preprocessPlayerGameHistory,
-  syncPlayerGameHistory, type PlayerGameHistory,
+  indexPlayerGameHistory, playerGameHistoryStart, playerHistoryCovers, playerHistoryIndexIsCurrent,
+  playerRepertoireDeviations, preprocessPlayerGameHistory, syncPlayerGameHistory, type PlayerGameHistory, type PlayerHistoryDates,
 } from './analysis/playerGameHistory';
 import {
   PLAYER_MISTAKE_LOSS,
@@ -56,7 +57,9 @@ import {
 
 type Side = 'white' | 'black';
 type LichessSource = 'lichess' | 'masters' | 'player';
-type ExplorerDates = { since?: string; until?: string };
+type ExplorerDates = PlayerHistoryDates;
+const MISTAKE_HISTORY_WINDOWS = [1, 3, 6, 12] as const;
+type MistakeHistoryMonths = typeof MISTAKE_HISTORY_WINDOWS[number];
 type DateRange = '1m' | '2m' | '3m' | '6m' | '1y' | '3y' | '5y' | '10y' | '20y' | '30y' | '50y' | null;
 type ThemeMode = 'light' | 'dark';
 type EngineChoice = 'stockfish' | 'maia';
@@ -248,6 +251,7 @@ type MistakeReviewPosition = {
   recentGames: number;
   earlierGames: number;
   recentSince: string;
+  sinceMonth: string;
   fromHistory: boolean;
 };
 
@@ -381,6 +385,8 @@ type PersistedSettingsState = {
   selectedModes: string[];
   showLichessOnTreeMoves: boolean;
   lichessArrowsOpponentOnly: boolean;
+  showMistakeArrows: boolean;
+  mistakeHistoryMonths: MistakeHistoryMonths;
   showTreeArrows: boolean;
   showLichessArrows: boolean;
   showStockfishArrows: boolean;
@@ -768,6 +774,8 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
     showMaiaArrows: parsed.showMaiaArrows ?? parsed.showStockfishArrows ?? true,
     combineCompactEngineArrows: parsed.combineCompactEngineArrows === true,
     lichessArrowsOpponentOnly: parsed.lichessArrowsOpponentOnly === true,
+    showMistakeArrows: parsed.showMistakeArrows === true,
+    mistakeHistoryMonths: MISTAKE_HISTORY_WINDOWS.includes(parsed.mistakeHistoryMonths) ? parsed.mistakeHistoryMonths : 12,
     analysisBenchmarkElo: clampInt((parsed as Partial<PersistedSettingsState>).analysisBenchmarkElo, 1100, 3000, 1800),
     maiaStrengthElo: clampInt(
       (parsed as Partial<PersistedSettingsState>).maiaStrengthElo,
@@ -2287,6 +2295,10 @@ function App() {
   const [showLichessArrows, setShowLichessArrows] = useState(true);
   const [showLichessOnTreeMoves, setShowLichessOnTreeMoves] = useState(true);
   const [lichessArrowsOpponentOnly, setLichessArrowsOpponentOnly] = useState(false);
+  const [showMistakeArrows, setShowMistakeArrows] = useState(false);
+  const [mistakeHistoryMonths, setMistakeHistoryMonths] = useState<MistakeHistoryMonths>(12);
+  const [isTreeArrowOptionsOpen, setIsTreeArrowOptionsOpen] = useState(false);
+  const [isMistakeHistoryOptionsOpen, setIsMistakeHistoryOptionsOpen] = useState(false);
   const [isLichessFilterOpen, setIsLichessFilterOpen] = useState(false);
   const [exampleReplay, setExampleReplay] = useState<ExampleReplayState | null>(null);
   const [exampleReplayLoadingId, setExampleReplayLoadingId] = useState<string | null>(null);
@@ -2667,6 +2679,15 @@ function App() {
 
   const historyPlayer = playerHandle.trim().toLowerCase();
   const savedPlayerHistory = playerHistory?.player === historyPlayer ? playerHistory.data : null;
+  const repertoireDeviations = useMemo(() => {
+    if (!showMistakeArrows || isBrowseMode || !savedPlayerHistory?.reviewIndex) return null;
+    const positions = repertoireReviewNodes.map(({ node, prepared }) => [bookPositionFenKey(node.fen), prepared] as const);
+    return playerRepertoireDeviations(savedPlayerHistory, positions, activeSide, playerSpeeds, selectedModes,
+      playerGameHistoryStart(Date.now(), mistakeHistoryMonths));
+  }, [showMistakeArrows, isBrowseMode, savedPlayerHistory, repertoireReviewNodes, activeSide, playerSpeeds,
+    selectedModes, mistakeHistoryMonths]);
+  const currentDeviations = boardFen === selectedNode.fen && !analysisScratchFen
+    ? repertoireDeviations?.get(bookPositionFenKey(selectedNode.fen)) : undefined;
   const historyRepertoireKey = useMemo(() => {
     const positions = new Set<string>();
     for (const entry of [...repertoiresBySide.white, ...repertoiresBySide.black]) {
@@ -2756,6 +2777,10 @@ function App() {
           .filter((value): value is [Key, Key] => Boolean(value))
           .map(([orig, dest]) => ({ orig, dest, brush: 'green' }))
       : [];
+    const mistakeArrows = (currentDeviations ?? []).flatMap<DrawShape>(uci => {
+      const move = parseUciMove(uci);
+      return move ? [{ orig: move[0], dest: move[1], brush: 'red' }] : [];
+    });
 
     const thresholdShare = lichessArrowThreshold / 100;
     const lichessArrows =
@@ -2830,13 +2855,14 @@ function App() {
       }];
     });
 
-    return softenOverlappingArrows([...treeArrows, ...lichessArrows, ...maiaArrows, ...stockfishArrows]);
+    return softenOverlappingArrows([...treeArrows, ...lichessArrows, ...maiaArrows, ...stockfishArrows, ...mistakeArrows]);
   }, [
     reviewPosition,
     reviewPositionOnBoard,
     opponentFindingOnBoard,
     displayedChildNodes,
     showTreeArrows,
+    currentDeviations,
     explorerData,
     isPlayerExplorer,
     playerExplorerPositionMoves,
@@ -2885,6 +2911,8 @@ function App() {
     setSelectedModes(persistedSettings.selectedModes.length > 0 ? persistedSettings.selectedModes : [...MODES]);
     setShowLichessOnTreeMoves(persistedSettings.showLichessOnTreeMoves);
     setLichessArrowsOpponentOnly(persistedSettings.lichessArrowsOpponentOnly);
+    setShowMistakeArrows(persistedSettings.showMistakeArrows);
+    setMistakeHistoryMonths(persistedSettings.mistakeHistoryMonths);
     setShowTreeArrows(persistedSettings.showTreeArrows);
     setShowLichessArrows(persistedSettings.showLichessArrows);
     setShowStockfishArrows(persistedSettings.showStockfishArrows);
@@ -3062,6 +3090,8 @@ function App() {
       selectedModes,
       showLichessOnTreeMoves,
       lichessArrowsOpponentOnly,
+      showMistakeArrows,
+      mistakeHistoryMonths,
       showTreeArrows,
       showLichessArrows,
       showStockfishArrows,
@@ -3107,6 +3137,8 @@ function App() {
     selectedModes,
     showLichessOnTreeMoves,
     lichessArrowsOpponentOnly,
+    showMistakeArrows,
+    mistakeHistoryMonths,
     showTreeArrows,
     showLichessArrows,
     showStockfishArrows,
@@ -3941,7 +3973,7 @@ function App() {
       const countsBySince = new Map<number, Set<string>>();
       for (const move of missing) {
         // Query the original position: counting the resulting position would include other move orders.
-        let lower = move.recent ? recentSince : 2000 * 12;
+        let lower = Math.max(monthNumber(reviewPosition.sinceMonth), move.recent ? recentSince : 0);
         let upper = move.recent ? currentMonth : recentSince - 1;
         while (lower < upper) {
           const mid = Math.floor((lower + upper + 1) / 2);
@@ -5761,12 +5793,15 @@ function App() {
         setPlayerSearchNote('Preparing your game history…');
         const { query, fromHistory } = await preparePersonalReviewQuery(signal);
         const now = new Date();
+        const sinceTimestamp = playerGameHistoryStart(now.getTime(), mistakeHistoryMonths);
+        const sinceMonth = new Date(sinceTimestamp).toISOString().slice(0, 7);
+        const dates = { since: sinceMonth, sinceTimestamp };
         const recentSince = monthKey(now.getUTCFullYear() * 12 + now.getUTCMonth() - 2);
         for (let i = review.nextNode; i < review.nodes.length; i++) {
           signal.throwIfAborted();
           const { node, prepared } = review.nodes[i];
           setPlayerSearchNote('Checking position ' + (i + 1) + ' / ' + review.nodes.length + '…');
-          const data = await query(node.fen);
+          const data = await query(node.fen, dates);
           const all = new Map(playerExplorerMoves(node.fen, data.moves).map(move => [move.uci, move]));
           const deviations = [...all.values()].filter(move => !prepared.has(move.uci) && explorerGameCount(move) > 0);
           if (deviations.length) {
@@ -5775,7 +5810,7 @@ function App() {
             const assessment = await withPlayerEngine(controller, () => assessPlayerPosition(node.fen, counts, signal, true));
             const mistakes = deviations.filter(move => (assessment.moves[move.uci]?.confirmedLoss ?? 0) >= PLAYER_MISTAKE_LOSS);
             if (mistakes.length) {
-              const recentData = await query(node.fen, { since: recentSince });
+              const recentData = recentSince <= sinceMonth ? data : await query(node.fen, { ...dates, since: recentSince });
               const recent = new Map(playerExplorerMoves(node.fen, recentData.moves).map(move => [move.uci, explorerGameCount(move)]));
               const latestByRawMove = new Map<string, string>();
               for (const game of data.recentGames ?? []) {
@@ -5802,7 +5837,7 @@ function App() {
               };
               const recentGames = Math.min(explorerGameCount(data), explorerGameCount(recentData));
               const position: MistakeReviewPosition = {
-                node, recentSince, recentGames, earlierGames: explorerGameCount(data) - recentGames, fromHistory,
+                node, recentSince, sinceMonth, recentGames, earlierGames: explorerGameCount(data) - recentGames, fromHistory,
                 moves: [
                   ...[...prepared].map(uci => makeRow(uci, true)),
                   ...mistakes.map(move => makeRow(move.uci, false))
@@ -5936,6 +5971,8 @@ function App() {
       selectedModes,
       showLichessOnTreeMoves,
       lichessArrowsOpponentOnly,
+      showMistakeArrows,
+      mistakeHistoryMonths,
       showTreeArrows,
       showLichessArrows,
       showStockfishArrows,
@@ -6930,6 +6967,7 @@ function App() {
         prefix: fenToChess(displayedMovePath[index].fen).turn() === 'w' || index === 0
           ? formatMovePrefix(fenToChess(displayedMovePath[index].fen)) : '',
         hasAlternatives: (node.children?.length ?? 0) > 1,
+        missedInGames: repertoireDeviations?.has(bookPositionFenKey(displayedMovePath[index].fen)) ?? false,
         annotation,
         annotationTitle,
         categoryClass,
@@ -6937,7 +6975,7 @@ function App() {
         selected: selectedNode.id === node.id,
       };
       }),
-    [displayedMovePath, displayedBookMoves, gameAnalysisReportMatchesLine, gameAnalysisReport, selectedNode.id],
+    [displayedMovePath, displayedBookMoves, gameAnalysisReportMatchesLine, gameAnalysisReport, selectedNode.id, repertoireDeviations],
   );
   useLayoutEffect(() => {
     if (!isBrowseMode || isTrainingActive || analysisGameProgress) return;
@@ -8249,6 +8287,17 @@ function App() {
     </div>
   );
 
+  const treeArrowMenu = useLongPressMenu(
+    () => setIsTreeArrowOptionsOpen(true),
+    () => setShowTreeArrows(prev => !prev),
+  );
+  const mistakeHistoryMenu = useLongPressMenu(
+    () => setIsMistakeHistoryOptionsOpen(true),
+    () => {
+      if (mistakeReview) closeMistakeReview();
+      else if (canFindCommonMistakes) void findCommonMistakes();
+    },
+  );
   const renderArrowToggleButtons = (compact = false) => (
     <>
       <button
@@ -8309,10 +8358,11 @@ function App() {
       )}
       <button
         type="button"
-        className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-tree ${showTreeArrows ? 'active' : ''}`}
-        onClick={() => setShowTreeArrows((prev) => !prev)}
+        className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-tree arrow-options-dot ${showTreeArrows ? 'active' : ''}`}
+        {...treeArrowMenu}
+        aria-pressed={showTreeArrows}
         aria-label="Toggle tree arrows"
-        title="Toggle tree arrows"
+        title="Toggle tree arrows (hold for options)"
       />
     </>
   );
@@ -8408,7 +8458,7 @@ function App() {
                         <div className="player-repertoire-status">No repertoire move saved for this position.</div>}
                       <PlayerRepertoireTable rows={mistakeRows} complete side={activeSide} onMove={playPlayerMove} />
                       <div className="player-repertoire-status">
-                        {reviewPosition.fromHistory && 'Local game history · last 12 months. Dates show game start. '}
+                        {reviewPosition.fromHistory && 'Local game history. Dates show game start. '}
                         Recent = last 3 calendar months.
                       </div>
                     </>
@@ -9263,11 +9313,11 @@ function App() {
                               <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2" />
                             </svg>
                           </button>
-                          <button type="button" className={`mode-icon-btn find-mistakes-btn ${mistakeReview ? 'active' : ''}`}
-                            onClick={() => mistakeReview ? closeMistakeReview() : void findCommonMistakes()}
-                            disabled={!mistakeReview && !canFindCommonMistakes} aria-pressed={mistakeReviewOpen}
+                          <button type="button" className={`mode-icon-btn find-mistakes-btn has-submenu-dot ${mistakeReview ? 'active' : ''}`}
+                            {...mistakeHistoryMenu}
+                            aria-disabled={!mistakeReview && !canFindCommonMistakes} aria-pressed={mistakeReviewOpen}
                             aria-label="Find common mistakes" title={playerHandle.trim()
-                              ? 'Find common mistakes in your games' : 'Set your Lichess username in Player settings'}>
+                              ? 'Find common mistakes in your games (hold for time range)' : 'Set your Lichess username in Player settings (hold for time range)'}>
                             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                               <circle cx="12" cy="12" r="8.5" />
                               <path d="m9 9 6 6m0-6-6 6" />
@@ -9356,8 +9406,8 @@ function App() {
                           key={move.id}
                           ref={move.selected ? selectedMoveButtonRef : undefined}
                           type="button"
-                          className={`move-inline-item ${move.hasAlternatives ? 'has-alternatives' : ''} ${move.categoryClass ? `analysis-${move.categoryClass}` : ''} ${move.selected ? 'analysis-selected' : ''}`}
-                          title={move.annotationTitle}
+                          className={`move-inline-item ${move.hasAlternatives ? 'has-alternatives' : ''} ${move.categoryClass ? `analysis-${move.categoryClass}` : ''} ${move.selected ? 'analysis-selected' : ''} ${move.missedInGames ? 'missed-in-games' : ''}`}
+                          title={move.missedInGames ? [move.annotationTitle, 'You played outside this repertoire here'].filter(Boolean).join(' · ') : move.annotationTitle}
                           onClick={(event) => handleInlineMoveClick(move.id, event)}
                           onPointerDown={(event) => handleInlineMovePointerDown(move.id, event)}
                           onPointerUp={handleInlineMovePointerEnd}
@@ -9429,7 +9479,8 @@ function App() {
                         <div key={node.id} className="tree-option">
                           <button
                             type="button"
-                            className="tree-option-btn"
+                            className={`tree-option-btn ${currentDeviations?.length ? 'missed-in-games' : ''}`}
+                            title={currentDeviations?.length ? 'You played outside this repertoire here' : undefined}
                             onClick={(event) => handleTreeOptionClick(node, event)}
                             onPointerDown={(event) => handleTreeOptionPointerDown(node, event)}
                             onPointerUp={handleTreeOptionPointerEnd}
@@ -9622,6 +9673,38 @@ function App() {
             <label className="inline-check">
               <input type="checkbox" checked={lichessArrowsOpponentOnly} onChange={(event) => setLichessArrowsOpponentOnly(event.target.checked)} />
               Show Lichess arrows only on the opponent’s turn
+            </label>
+          </div>
+        </div>
+      )}
+
+      {isTreeArrowOptionsOpen && (
+        <div className="modal-backdrop" onClick={() => setIsTreeArrowOptionsOpen(false)}>
+          <div className="modal-card stockfish-quick-modal" role="dialog" aria-modal="true" aria-label="Tree arrow options" onClick={(event) => event.stopPropagation()}>
+            <label className="inline-check">
+              <input type="checkbox" checked={showMistakeArrows} onChange={(event) => setShowMistakeArrows(event.target.checked)} />
+              Show red arrows for mistakes
+            </label>
+          </div>
+        </div>
+      )}
+
+      {isMistakeHistoryOptionsOpen && (
+        <div className="modal-backdrop" onClick={() => setIsMistakeHistoryOptionsOpen(false)}>
+          <div className="modal-card stockfish-quick-modal" role="dialog" aria-modal="true" aria-label="Find common mistakes options" onClick={(event) => event.stopPropagation()}>
+            <label className="inline-check">
+              Look for mistakes in
+              <select value={mistakeHistoryMonths} onChange={(event) => {
+                const months = MISTAKE_HISTORY_WINDOWS.find(window => window === Number(event.target.value));
+                if (!months) return;
+                setMistakeHistoryMonths(months);
+                closeMistakeReview();
+              }}>
+                <option value={1}>Last month</option>
+                <option value={3}>Last 3 months</option>
+                <option value={6}>Last 6 months</option>
+                <option value={12}>Last year</option>
+              </select>
             </label>
           </div>
         </div>

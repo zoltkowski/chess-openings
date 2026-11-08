@@ -36,12 +36,11 @@ type ExportedGame = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-export function playerGameHistoryStart(now: number) {
+export function playerGameHistoryStart(now: number, months = 12) {
   const date = new Date(now);
-  const year = date.getUTCFullYear() - 1;
-  const month = date.getUTCMonth();
-  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-  return date.setUTCFullYear(year, month, Math.min(date.getUTCDate(), lastDay));
+  const month = date.getUTCMonth() - months;
+  const lastDay = new Date(Date.UTC(date.getUTCFullYear(), month + 1, 0)).getUTCDate();
+  return date.setUTCMonth(month, Math.min(date.getUTCDate(), lastDay));
 }
 
 export async function syncPlayerGameHistory(
@@ -112,7 +111,7 @@ type MoveStats = { uci: string; san: string; white: number; draws: number; black
 type Posting = { san: string; games: number[] };
 // Store SAN once per position and move, and reference the game metadata by array offset.
 type Postings = Map<string, Map<string, Posting>>;
-type Dates = { since?: string; until?: string };
+export type PlayerHistoryDates = { since?: string; until?: string; sinceTimestamp?: number };
 
 export function playerHistoryCovers(history: PlayerGameHistory, positions: Iterable<string>) {
   const index = history.reviewIndex;
@@ -224,6 +223,28 @@ function gameMatches(game: Game, cutoff: number, color: Color, speeds: readonly 
     (!modes.length || modes.includes(game.rated ? 'rated' : 'casual'));
 }
 
+export function playerRepertoireDeviations(
+  history: PlayerGameHistory,
+  positions: Iterable<readonly [string, ReadonlySet<string>]>,
+  color: Color,
+  speeds: readonly string[],
+  modes: readonly string[],
+  cutoff: number,
+) {
+  const deviations = new Map<string, string[]>();
+  const turn = color === 'white' ? 'w' : 'b';
+  for (const [fen, prepared] of positions) {
+    if (fen.split(' ', 2)[1] !== turn) continue;
+    for (const [uci, posting] of history.reviewIndex?.postings.get(fen) ?? []) {
+      if (prepared.has(uci) || !posting.games.some(offset => gameMatches(history.games[offset], cutoff, color, speeds, modes))) continue;
+      const moves = deviations.get(fen);
+      if (moves) moves.push(uci);
+      else deviations.set(fen, [uci]);
+    }
+  }
+  return deviations;
+}
+
 function createPlayerHistoryQuery(
   history: PlayerGameHistory,
   color: Color,
@@ -231,8 +252,8 @@ function createPlayerHistoryQuery(
   modes: readonly string[],
   postings = history.reviewIndex?.postings,
 ) {
-  return (fen: string, dates: Dates = {}) => {
-    const cutoff = playerGameHistoryStart(Date.now());
+  return (fen: string, dates: PlayerHistoryDates = {}) => {
+    const cutoff = Math.max(playerGameHistoryStart(Date.now()), dates.sinceTimestamp ?? 0);
     const totals = { white: 0, draws: 0, black: 0 };
     const moves: MoveStats[] = [];
     const recent: { game: Game; uci: string }[] = [];
