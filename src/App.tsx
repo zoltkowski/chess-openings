@@ -38,6 +38,8 @@ import { PlayerRepertoireTable, type PlayerMoveRow } from './analysis/PlayerRepe
 import { LichessStatsBar } from './analysis/LichessStatsBar';
 import { CompactEngineArrowsButton } from './CompactEngineArrowsButton';
 import { useLongPressMenu } from './useLongPressMenu';
+import { mainMoveId, repertoireMoveStatus, setRepertoireMoveStatus, trainingMoveIds,
+  type MoveNode, type MoveTree, type RepertoireMoveStatus } from './repertoireMoves';
 import {
   indexPlayerGameHistory, playerGameHistoryStart, playerHistoryCovers, playerHistoryIndexIsCurrent,
   playerRepertoireDeviations, preprocessPlayerGameHistory, syncPlayerGameHistory, type PlayerGameHistory, type PlayerHistoryDates,
@@ -64,20 +66,8 @@ type DateRange = '1m' | '2m' | '3m' | '6m' | '1y' | '3y' | '5y' | '10y' | '20y' 
 type ThemeMode = 'light' | 'dark';
 type EngineChoice = 'stockfish' | 'maia';
 
-type MoveNode = {
-  id: string;
-  parentId: string | null;
-  fen: string;
-  moveSan: string | null;
-  moveUci: string | null;
-  stockfishEval?: string | null;
-  children: string[];
-};
-
-type MoveTree = {
-  rootId: string;
-  nodes: Record<string, MoveNode>;
-  nextId: number;
+const REPERTOIRE_MOVE_LABELS: Record<RepertoireMoveStatus, string> = {
+  main: 'Main move', alternative: 'Alternative', historical: 'Archived', experimental: 'Experiment',
 };
 
 type EngineLine = {
@@ -394,6 +384,7 @@ type PersistedSettingsState = {
   combineCompactEngineArrows: boolean;
   stockfishEvalSeconds: number;
   trainingStatsQueueLength: number;
+  trainAlternativeMoves: boolean;
   suddenDeathThreshold: number;
   suddenDeathMinMoves: number;
   suddenDeathStockfishElo: number;
@@ -773,6 +764,7 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
     showStockfishArrows: parsed.showStockfishArrows ?? true,
     showMaiaArrows: parsed.showMaiaArrows ?? parsed.showStockfishArrows ?? true,
     combineCompactEngineArrows: parsed.combineCompactEngineArrows === true,
+    trainAlternativeMoves: parsed.trainAlternativeMoves === true,
     lichessArrowsOpponentOnly: parsed.lichessArrowsOpponentOnly === true,
     showMistakeArrows: parsed.showMistakeArrows === true,
     mistakeHistoryMonths: MISTAKE_HISTORY_WINDOWS.includes(parsed.mistakeHistoryMonths) ? parsed.mistakeHistoryMonths : 12,
@@ -1572,7 +1564,7 @@ function buildMainLinePath(tree: MoveTree): MoveNode[] {
   const path = [root];
   let cursor = root;
   while (cursor.children.length > 0) {
-    const mainChildId = cursor.children.find((childId) => Boolean(tree.nodes[childId]?.moveUci));
+    const mainChildId = mainMoveId(tree, cursor);
     if (!mainChildId) break;
     const mainChild = tree.nodes[mainChildId];
     if (!mainChild) break;
@@ -1609,7 +1601,8 @@ function buildVariationTokens(tree: MoveTree, nodeId: string, chess: Chess): str
   });
   if (children.length === 0) return [];
 
-  const [mainChildId, ...alternativeChildIds] = children;
+  const mainChildId = mainMoveId(tree, node)!;
+  const alternativeChildIds = children.filter(id => id !== mainChildId);
   const tokens: string[] = [];
   const mainNode = tree.nodes[mainChildId];
   if (!mainNode?.moveUci) return tokens;
@@ -2068,10 +2061,15 @@ function removeBranch(tree: MoveTree, branchRootId: string): MoveTree {
 
   const parent = nextNodes[branchRoot.parentId];
   if (parent) {
-    nextNodes[parent.id] = {
+    const updatedParent = {
       ...parent,
       children: parent.children.filter((id) => id !== branchRootId),
     };
+    nextNodes[parent.id] = updatedParent;
+    const main = mainMoveId({ ...tree, nodes: nextNodes }, updatedParent);
+    if (main && nextNodes[main].inactiveStatus) {
+      nextNodes[main] = { ...nextNodes[main], inactiveStatus: undefined };
+    }
   }
 
   return { ...tree, nodes: nextNodes };
@@ -2252,6 +2250,7 @@ function App() {
   const analysisReviewAbortRef = useRef<AbortController | null>(null);
   const [stockfishEvalSeconds, setStockfishEvalSeconds] = useState(10);
   const [trainingStatsQueueLength, setTrainingStatsQueueLength] = useState(initialTrainingStatsQueueLength);
+  const [trainAlternativeMoves, setTrainAlternativeMoves] = useState(false);
   const [suddenDeathThreshold, setSuddenDeathThreshold] = useState(initialSuddenDeathThreshold);
   const [suddenDeathMinMoves, setSuddenDeathMinMoves] = useState(initialSuddenDeathMinMoves);
   const [suddenDeathStockfishElo, setSuddenDeathStockfishElo] = useState(initialSuddenDeathStockfishElo);
@@ -2389,6 +2388,7 @@ function App() {
     y: number;
     openedAt: number;
   } | null>(null);
+  const [moveCommentEditor, setMoveCommentEditor] = useState<{ nodeId: string; draft: string } | null>(null);
   const [renamingRepertoireId, setRenamingRepertoireId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [importMode, setImportMode] = useState<'current' | 'db' | 'review'>('current');
@@ -2461,8 +2461,6 @@ function App() {
   const [isLichessArrowOptionsOpen, setIsLichessArrowOptionsOpen] = useState(false);
   const dbButtonLongPressTimeoutRef = useRef<number | null>(null);
   const dbButtonLongPressHandledRef = useRef(false);
-  const trainButtonLongPressTimeoutRef = useRef<number | null>(null);
-  const trainButtonLongPressHandledRef = useRef(false);
   const suddenDeathButtonLongPressTimeoutRef = useRef<number | null>(null);
   const suddenDeathButtonLongPressHandledRef = useRef(false);
   const movesButtonLongPressTimeoutRef = useRef<number | null>(null);
@@ -2475,8 +2473,6 @@ function App() {
   const lichessResponseCacheRef = useRef<Map<string, LichessResponseCacheEntry>>(new Map());
   const lichessResponseCacheLoadedRef = useRef(false);
   const lichessResponseCacheLoadPromiseRef = useRef<Promise<void> | null>(null);
-  const trainingStatsMenuRef = useRef<HTMLDivElement | null>(null);
-  const movePaneRef = useRef<HTMLElement | null>(null);
   const moveNotationRef = useRef<HTMLDivElement | null>(null);
   const selectedMoveButtonRef = useRef<HTMLButtonElement | null>(null);
   const backLongPressTimeoutRef = useRef<number | null>(null);
@@ -2626,15 +2622,17 @@ function App() {
     [selectedNode.children, tree.nodes],
   );
 
-  const collectMergedMoveOptionsAtFen = (side: Side, fen: string): BrowseMoveOption[] => {
+  const collectMergedMoveOptionsAtFen = (side: Side, fen: string, includeTrainingAlternatives?: boolean): BrowseMoveOption[] => {
     const byUci = new Map<string, { moveSan: string; repertoireNames: Set<string> }>();
     const targetFenKey = positionFenKey(fen);
+    const filterOwnMoves = includeTrainingAlternatives !== undefined && toTurnColor(fen) === side;
 
     for (const repertoire of repertoiresBySide[side]) {
       const nodes = Object.values(repertoire.tree.nodes).filter((node) => positionFenKey(node.fen) === targetFenKey);
       if (nodes.length === 0) continue;
       for (const node of nodes) {
-        for (const childId of node.children) {
+        const children = filterOwnMoves ? trainingMoveIds(repertoire.tree, node, true, includeTrainingAlternatives) : node.children;
+        for (const childId of children) {
           const child = repertoire.tree.nodes[childId];
           if (!child?.moveUci || !child.moveSan) continue;
           const existing = byUci.get(child.moveUci);
@@ -2658,8 +2656,8 @@ function App() {
 
   const browseMoveOptions = useMemo<BrowseMoveOption[]>(() => {
     if (!isBrowseMode) return [];
-    return collectMergedMoveOptionsAtFen(activeSide, selectedNode.fen);
-  }, [isBrowseMode, selectedNode.fen, repertoiresBySide, activeSide]);
+    return collectMergedMoveOptionsAtFen(activeSide, selectedNode.fen, trainingForActive ? trainAlternativeMoves : undefined);
+  }, [isBrowseMode, selectedNode.fen, repertoiresBySide, activeSide, trainingForActive, trainAlternativeMoves]);
 
   const displayedChildNodes = useMemo<MoveNode[]>(() => {
     if (!isBrowseMode) return childNodes;
@@ -2934,6 +2932,7 @@ function App() {
     setCombineCompactEngineArrows(persistedSettings.combineCompactEngineArrows);
     setStockfishEvalSeconds(persistedSettings.stockfishEvalSeconds);
     setTrainingStatsQueueLength(persistedSettings.trainingStatsQueueLength);
+    setTrainAlternativeMoves(persistedSettings.trainAlternativeMoves);
     setSuddenDeathThreshold(persistedSettings.suddenDeathThreshold);
     setSuddenDeathMinMoves(persistedSettings.suddenDeathMinMoves);
     setSuddenDeathStockfishElo(persistedSettings.suddenDeathStockfishElo);
@@ -3113,6 +3112,7 @@ function App() {
       combineCompactEngineArrows,
       stockfishEvalSeconds,
       trainingStatsQueueLength,
+      trainAlternativeMoves,
       suddenDeathThreshold,
       suddenDeathMinMoves,
       suddenDeathStockfishElo,
@@ -3160,6 +3160,7 @@ function App() {
     combineCompactEngineArrows,
     stockfishEvalSeconds,
     trainingStatsQueueLength,
+    trainAlternativeMoves,
     suddenDeathThreshold,
     suddenDeathMinMoves,
     suddenDeathStockfishElo,
@@ -3867,20 +3868,6 @@ function App() {
   useEffect(() => () => findMissingControllerRef.current?.abort(),
     [activeSide, activeRepertoireId, repertoireReviewNodes, getExplorerUrl, lichessApiToken, trainingSession]);
 
-  useEffect(() => {
-    if (!isTrainingStatsMenuOpen) return;
-    const onPointerDown = (event: Event) => {
-      const target = event.target as Node | null;
-      const menu = trainingStatsMenuRef.current;
-      if (!target || !menu) return;
-      if (menu.contains(target)) return;
-      setIsTrainingStatsMenuOpen(false);
-    };
-    document.addEventListener('pointerdown', onPointerDown);
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown);
-    };
-  }, [isTrainingStatsMenuOpen]);
 
   const fetchLichessNodeData = async (fen: string, signal: AbortSignal): Promise<LichessResponse | null> => {
     if (lichessSource === 'player' && !playerHandle.trim()) return null;
@@ -4639,10 +4626,12 @@ function App() {
         visited.add(nodeId);
         const node = baseTree.nodes[nodeId];
         if (!node) continue;
-        if (toTurnColor(node.fen) === side && node.children.length > 0) {
+        const ownTurn = toTurnColor(node.fen) === side;
+        const children = trainingMoveIds(baseTree, node, ownTurn, trainAlternativeMoves);
+        if (ownTurn && children.length > 0) {
           candidateNodes.push(node);
         }
-        for (const childId of node.children) stack.push(childId);
+        for (const childId of children) stack.push(childId);
       }
       if (candidateNodes.length === 0) return;
       const preferred = candidateNodes.filter((node) => node.parentId !== selectedNode.id);
@@ -4679,11 +4668,13 @@ function App() {
           visited.add(nodeId);
           const node = repertoire.tree.nodes[nodeId];
           if (!node) continue;
-          if (toTurnColor(node.fen) === side && node.children.length > 0) {
+          const ownTurn = toTurnColor(node.fen) === side;
+          const children = trainingMoveIds(repertoire.tree, node, ownTurn, trainAlternativeMoves);
+          if (ownTurn && children.length > 0) {
             const fenKey = positionFenKey(node.fen);
             if (!candidateByFen.has(fenKey)) candidateByFen.set(fenKey, node.fen);
           }
-          for (const childId of node.children) stack.push(childId);
+          for (const childId of children) stack.push(childId);
         }
       }
     }
@@ -4864,12 +4855,10 @@ function App() {
     }
     const promptNode = sideTree.nodes[cursorId] ?? rootNode;
     const promptTurnMatches = toTurnColor(promptNode.fen) === side;
-    const promptOptions = isBrowseMode
-      ? collectMergedMoveOptionsAtFen(side, promptNode.fen).map((option) => option.moveUci)
-      : promptNode.children
-          .map((childId) => sideTree.nodes[childId]?.moveUci)
-          .filter((value): value is string => Boolean(value));
-    if (promptTurnMatches && promptOptions.length > 0) {
+    const hasPrompt = promptTurnMatches && (isBrowseMode
+      ? collectMergedMoveOptionsAtFen(side, promptNode.fen, trainAlternativeMoves).length > 0
+      : trainingMoveIds(sideTree, promptNode, true, trainAlternativeMoves).length > 0);
+    if (hasPrompt) {
       const scopeIds = getScopeIdsForTrainingPosition(side, promptNode.fen);
       setTrainingSession((prev) =>
         prev && prev.side === side && prev.rootNodeId === rootNodeId
@@ -4926,13 +4915,19 @@ function App() {
       setStatus('No lines to train on this side.');
       return;
     }
-    const rootNodeId = selectedNode.id;
+    const entryNodeId = selectedNode.id;
+    const excludedMoveIndex = isBrowseMode ? -1 : path.findIndex((node, index) => {
+      if (!index) return false;
+      const parent = path[index - 1];
+      return toTurnColor(parent.fen) === side && !trainingMoveIds(tree, parent, true, trainAlternativeMoves).includes(node.id);
+    });
+    const rootNodeId = excludedMoveIndex > 0 ? path[excludedMoveIndex - 1].id : entryNodeId;
     clearSuddenDeathRuntime();
     setSuddenDeathGameOver(null);
     setTrainingSession({
       side,
       rootNodeId,
-      entryNodeId: rootNodeId,
+      entryNodeId,
       flashcardMode: false,
       suddenDeathMode: false,
       suddenDeathBaseEvalCp: null,
@@ -5349,10 +5344,9 @@ function App() {
 
       if (toTurnColor(currentNode.fen) !== activeSide) return;
       const trainingOptions = isBrowseMode
-        ? collectMergedMoveOptionsAtFen(activeSide, currentNode.fen).map((option) => option.moveUci)
-        : currentNode.children
-            .map((childId) => currentTree.nodes[childId]?.moveUci)
-            .filter((value): value is string => Boolean(value));
+        ? collectMergedMoveOptionsAtFen(activeSide, currentNode.fen, trainAlternativeMoves).map((option) => option.moveUci)
+        : trainingMoveIds(currentTree, currentNode, true, trainAlternativeMoves)
+            .map((childId) => currentTree.nodes[childId].moveUci!);
       if (trainingOptions.length === 0) return;
 
       const isAllowedMove = trainingOptions.includes(uci);
@@ -5995,6 +5989,7 @@ function App() {
       combineCompactEngineArrows,
       stockfishEvalSeconds,
       trainingStatsQueueLength,
+      trainAlternativeMoves,
       suddenDeathThreshold,
       suddenDeathMinMoves,
       suddenDeathStockfishElo,
@@ -6619,7 +6614,9 @@ function App() {
     [repertoiresBySide],
   );
   const showHintButton = Boolean(isTrainingActive && trainingSession?.hintRequested);
-  const isTrainingLineEnd = Boolean(isTrainingActive && displayedChildNodes.length === 0);
+  const isTrainingLineEnd = isTrainingActive && (isBrowseMode
+    ? browseMoveOptions.length === 0
+    : trainingMoveIds(tree, selectedNode, toTurnColor(selectedNode.fen) === activeSide, trainAlternativeMoves).length === 0);
   const isMobileClient = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   useEffect(() => {
     if (!lichessData?.opening || !lichessDataFen) return;
@@ -6946,6 +6943,11 @@ function App() {
     () => findBookMovesForGame(displayedMovePath, bookRepertoireIndex),
     [displayedMovePath, bookRepertoireIndex],
   );
+  const getMoveStatus = useCallback((node: MoveNode) => {
+    const parent = node.parentId ? tree.nodes[node.parentId] : undefined;
+    if (isBrowseMode || !node.moveUci || !parent || !parent.children.includes(node.id) || toTurnColor(parent.fen) !== activeSide) return undefined;
+    return repertoireMoveStatus(tree, parent, node);
+  }, [tree, isBrowseMode, activeSide]);
   const inlineMoves = useMemo(
     () =>
       displayedMovePath.slice(1).map((node, index) => {
@@ -6982,6 +6984,8 @@ function App() {
         prefix: fenToChess(displayedMovePath[index].fen).turn() === 'w' || index === 0
           ? formatMovePrefix(fenToChess(displayedMovePath[index].fen)) : '',
         hasAlternatives: (node.children?.length ?? 0) > 1,
+        moveStatus: getMoveStatus(node),
+        comment: node.comment,
         missedInGames: repertoireDeviations?.has(bookPositionFenKey(displayedMovePath[index].fen)) ?? false,
         annotation,
         annotationTitle,
@@ -6990,7 +6994,7 @@ function App() {
         selected: selectedNode.id === node.id,
       };
       }),
-    [displayedMovePath, displayedBookMoves, gameAnalysisReportMatchesLine, gameAnalysisReport, selectedNode.id, repertoireDeviations],
+    [displayedMovePath, displayedBookMoves, gameAnalysisReportMatchesLine, gameAnalysisReport, selectedNode.id, repertoireDeviations, getMoveStatus],
   );
   useLayoutEffect(() => {
     if (!isBrowseMode || isTrainingActive || analysisGameProgress) return;
@@ -7059,6 +7063,7 @@ function App() {
           children: [],
         } as MoveNode,
         leaves: option.repertoireNames.length,
+        moveStatus: undefined,
       }));
     }
 
@@ -7077,7 +7082,7 @@ function App() {
       return total;
     };
 
-    return childNodes.map(node => ({ node, leaves: countLeaves(node.id) }));
+    return childNodes.map(node => ({ node, leaves: countLeaves(node.id), moveStatus: getMoveStatus(node) }));
   }, [
     isBrowseMode,
     browseMoveOptions,
@@ -7085,6 +7090,7 @@ function App() {
     selectedNode.fen,
     childNodes,
     tree.nodes,
+    getMoveStatus,
   ]);
 
   const clearTreeOptionLongPress = () => {
@@ -7096,18 +7102,11 @@ function App() {
 
   const getDeletePopupPosition = (element: HTMLButtonElement) => {
     const rect = element.getBoundingClientRect();
-    const paneRect = movePaneRef.current?.getBoundingClientRect();
     const rawX = rect.left + rect.width / 2;
     const rawY = rect.bottom + 8;
-    if (!paneRect) return { x: rawX, y: rawY };
-    const horizontalPadding = 74;
-    const verticalPadding = 8;
-    const popupApproxHeight = 50;
-    const x = Math.max(paneRect.left + horizontalPadding, Math.min(rawX, paneRect.right - horizontalPadding));
-    const y = Math.max(
-      paneRect.top + verticalPadding,
-      Math.min(rawY, paneRect.bottom - popupApproxHeight - verticalPadding),
-    );
+    const horizontalPadding = Math.min(110, window.innerWidth / 2);
+    const x = Math.max(horizontalPadding, Math.min(rawX, window.innerWidth - horizontalPadding));
+    const y = Math.max(8, Math.min(rawY, window.innerHeight - 210));
     return { x, y };
   };
 
@@ -7214,6 +7213,13 @@ function App() {
     clearInlineMoveLongPress();
   };
 
+  const openInlineMoveContextMenu = (nodeId: string, event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    clearInlineMoveLongPress();
+    const { x, y } = getDeletePopupPosition(event.currentTarget);
+    setTreeOptionDeletePopup({ nodeId, x, y, openedAt: Date.now() });
+  };
+
   const handleInlineMoveClick = (moveId: string, event: MouseEvent<HTMLButtonElement>) => {
     if (inlineMoveLongPressHandledNodeRef.current === moveId) {
       event.preventDefault();
@@ -7293,6 +7299,30 @@ function App() {
     setTreeOptionDeletePopup(null);
   };
 
+  const updateMoveTree = (nextTree: MoveTree) => {
+    if (nextTree === tree || trainingSession || isTreeEvalRunning) return;
+    setUndoStackBySide(prev => ({
+      ...prev,
+      [activeSide]: [...prev[activeSide], { tree, selectedNodeId: selectedNode.id }].slice(-200),
+    }));
+    setTrees(prev => ({ ...prev, [activeSide]: nextTree }));
+  };
+
+  const menuNode = treeOptionDeletePopup?.nodeId && !treeOptionDeletePopup.moveUci
+    ? tree.nodes[treeOptionDeletePopup.nodeId] : undefined;
+  const menuMoveStatus = menuNode ? getMoveStatus(menuNode) : undefined;
+  const changeMoveStatus = (status: RepertoireMoveStatus) => {
+    if (menuNode && menuMoveStatus) updateMoveTree(setRepertoireMoveStatus(tree, menuNode.id, status));
+    setTreeOptionDeletePopup(null);
+  };
+  const saveMoveComment = () => {
+    if (!moveCommentEditor) return;
+    const node = tree.nodes[moveCommentEditor.nodeId];
+    const comment = moveCommentEditor.draft.trim() || undefined;
+    if (node && node.comment !== comment) updateMoveTree({ ...tree, nodes: { ...tree.nodes, [node.id]: { ...node, comment } } });
+    setMoveCommentEditor(null);
+  };
+
   const trainingTotalLines = useMemo(() => {
     if (!trainingSession || trainingSession.side !== activeSide) return 0;
     const sideTree = trees[trainingSession.side];
@@ -7304,10 +7334,11 @@ function App() {
       if (cached !== undefined) return cached;
       const node = treeToCount.nodes[nodeId];
       if (!node) return 0;
+      const children = trainingMoveIds(treeToCount, node, toTurnColor(node.fen) === trainingSession.side, trainAlternativeMoves);
       const value =
-        node.children.length === 0
+        children.length === 0
           ? 1
-          : node.children.reduce((acc, childId) => acc + countLeavesInTree(treeToCount, childId, memo), 0);
+          : children.reduce((acc, childId) => acc + countLeavesInTree(treeToCount, childId, memo), 0);
       memo.set(nodeId, value);
       return value;
     };
@@ -7331,7 +7362,7 @@ function App() {
         );
         return repoSum + leavesFromRepo;
       }, 0);
-  }, [trainingSession, activeSide, trees, isBrowseMode, repertoiresBySide]);
+  }, [trainingSession, activeSide, trees, isBrowseMode, repertoiresBySide, trainAlternativeMoves]);
 
   const trainingAnsweredLines = useMemo(() => {
     if (!trainingSession || trainingSession.side !== activeSide) return 0;
@@ -7382,7 +7413,7 @@ function App() {
     if (!isTrainingLineEnd) return;
     const sideTree = trees[trainingSession.side];
     const currentNode = sideTree.nodes[selectedNode.id];
-    if (!currentNode || currentNode.children.length !== 0) return;
+    if (!currentNode) return;
     const scopeId = getActiveTrainingStatsScopeId(activeSide);
     const leafKey = getTrainingLeafKey(currentNode);
     const shownAt = Date.now();
@@ -8002,42 +8033,10 @@ function App() {
     goForward();
   };
 
-  const clearTrainButtonLongPress = () => {
-    if (trainButtonLongPressTimeoutRef.current !== null) {
-      window.clearTimeout(trainButtonLongPressTimeoutRef.current);
-      trainButtonLongPressTimeoutRef.current = null;
-    }
-  };
-
-  const handleTrainButtonPointerDown: PointerEventHandler<HTMLButtonElement> = (event) => {
-    if (isTrainingActive) return;
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    clearTrainButtonLongPress();
-    trainButtonLongPressHandledRef.current = false;
-    trainButtonLongPressTimeoutRef.current = window.setTimeout(() => {
-      trainButtonLongPressHandledRef.current = true;
-      setPortraitTab('moves');
-      setIsTrainingStatsMenuOpen(true);
-      setIsMoveToolsOpen(false);
-    }, 420);
-  };
-
-  const handleTrainButtonPointerEnd = () => {
-    clearTrainButtonLongPress();
-  };
-
-  const handleTrainButtonClick: MouseEventHandler<HTMLButtonElement> = (event) => {
-    if (trainButtonLongPressHandledRef.current) {
-      event.preventDefault();
-      trainButtonLongPressHandledRef.current = false;
-      return;
-    }
-    if (isTrainingActive) {
-      stopTraining();
-      return;
-    }
-    startTraining();
-  };
+  const trainButtonMenu = useLongPressMenu(() => {
+    setIsTrainingStatsMenuOpen(true);
+    setIsMoveToolsOpen(false);
+  }, () => startTraining());
 
   const clearSuddenDeathButtonLongPress = () => {
     if (suddenDeathButtonLongPressTimeoutRef.current !== null) {
@@ -8174,7 +8173,6 @@ function App() {
       clearInlineMoveLongPress();
       clearDbButtonLongPress();
       clearStockfishButtonLongPress();
-      clearTrainButtonLongPress();
       clearSuddenDeathButtonLongPress();
       clearMovesButtonLongPress();
     },
@@ -8880,12 +8878,8 @@ function App() {
                 {(!isExampleReplayActive || isTrainingActive) && (
                   <button
                     type="button"
-                    className={`${isTrainingActive ? 'active training-stop-btn' : ''} long-pressable-btn`}
-                    onClick={handleTrainButtonClick}
-                    onPointerDown={handleTrainButtonPointerDown}
-                    onPointerUp={handleTrainButtonPointerEnd}
-                    onPointerCancel={handleTrainButtonPointerEnd}
-                    onPointerLeave={handleTrainButtonPointerEnd}
+                    className={`${isTrainingActive ? 'active training-stop-btn' : 'train-options-btn'} long-pressable-btn`}
+                    {...(isTrainingActive ? { onClick: () => stopTraining() } : trainButtonMenu)}
                     aria-label={isTrainingActive ? 'Stop training' : 'Train'}
                     title={isTrainingActive ? 'Stop training' : 'Train (long press: options)'}
                     disabled={!isTrainingActive && !canStartTrainingForActiveSide}
@@ -9054,12 +9048,10 @@ function App() {
               </div>
             </aside>}
 
-            <aside
-              ref={(element) => {
-                movePaneRef.current = element;
-              }}
-              className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''} ${isTrainingActive ? 'training-pane' : ''}`}
-            >
+            <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''} ${isTrainingActive ? 'training-pane' : ''}`}>
+              {selectedNode.comment && boardFen === selectedNode.fen && !analysisScratchFen && (
+                <p className="active-move-comment"><strong>{toFigurineSan(selectedNode.moveSan ?? '')}</strong> {selectedNode.comment}</p>
+              )}
               {isTrainingActive ? (
                 <>
                   <div className="controls-row desktop-only">
@@ -9085,56 +9077,6 @@ function App() {
                       ⚙
                     </button>
                   </div>
-                  {isTrainingStatsMenuOpen && (
-                    <div
-                      ref={(element) => {
-                        trainingStatsMenuRef.current = element;
-                      }}
-                      className="training-stats-dropdown"
-                    >
-                      <div className="training-stats-menu-actions">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            clearActiveTrainingStatistics();
-                          }}
-                        >
-                          Clear current repertoire stats
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            clearAllTrainingStatistics();
-                          }}
-                        >
-                          Clear all stats
-                        </button>
-                      </div>
-                      <div className="slider-stack single-column">
-                        <label>
-                          {`Stats FIFO length: ${trainingStatsQueueLength}`}
-                          <span className="slider-field">
-                            <input
-                              className="threshold-slider"
-                              type="range"
-                              min={TRAINING_STATS_QUEUE_MIN}
-                              max={TRAINING_STATS_QUEUE_MAX}
-                              step={1}
-                              value={trainingStatsQueueLength}
-                              onChange={(e) => {
-                                const next = Number.parseInt(e.target.value, 10);
-                                if (Number.isFinite(next)) {
-                                  setTrainingStatsQueueLength(
-                                    Math.min(TRAINING_STATS_QUEUE_MAX, Math.max(TRAINING_STATS_QUEUE_MIN, next)),
-                                  );
-                                }
-                              }}
-                            />
-                          </span>
-                        </label>
-                      </div>
-                    </div>
-                  )}
                   <div className="training-repertoire-name" title={isBrowseMode ? `${activeSide}: whole db` : activeRepertoireName}>
                     {isBrowseMode ? `${activeSide}: whole db` : `${activeSide}: ${activeRepertoireName}`}
                   </div>
@@ -9194,56 +9136,6 @@ function App() {
                 </>
               ) : (
                 <>
-                  {isTrainingStatsMenuOpen && (
-                    <div
-                      ref={(element) => {
-                        trainingStatsMenuRef.current = element;
-                      }}
-                      className="training-stats-dropdown"
-                    >
-                      <div className="training-stats-menu-actions">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            clearActiveTrainingStatistics();
-                          }}
-                        >
-                          Clear current repertoire stats
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            clearAllTrainingStatistics();
-                          }}
-                        >
-                          Clear all stats
-                        </button>
-                      </div>
-                      <div className="slider-stack single-column">
-                        <label>
-                          {`Stats FIFO length: ${trainingStatsQueueLength}`}
-                          <span className="slider-field">
-                            <input
-                              className="threshold-slider"
-                              type="range"
-                              min={TRAINING_STATS_QUEUE_MIN}
-                              max={TRAINING_STATS_QUEUE_MAX}
-                              step={1}
-                              value={trainingStatsQueueLength}
-                              onChange={(e) => {
-                                const next = Number.parseInt(e.target.value, 10);
-                                if (Number.isFinite(next)) {
-                                  setTrainingStatsQueueLength(
-                                    Math.min(TRAINING_STATS_QUEUE_MAX, Math.max(TRAINING_STATS_QUEUE_MIN, next)),
-                                  );
-                                }
-                              }}
-                            />
-                          </span>
-                        </label>
-                      </div>
-                    </div>
-                  )}
                   <div className="controls-row">
                     {isExampleReplayActive ? (
                       <>
@@ -9365,10 +9257,11 @@ function App() {
                         )}
                           <>
                             <button
-                              className="desktop-only"
+                              className="desktop-only has-submenu-dot train-options-btn"
                               type="button"
-                              onClick={handleTrainButtonClick}
-                              title="Train"
+                              {...trainButtonMenu}
+                              aria-label="Train"
+                              title="Train (long press: options)"
                               disabled={!canStartTrainingForActiveSide}
                             >
                               Train
@@ -9422,15 +9315,18 @@ function App() {
                           ref={move.selected ? selectedMoveButtonRef : undefined}
                           type="button"
                           className={`move-inline-item ${move.hasAlternatives ? 'has-alternatives' : ''} ${move.categoryClass ? `analysis-${move.categoryClass}` : ''} ${move.selected ? 'analysis-selected' : ''} ${move.missedInGames ? 'missed-in-games' : ''}`}
-                          title={move.missedInGames ? [move.annotationTitle, 'You played outside this repertoire here'].filter(Boolean).join(' · ') : move.annotationTitle}
+                          data-move-status={move.moveStatus}
+                          title={[move.moveStatus && REPERTOIRE_MOVE_LABELS[move.moveStatus], move.annotationTitle,
+                            move.missedInGames && 'You played outside this repertoire here', move.comment].filter(Boolean).join('\n') || undefined}
                           onClick={(event) => handleInlineMoveClick(move.id, event)}
+                          onContextMenu={(event) => openInlineMoveContextMenu(move.id, event)}
                           onPointerDown={(event) => handleInlineMovePointerDown(move.id, event)}
                           onPointerUp={handleInlineMovePointerEnd}
                           onPointerCancel={handleInlineMovePointerEnd}
                           onPointerLeave={handleInlineMovePointerEnd}
                         >
                           {move.prefix ? <span className="move-inline-prefix">{move.prefix}</span> : null}
-                          <span>{move.san}</span>
+                          <span className={move.comment ? 'commented-move' : undefined}>{move.san}</span>
                           {move.annotation && <span className="move-inline-annotation">{move.annotation}</span>}
                           {move.maiaBaselineTag && (
                             <span
@@ -9490,12 +9386,14 @@ function App() {
                   )}
                   {!analysisGameProgress && optionRows.length > 0 && (
                     <div className="tree-options-wrap">
-                      {optionRows.map(({ node, leaves }) => (
+                      {optionRows.map(({ node, leaves, moveStatus }) => (
                         <div key={node.id} className="tree-option">
                           <button
                             type="button"
                             className={`tree-option-btn ${currentDeviations?.length ? 'missed-in-games' : ''}`}
-                            title={currentDeviations?.length ? 'You played outside this repertoire here' : undefined}
+                            data-move-status={moveStatus}
+                            title={[moveStatus && REPERTOIRE_MOVE_LABELS[moveStatus],
+                              currentDeviations?.length && 'You played outside this repertoire here', node.comment].filter(Boolean).join('\n') || undefined}
                             onClick={(event) => handleTreeOptionClick(node, event)}
                             onPointerDown={(event) => handleTreeOptionPointerDown(node, event)}
                             onPointerUp={handleTreeOptionPointerEnd}
@@ -9511,7 +9409,7 @@ function App() {
                               openTreeOptionDeleteFromContextMenu(node, event.currentTarget);
                             }}
                           >
-                            {toFigurineSan(node.moveSan ?? '')}
+                            <span className={node.comment ? 'commented-move' : undefined}>{toFigurineSan(node.moveSan ?? '')}</span>
                           </button>
                           <span className="tree-option-leaves">
                             {node.stockfishEval ? `${STOCKFISH_ENGINE_LABEL} ${node.stockfishEval} | ${leaves}` : leaves}
@@ -9625,14 +9523,50 @@ function App() {
           />
           <div
             className="tree-delete-popup"
-            style={{ left: `${treeOptionDeletePopup.x}px`, top: `${treeOptionDeletePopup.y}px` }}
+            style={{ left: treeOptionDeletePopup.x, top: treeOptionDeletePopup.y,
+              maxHeight: `calc(100dvh - ${treeOptionDeletePopup.y + 8}px)` }}
             onClick={(event) => event.stopPropagation()}
           >
+            {menuMoveStatus && (
+              <span className="tree-move-menu-status">{REPERTOIRE_MOVE_LABELS[menuMoveStatus]}</span>
+            )}
+            {menuMoveStatus && menuMoveStatus !== 'main' && !trainingSession && !isTreeEvalRunning &&
+              (Object.keys(REPERTOIRE_MOVE_LABELS) as RepertoireMoveStatus[])
+                .filter(status => status !== menuMoveStatus)
+                .map(status => (
+                  <button key={status} type="button" data-move-status={status} onClick={() => changeMoveStatus(status)}>
+                    Set as {REPERTOIRE_MOVE_LABELS[status].toLowerCase()}
+                  </button>
+                ))}
+            {menuNode?.moveUci && !trainingSession && !isTreeEvalRunning && (
+              <button type="button" onClick={() => {
+                setMoveCommentEditor({ nodeId: menuNode.id, draft: menuNode.comment ?? '' });
+                setTreeOptionDeletePopup(null);
+              }}>
+                {menuNode.comment ? 'Edit comment' : 'Add comment'}
+              </button>
+            )}
             <button type="button" className="danger" onClick={deleteTreeOptionBranch}>
               Delete branch
             </button>
           </div>
         </>
+      )}
+
+      {moveCommentEditor && (
+        <div className="modal-backdrop" onClick={() => setMoveCommentEditor(null)}>
+          <form className="modal-card stockfish-quick-modal move-comment-editor" role="dialog" aria-modal="true"
+            aria-labelledby="move-comment-title" onClick={event => event.stopPropagation()}
+            onSubmit={event => { event.preventDefault(); saveMoveComment(); }}>
+            <label id="move-comment-title" htmlFor="move-comment">Move comment</label>
+            <textarea id="move-comment" rows={4} value={moveCommentEditor.draft}
+              onChange={event => setMoveCommentEditor({ ...moveCommentEditor, draft: event.target.value })} />
+            <div className="game-analysis-modal-actions">
+              <button type="button" onClick={() => setMoveCommentEditor(null)}>Cancel</button>
+              <button type="submit">Save comment</button>
+            </div>
+          </form>
+        </div>
       )}
 
       {isStockfishQuickOpen && (
@@ -9673,6 +9607,40 @@ function App() {
                   />
                 </span>
               </label>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isTrainingStatsMenuOpen && (
+        <div className="modal-backdrop" onClick={() => setIsTrainingStatsMenuOpen(false)}>
+          <div className="modal-card stockfish-quick-modal" role="dialog" aria-modal="true" aria-labelledby="training-options-title" onClick={(event) => event.stopPropagation()}>
+            <h3 id="training-options-title" className="eval-manager-title">Training options</h3>
+            <label className="inline-check">
+              <input type="checkbox" checked={trainAlternativeMoves} disabled={isTrainingActive}
+                onChange={event => setTrainAlternativeMoves(event.target.checked)} />
+              Include alternative moves in training
+            </label>
+            <div className="slider-stack single-column">
+              <label>
+                {`Stats FIFO length: ${trainingStatsQueueLength}`}
+                <span className="slider-field">
+                  <input
+                    className="threshold-slider"
+                    type="range"
+                    min={TRAINING_STATS_QUEUE_MIN}
+                    max={TRAINING_STATS_QUEUE_MAX}
+                    step={1}
+                    value={trainingStatsQueueLength}
+                    onChange={(event) => setTrainingStatsQueueLength(Number(event.target.value))}
+                  />
+                </span>
+              </label>
+            </div>
+            <div className="training-stats-menu-actions">
+              <button type="button" onClick={clearActiveTrainingStatistics}>Clear current repertoire stats</button>
+              <button type="button" onClick={clearAllTrainingStatistics}>Clear all stats</button>
+              <button type="button" onClick={() => setIsTrainingStatsMenuOpen(false)}>Close</button>
             </div>
           </div>
         </div>

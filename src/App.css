@@ -1085,12 +1085,34 @@ select {
   border: 0;
   border-radius: 8px;
   padding: 0.35rem;
+  display: grid;
+  gap: 0.25rem;
+  width: min(13rem, calc(100vw - 1rem));
+  overflow-y: auto;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.22);
 }
 
 .tree-delete-popup > button {
-  white-space: nowrap;
+  text-align: left;
 }
+
+.tree-move-menu-status {
+  padding: 0.2rem 0.35rem;
+  font-weight: 600;
+}
+
+.commented-move { text-decoration: underline; text-underline-offset: 0.18em; }
+
+.active-move-comment {
+  margin: 0 0 0.45rem;
+  padding: 0.35rem 0.55rem;
+  border-inline-start: 2px solid #64748b;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.move-comment-editor textarea { display: block; width: 100%; margin-top: 0.4rem; resize: vertical; }
+.move-comment-editor .game-analysis-modal-actions { gap: 0.4rem; }
 
 .app.theme-dark .tree-delete-popup {
   background: #111b2e;
@@ -1603,15 +1625,7 @@ select {
   margin-left: auto;
 }
 
-.training-stats-dropdown {
-  margin: -0.05rem 0 0.35rem;
-  padding: 0.55rem 0.6rem;
-  width: min(20rem, 100%);
-  margin-left: auto;
-  border: 1px solid #e5ebf3;
-  border-radius: 8px;
-}
-
+.train-options-btn { touch-action: manipulation; }
 .training-position-stats {
   margin: 0.1rem 0 0.35rem;
   display: grid;
@@ -2276,7 +2290,6 @@ select {
 .app.theme-dark .move-table th,
 .app.theme-dark .move-table td,
 .app.theme-dark .move-list .controls-row,
-.app.theme-dark .training-stats-dropdown,
 .app.theme-dark .filters-modal-frequency,
 .app.theme-dark .repertoire-hit-block {
   border-color: #334155;
@@ -2408,6 +2421,14 @@ select {
 .app.theme-dark .tree-option-btn.missed-in-games {
   color: #f87171;
 }
+
+.move-list [data-move-status="main"] { font-weight: 700; }
+.move-list button[data-move-status="alternative"] { background-color: #fef3c7; border-color: #d4a72c; }
+.move-list button[data-move-status="historical"] { background-color: #e2e8f0; border-color: #94a3b8; }
+.move-list button[data-move-status="experimental"] { background-color: #ede9fe; border-color: #a78bfa; }
+.app.theme-dark .move-list button[data-move-status="alternative"] { background-color: #4d3510; border-color: #a37a24; }
+.app.theme-dark .move-list button[data-move-status="historical"] { background-color: #374151; border-color: #6b7280; }
+.app.theme-dark .move-list button[data-move-status="experimental"] { background-color: #3b235c; border-color: #8b5cf6; }
 
 .find-mistakes-btn.has-submenu-dot { touch-action: manipulation; }
 .find-mistakes-btn[aria-disabled="true"] { opacity: 0.55; }
