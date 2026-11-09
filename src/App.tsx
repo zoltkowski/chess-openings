@@ -2319,6 +2319,7 @@ function App() {
   const [lichessApiToken, setLichessApiToken] = useState(initialLichessApiToken);
   const [dateRange, setDateRange] = useState<DateRange>(initialDateRange);
   const [lichessArrowThreshold, setLichessArrowThreshold] = useState<MoveThreshold>(initialLichessArrowThreshold);
+  const [nextMissingMoveThreshold, setNextMissingMoveThreshold] = useState<MoveThreshold>(5);
   const [selectedSpeeds, setSelectedSpeeds] = useState<string[]>(
     initialSelectedSpeeds.length > 0 ? initialSelectedSpeeds : [...SPEEDS],
   );
@@ -2457,6 +2458,7 @@ function App() {
   const [isSuddenDeathSettingsOpen, setIsSuddenDeathSettingsOpen] = useState(false);
   const [isMoveToolsOpen, setIsMoveToolsOpen] = useState(false);
   const [isLichessArrowOptionsOpen, setIsLichessArrowOptionsOpen] = useState(false);
+  const [isFindMissingOptionsOpen, setIsFindMissingOptionsOpen] = useState(false);
   const findMissingSearchAutoNavigationRef = useRef(false);
   const [isFindMissingSearchRunning, setIsFindMissingSearchRunning] = useState(false);
   const lichessRateLimitedUntilRef = useRef(0);
@@ -2904,6 +2906,7 @@ function App() {
     setLichessApiToken(persistedSettings.lichessApiToken);
     setDateRange(persistedSettings.dateRange);
     setLichessArrowThreshold(persistedSettings.lichessArrowThreshold);
+    setNextMissingMoveThreshold(persistedSettings.nextMissingMoveThreshold);
     setEngineDepth(persistedSettings.engineDepth);
     setEngineMultiPv(persistedSettings.engineMultiPv);
     setSelectedSpeeds(
@@ -3109,7 +3112,7 @@ function App() {
       suddenDeathMinMoves,
       suddenDeathStockfishElo,
       suddenDeathMaxThinkTimeSec,
-      nextMissingMoveThreshold: lichessArrowThreshold,
+      nextMissingMoveThreshold,
     };
 
     const timeout = window.setTimeout(() => {
@@ -3136,6 +3139,7 @@ function App() {
     lichessApiToken,
     dateRange,
     lichessArrowThreshold,
+    nextMissingMoveThreshold,
     engineDepth,
     engineMultiPv,
     selectedSpeeds,
@@ -5714,7 +5718,7 @@ function App() {
         for (const move of moves) {
           const count = explorerGameCount(move);
           if (prepared.has(move.uci) || count === 0) continue;
-          if (!player && (!total || count / total < lichessArrowThreshold / 100)) continue;
+          if (!player && (!total || count / total < nextMissingMoveThreshold / 100)) continue;
           if (personal && !prepared.size) {
             const reply = explorerReplyFen(node.fen, move.uci);
             if (!reply || !await inspectPlayerReply(reply, personal.query, controller)) continue;
@@ -5986,7 +5990,7 @@ function App() {
       suddenDeathMinMoves,
       suddenDeathStockfishElo,
       suddenDeathMaxThinkTimeSec,
-      nextMissingMoveThreshold: lichessArrowThreshold,
+      nextMissingMoveThreshold,
     };
     return {
       version: 1,
@@ -8055,6 +8059,11 @@ function App() {
     () => setShowLichessArrows(prev => !prev),
     420,
   );
+  const findMissingMenu = useLongPressMenu(
+    () => setIsFindMissingOptionsOpen(true),
+    () => opponentReviewOpen ? setPortraitTab('lichess') : void jumpToNextMissingLichessMove(),
+    420,
+  );
   const lichessTabMenu = useLongPressMenu(
     () => setIsLichessFilterOpen(true),
     () => setPortraitTab('lichess'),
@@ -9089,11 +9098,13 @@ function App() {
                           <button
                             type="button"
                             className="next-missing-btn mode-icon-btn"
-                            onClick={() => opponentReviewOpen ? setPortraitTab('lichess') : void jumpToNextMissingLichessMove()}
+                            {...(isPlayerExplorer ? {
+                              onClick: () => opponentReviewOpen ? setPortraitTab('lichess') : void jumpToNextMissingLichessMove(),
+                            } : findMissingMenu)}
                             disabled={!opponentReviewOpen && !canRunFindMissingSearch}
                             aria-label={isPlayerExplorer ? 'Find missing opponent moves' : 'Find missing popular opponent move'}
                             title={isPlayerExplorer ? 'Find missing opponent moves in your games'
-                              : `Find missing popular opponent move (${lichessArrowThreshold}%+)`}
+                              : 'Find missing popular opponent move (long press: options)'}
                           >
                             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                               <circle cx="12" cy="12" r="4.2" />
@@ -9524,6 +9535,30 @@ function App() {
               <button type="button" onClick={clearAllTrainingStatistics}>Clear all stats</button>
               <button type="button" onClick={() => setIsTrainingStatsMenuOpen(false)}>Close</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {isFindMissingOptionsOpen && (
+        <div className="modal-backdrop" onClick={() => setIsFindMissingOptionsOpen(false)}>
+          <div className="modal-card stockfish-quick-modal" role="dialog" aria-modal="true" aria-label="Find missing popular moves options" onClick={(event) => event.stopPropagation()}>
+            <label>
+              {`Min frequency: ${nextMissingMoveThreshold}%`}
+              <span className="slider-field">
+                <input
+                  className="threshold-slider min-frequency-slider"
+                  type="range"
+                  min={0}
+                  max={MOVE_THRESHOLD_OPTIONS.length - 1}
+                  step={1}
+                  value={MOVE_THRESHOLD_OPTIONS.indexOf(nextMissingMoveThreshold)}
+                  onChange={(event) => {
+                    setNextMissingMoveThreshold(MOVE_THRESHOLD_OPTIONS[Number(event.target.value)] ?? 5);
+                    if (opponentReview) closeOpponentFinding();
+                  }}
+                />
+              </span>
+            </label>
           </div>
         </div>
       )}
