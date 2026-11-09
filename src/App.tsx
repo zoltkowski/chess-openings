@@ -470,6 +470,7 @@ const PLAYER_HISTORY_SYNC_CHECK_MS = 60_000;
 const LICHESS_CACHE_PLAYER_LIMIT = 1500;
 const LICHESS_CACHE_DEFAULT_TTL_MS = 10 * 24 * 60 * 60 * 1000;
 const LICHESS_CACHE_DEFAULT_JITTER_MS = 5 * 24 * 60 * 60 * 1000;
+const LICHESS_CACHE_DAY_MS = 24 * 60 * 60 * 1000;
 function maxTopGamesForSource(source: LichessSource) {
   if (source === 'masters') return 15;
   if (source === 'lichess') return 4;
@@ -503,6 +504,18 @@ function explorerDateFilter(source: LichessSource, range: DateRange) {
 
 function isPlayerExplorerUrl(url: string) {
   return url.startsWith('https://explorer.lichess.ovh/player?');
+}
+
+function lichessCacheKey(url: string) {
+  if (isPlayerExplorerUrl(url)) return url;
+  try {
+    const parsed = new URL(url);
+    const fen = parsed.searchParams.get('fen');
+    if (fen) parsed.searchParams.set('fen', positionFenKey(fen) + ' 0 1');
+    return parsed.toString();
+  } catch {
+    return url;
+  }
 }
 
 function monthNumber(month: string) {
@@ -3666,7 +3679,10 @@ function App() {
             if (entry.expiresAt <= now && !isPlayerExplorerUrl(url)) continue;
             const data = (entry as LichessResponseCacheEntry).data;
             if (!data || typeof data !== 'object' || !Array.isArray(data.moves)) continue;
-            nextMap.set(url, { expiresAt: entry.expiresAt, data });
+            const key = lichessCacheKey(url);
+            if (!nextMap.has(key) || nextMap.get(key)!.expiresAt < entry.expiresAt) {
+              nextMap.set(key, { expiresAt: entry.expiresAt, data });
+            }
           }
         }
         lichessResponseCacheRef.current = nextMap;
@@ -3711,10 +3727,11 @@ function App() {
     async (url: string): Promise<LichessResponseCacheEntry | null> => {
       await ensureLichessResponseCacheLoaded();
       const now = Date.now();
-      const cached = lichessResponseCacheRef.current.get(url);
+      const key = lichessCacheKey(url);
+      const cached = lichessResponseCacheRef.current.get(key);
       if (!cached) return null;
       if (cached.expiresAt <= now && !isPlayerExplorerUrl(url)) {
-        lichessResponseCacheRef.current.delete(url);
+        lichessResponseCacheRef.current.delete(key);
         void persistLichessResponseCache();
         return null;
       }
@@ -3726,12 +3743,15 @@ function App() {
   const setCachedLichessResponse = useCallback(
     async (url: string, data: LichessResponse, isPlayer: boolean) => {
       await ensureLichessResponseCacheLoaded();
-      const ttlMs =
-        isPlayer
-          ? LICHESS_CACHE_PLAYER_TTL_MS
-          : LICHESS_CACHE_DEFAULT_TTL_MS + Math.floor(Math.random() * (LICHESS_CACHE_DEFAULT_JITTER_MS + 1));
+      const games = explorerGameCount(data);
+      const baseTtl = isPlayer ? LICHESS_CACHE_PLAYER_TTL_MS
+        : games >= 100_000 ? 90 * LICHESS_CACHE_DAY_MS
+        : games >= 10_000 ? 30 * LICHESS_CACHE_DAY_MS : LICHESS_CACHE_DEFAULT_TTL_MS;
+      const jitter = isPlayer ? LICHESS_CACHE_PLAYER_TTL_MS / 2
+        : games >= 10_000 ? baseTtl / 2 : LICHESS_CACHE_DEFAULT_JITTER_MS;
+      const ttlMs = baseTtl + Math.floor(Math.random() * (jitter + 1));
       const cache = lichessResponseCacheRef.current;
-      cache.set(url, {
+      cache.set(lichessCacheKey(url), {
         expiresAt: Date.now() + ttlMs,
         data,
       });
@@ -5681,7 +5701,7 @@ function App() {
       (player && !playerHandle.trim())) return;
     if (opponentReview && isFindMissingSearchRunning) {
       setOpponentReview(prev => prev && (prev.index + 1 < prev.findings.length
-        ? { ...prev, index: prev.index + 1 }
+        ? { ...prev, index: prev.index + 1, waitingForNext: false }
         : { ...prev, waitingForNext: true }));
       return;
     }
@@ -8309,6 +8329,11 @@ function App() {
                   <div className="player-repertoire-controls mistake-review-controls">
                     <span title={activeRepertoireName}>Missing opponent moves{opponentReview.index >= 0 &&
                       ` · ${opponentReview.index + 1}/${opponentReview.findings.length}`}</span>
+                    <button type="button" aria-label="Previous problem" title="Previous problem"
+                      disabled={opponentReview.index <= 0}
+                      onClick={() => setOpponentReview(prev => prev && ({
+                        ...prev, index: prev.index - 1, waitingForNext: false,
+                      }))}><PrevIcon /></button>
                     <button type="button" className="review-text-btn"
                       disabled={!hasNextOpponentFinding && (opponentReview.exhausted ||
                         (isFindMissingSearchRunning && opponentReview.waitingForNext))}
