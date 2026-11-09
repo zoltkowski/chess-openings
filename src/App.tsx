@@ -9097,7 +9097,7 @@ function App() {
                         </div>
                           <button
                             type="button"
-                            className="next-missing-btn mode-icon-btn"
+                            className={`next-missing-btn mode-icon-btn${isPlayerExplorer ? '' : ' has-long-press-menu'}`}
                             {...(isPlayerExplorer ? {
                               onClick: () => opponentReviewOpen ? setPortraitTab('lichess') : void jumpToNextMissingLichessMove(),
                             } : findMissingMenu)}
