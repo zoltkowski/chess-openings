@@ -37,7 +37,7 @@ import { useMaiaPopularity } from './useMaiaPopularity';
 import { PlayerRepertoireTable, type PlayerMoveRow } from './analysis/PlayerRepertoireTable';
 import { LichessStatsBar } from './analysis/LichessStatsBar';
 import { CompactEngineArrowsButton } from './CompactEngineArrowsButton';
-import { isTouchContextMenu, useLongPressAction, useLongPressMenu } from './useLongPressMenu';
+import { isTouchContextMenu, useLongPressMenu } from './useLongPressMenu';
 import { mainMoveId, repertoireMoveStatus, setRepertoireMoveStatus, trainingMoveIds,
   type MoveNode, type MoveTree, type RepertoireMoveStatus } from './repertoireMoves';
 import {
@@ -65,6 +65,13 @@ type MistakeHistoryMonths = typeof MISTAKE_HISTORY_WINDOWS[number];
 type DateRange = '1m' | '2m' | '3m' | '6m' | '1y' | '3y' | '5y' | '10y' | '20y' | '30y' | '50y' | null;
 type ThemeMode = 'light' | 'dark';
 type EngineChoice = 'stockfish' | 'maia';
+
+type AnalysisScratchPosition = {
+  fen: string;
+  lastMove: [Key, Key] | null;
+  playerMoves?: string[];
+  enginePreview?: { previous: AnalysisScratchPosition | null; origin: AnalysisScratchPosition | null };
+};
 
 const REPERTOIRE_MOVE_LABELS: Record<RepertoireMoveStatus, string> = {
   main: 'Main move', alternative: 'Alternative', historical: 'Archived', experimental: 'Experiment',
@@ -1988,14 +1995,14 @@ function uciToFigurineSan(fen: string, uci: string) {
 
 function buildEnginePvMoves(fen: string, pv: string, limit = Infinity) {
   const chess = fenToChess(fen);
-  const moves: Array<{ san: string; fen: string; lastMove: [Key, Key] }> = [];
+  const moves: Array<{ uci: string; san: string; fen: string; lastMove: [Key, Key] }> = [];
   for (const uci of pv.split(/\s+/).filter((part) => /^[a-h][1-8][a-h][1-8][nbrq]?$/.test(part))) {
     const input = uciToMoveInput(uci);
     if (!input) break;
     try {
       const move = chess.move(input);
       if (!move) break;
-      moves.push({ san: toFigurineSan(move.san), fen: chess.fen(), lastMove: [move.from as Key, move.to as Key] });
+      moves.push({ uci, san: toFigurineSan(move.san), fen: chess.fen(), lastMove: [move.from as Key, move.to as Key] });
       if (moves.length >= limit) break;
     } catch {
       break;
@@ -2387,11 +2394,7 @@ function App() {
       if (analysisGameActiveRef.current) setAnalysisMaiaNotice({ kind: 'error', text: `Błąd Maia-3: ${message}` });
     }
   }), []);
-  const [analysisScratchPosition, setAnalysisScratchPosition] = useState<{
-    fen: string; lastMove: [Key, Key] | null; playerMoves?: string[];
-    engineOrigin?: { fen: string; lastMove: [Key, Key] | null; playerMoves?: string[] } | null;
-    engineHistory?: Array<{ fen: string; lastMove: [Key, Key] | null; playerMoves?: string[] } | null>;
-  } | null>(null);
+  const [analysisScratchPosition, setAnalysisScratchPosition] = useState<AnalysisScratchPosition | null>(null);
   const [hoveredEngineMove, setHoveredEngineMove] = useState<{
     fen: string; lastMove: [Key, Key];
   } | null>(null);
@@ -5146,6 +5149,14 @@ function App() {
     }
   }, [repertoireSide, trainingSession, trees, hasSideTrainingContent]);
 
+  const openEnginePreview = (position: Pick<AnalysisScratchPosition, 'fen' | 'lastMove'>) => {
+    setAnalysisScratchPosition((previous) => ({
+      fen: position.fen,
+      lastMove: position.lastMove,
+      enginePreview: { previous, origin: previous?.enginePreview ? previous.enginePreview.origin : previous },
+    }));
+  };
+
   const makeMove = (orig: Key, dest: Key, promotion: 'q' | 'r' | 'b' | 'n' = 'q') => {
     if (exampleReplay && exampleReplay.side === activeSide) return;
     const currentTree = trees[activeSide];
@@ -5185,6 +5196,10 @@ function App() {
     // Engine-line previews stay separate from the move list. Review moves use
     // the working tree below; without an active repertoire it is not persisted.
     if (!isTrainingActive && (analysisScratchPosition || reviewBoard)) {
+      if (analysisScratchPosition?.enginePreview) {
+        openEnginePreview({ fen: chess.fen(), lastMove: [move.from as Key, move.to as Key] });
+        return;
+      }
       setAnalysisScratchPosition({
         fen: chess.fen(),
         lastMove: [move.from as Key, move.to as Key],
@@ -5541,7 +5556,7 @@ function App() {
     }));
   };
 
-  const playLichessMove = (uci: string) => {
+  const playSuggestedMove = (uci: string) => {
     if (isTrainingActive) return;
     const keyPair = parseUciMove(uci);
     if (!keyPair) return;
@@ -6673,8 +6688,8 @@ function App() {
     const [orig, dest] = keyPair;
     return [{ orig, dest, brush: 'green' }];
   }, [isTrainingActive, trainingSession]);
-  const canGoBack = Boolean(analysisScratchPosition && 'engineOrigin' in analysisScratchPosition ||
-    analysisScratchPosition?.playerMoves?.length || selectedNode.parentId);
+  const canGoBack = Boolean(analysisScratchPosition?.enginePreview || analysisScratchPosition?.playerMoves?.length || selectedNode.parentId);
+  const backTitle = analysisScratchPosition?.enginePreview ? 'Back (long press: original position)' : null;
   const isEngineEnabled = engineRunning;
   const canToggleMaiaArrows = maiaLoaded && engineRunning;
   const canToggleStockfishArrows = stockfishLoaded && engineRunning;
@@ -7204,11 +7219,11 @@ function App() {
       return;
     }
     if (isBrowseMode) {
-      if (node.moveUci) playLichessMove(node.moveUci);
+      if (node.moveUci) playSuggestedMove(node.moveUci);
       return;
     }
     if (!tree.nodes[node.id]) {
-      if (node.moveUci) playLichessMove(node.moveUci);
+      if (node.moveUci) playSuggestedMove(node.moveUci);
       return;
     }
     navigateToNode(activeSide, node.id);
@@ -7933,30 +7948,10 @@ function App() {
     navigateToNode(activeSide, targetId);
   };
 
-  const returnToEngineLineOrigin = () => {
-    setHoveredEngineMove(null);
-    setAnalysisScratchPosition((previous) => previous && 'engineOrigin' in previous
-      ? previous.engineOrigin ?? null : previous);
-  };
-
-  const stepBackEngineLine = () => {
-    setHoveredEngineMove(null);
-    setAnalysisScratchPosition((previous) => {
-      if (!previous || !('engineOrigin' in previous)) return previous;
-      const history = previous.engineHistory ?? [];
-      if (history.length <= 1) return previous.engineOrigin ?? null;
-      const prior = history[history.length - 1];
-      return prior ? {
-        ...prior,
-        engineOrigin: previous.engineOrigin,
-        engineHistory: history.slice(0, -1),
-      } : previous.engineOrigin ?? null;
-    });
-  };
-
   const goBackOneMove = () => {
-    if (analysisScratchPosition && 'engineOrigin' in analysisScratchPosition) {
-      stepBackEngineLine();
+    if (analysisScratchPosition?.enginePreview) {
+      setHoveredEngineMove(null);
+      setAnalysisScratchPosition(analysisScratchPosition.enginePreview.previous);
       return;
     }
     if (analysisScratchPosition?.playerMoves) {
@@ -7986,8 +7981,9 @@ function App() {
   useEffect(() => {
     // Each hold stage uses the position and tree left by the previous stage.
     backLongPressActionRef.current = (stage) => {
-      if (analysisScratchPosition && 'engineOrigin' in analysisScratchPosition) {
-        returnToEngineLineOrigin();
+      if (analysisScratchPosition?.enginePreview) {
+        setHoveredEngineMove(null);
+        setAnalysisScratchPosition(analysisScratchPosition.enginePreview.origin);
         return;
       }
       if (stage === 1) goBackToPreviousBranchMove();
@@ -8011,7 +8007,7 @@ function App() {
         backLongPressHandledRef.current = true;
         backLongPressStageRef.current = 1;
         backLongPressActionRef.current(1);
-        scheduleBackLongPressStage();
+        if (!analysisScratchPosition?.enginePreview) scheduleBackLongPressStage();
       }, 450);
       return;
     }
@@ -8130,7 +8126,6 @@ function App() {
     () => setPortraitTab('stockfish'),
     420,
   );
-  const engineBackPress = useLongPressAction(returnToEngineLineOrigin, stepBackEngineLine, 500);
 
   useEffect(
     () => () => {
@@ -8180,32 +8175,28 @@ function App() {
     setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: snapshot.selectedNodeId }));
   };
 
+  const canPlayEngineMove = !isTrainingActive && !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride;
   const renderEngineMove = (move: ReturnType<typeof buildEnginePvMoves>[number] | undefined,
-    className = '', key?: number) => move ? (
-      <button key={key} type="button" className={`engine-pv-move ${className}`}
-        title={`Show position after ${move.san}`}
-        onMouseEnter={() => setHoveredEngineMove({ fen: move.fen, lastMove: move.lastMove })}
-        onMouseLeave={() => setHoveredEngineMove(null)}
-        onClick={() => {
-          setHoveredEngineMove(null);
-          setAnalysisScratchPosition((previous) => ({
-            fen: move.fen,
-            lastMove: move.lastMove,
-            engineOrigin: previous && 'engineOrigin' in previous ? previous.engineOrigin : previous,
-            engineHistory: previous && 'engineOrigin' in previous
-              ? [...(previous.engineHistory ?? []), {
-                fen: previous.fen, lastMove: previous.lastMove, playerMoves: previous.playerMoves,
-              }]
-              : [previous],
-          }));
-        }}>
-        {move.san}
-      </button>
-    ) : <span>—</span>;
+    className = '', action?: 'play' | 'preview', key?: number) => {
+    if (!move) return <span>—</span>;
+    const preview = {
+      className: `engine-pv-move ${className}`,
+      onMouseEnter: () => setHoveredEngineMove({ fen: move.fen, lastMove: move.lastMove }),
+      onMouseLeave: () => setHoveredEngineMove(null),
+    };
+    const previewTitle = `Show position after ${move.san}`;
+    return action ? (
+      <button key={key} type="button" {...preview} title={action === 'play' ? `Play ${move.san}` : previewTitle} onClick={() => {
+        setHoveredEngineMove(null);
+        if (action === 'play') playSuggestedMove(move.uci);
+        else openEnginePreview(move);
+      }}>{move.san}</button>
+    ) : <span key={key} {...preview} title={previewTitle}>{move.san}</span>;
+  };
 
   const renderEngineContinuation = (moves: ReturnType<typeof buildEnginePvMoves>) => (
     <div className="engine-pv-moves">
-      {moves.slice(1).map((move, index) => renderEngineMove(move, '', index))}
+      {moves.slice(1).map((move, index) => renderEngineMove(move, '', canPlayEngineMove ? 'preview' : undefined, index))}
     </div>
   );
   const maiaLines = maiaResultKey === currentMaiaKey ? engineLines : [];
@@ -8220,15 +8211,11 @@ function App() {
   }
   const engineTable = (
     <div className="table ai-eval-table">
-      {analysisScratchPosition && 'engineOrigin' in analysisScratchPosition && (
-        <button type="button" className="engine-pv-return" {...engineBackPress}
-          title="Back (long press: original position)">← Back</button>
-      )}
       {selectedEngine === 'stockfish' ? engineLines.map(line => {
         const moves = buildEnginePvMoves(enginePvFen, line.pv || line.bestMove);
         return (
           <div className="table-row engine-pv-row" key={line.multipv}>
-            {renderEngineMove(moves[0], 'engine-pv-first engine-pv-stockfish')}
+            {renderEngineMove(moves[0], 'engine-pv-first engine-pv-stockfish', canPlayEngineMove && enginePvFen === maiaPositionFen ? 'play' : undefined)}
             <span className="engine-pv-score">{line.scoreText}</span>
             {renderEngineContinuation(moves)}
           </div>
@@ -8248,7 +8235,7 @@ function App() {
                 const moves = buildEnginePvMoves(maiaPositionFen, score?.pv || uci);
                 return (
                   <div className="table-row engine-pv-row mixed-engine-row" key={uci}>
-                    {renderEngineMove(moves[0], `engine-pv-first ${maia ? 'engine-pv-maia' : 'engine-pv-stockfish'}`)}
+                    {renderEngineMove(moves[0], `engine-pv-first ${maia ? 'engine-pv-maia' : 'engine-pv-stockfish'}`, canPlayEngineMove ? 'play' : undefined)}
                     <span className="engine-pv-score" title={maia ? undefined : 'Outside the displayed Maia suggestions'}>
                       {maia?.scoreText ?? '—'}
                     </span>
@@ -8266,7 +8253,7 @@ function App() {
             </div>
           ) : maiaLines.map(line => (
             <div className="table-row engine-pv-row" key={line.multipv}>
-              {renderEngineMove(buildEnginePvMoves(maiaPositionFen, line.bestMove, 1)[0], 'engine-pv-first engine-pv-maia')}
+              {renderEngineMove(buildEnginePvMoves(maiaPositionFen, line.bestMove, 1)[0], 'engine-pv-first engine-pv-maia', canPlayEngineMove ? 'play' : undefined)}
               <span className="engine-pv-score">{line.scoreText}</span>
               {showMaiaPopularity && <MaiaPopularityChart uci={line.bestMove} elo={maiaStrengthElo} profile={maiaPopularity} />}
             </div>
@@ -8564,11 +8551,11 @@ function App() {
                           key={`${move.uci}-${move.san}`}
                           role="button"
                           tabIndex={isTrainingActive ? -1 : 0}
-                          onClick={() => playLichessMove(move.uci)}
+                          onClick={() => playSuggestedMove(move.uci)}
                           onKeyDown={(event) => {
                             if (event.key === 'Enter' || event.key === ' ') {
                               event.preventDefault();
-                              playLichessMove(move.uci);
+                              playSuggestedMove(move.uci);
                             }
                           }}
                         >
@@ -8918,8 +8905,7 @@ function App() {
                       onPointerLeave={handleBackPointerEnd}
                       disabled={!canGoBack}
                       aria-label="Back 1 move"
-                      title={analysisScratchPosition && 'engineOrigin' in analysisScratchPosition
-                        ? 'Back (long press: original position)' : 'Back 1 move (long press: previous branch)'}
+                      title={backTitle ?? 'Back 1 move (long press: previous branch)'}
                     >
                       <BackIcon />
                     </button>
@@ -9170,8 +9156,7 @@ function App() {
                             onPointerLeave={handleBackPointerEnd}
                             disabled={!canGoBack}
                             aria-label="Back 1 move"
-                            title={analysisScratchPosition && 'engineOrigin' in analysisScratchPosition
-                              ? 'Back (long press: original position)' : 'Back 1 move'}
+                            title={backTitle ?? 'Back 1 move'}
                           >
                             <BackIcon />
                           </button>
