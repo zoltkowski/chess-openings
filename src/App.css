@@ -558,11 +558,6 @@ select {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: none;
-}
-
-.move-list .move-notation-line::-webkit-scrollbar {
-  display: none;
 }
 
 .move-list:not(.training-pane) > :not(.move-notation-line) {
@@ -575,11 +570,6 @@ select {
   max-height: min(45%, 18rem);
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: none;
-}
-
-.move-list .game-analysis-comment::-webkit-scrollbar {
-  display: none;
 }
 
 .move-list:not(.training-pane) > .move-notation-line:has(~ .game-analysis-comment) {
@@ -1748,12 +1738,6 @@ span.engine-pv-move {
     overflow-y: auto;
     overflow-x: hidden;
     overscroll-behavior: contain;
-    scrollbar-width: none;
-  }
-
-  .lichess-scroll::-webkit-scrollbar,
-  .stockfish-inline::-webkit-scrollbar {
-    display: none;
   }
 
   .stockfish-inline {

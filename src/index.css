@@ -15,6 +15,14 @@ body {
   overflow: hidden;
 }
 
+* {
+  scrollbar-width: none;
+}
+
+*::-webkit-scrollbar {
+  display: none;
+}
+
 #root,
 #root * {
   -webkit-user-select: none;
