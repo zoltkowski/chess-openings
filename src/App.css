@@ -1227,6 +1227,23 @@ select {
   text-overflow: ellipsis;
 }
 
+.engine-pv-return {
+  margin: 0.25rem 0 0.35rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid #bfdbfe;
+  border-radius: 5px;
+  background: #eff6ff;
+  color: #1e40af;
+  font: inherit;
+  cursor: pointer;
+}
+
+.app.theme-dark .engine-pv-return {
+  border-color: #475569;
+  background: #1e3a5f;
+  color: #bfdbfe;
+}
+
 .engine-pv-move {
   min-height: 1.7rem;
   padding: 0.1rem 0.3rem;
