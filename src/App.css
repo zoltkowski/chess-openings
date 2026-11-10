@@ -1233,6 +1233,23 @@ select {
   text-overflow: ellipsis;
 }
 
+@media (orientation: landscape) and (any-hover: hover) {
+  .stockfish-inline .engine-pv-row:has(> .engine-pv-moves):is(:hover, :has(:focus-visible)) {
+    align-items: start;
+  }
+
+  .stockfish-inline .engine-pv-row:is(:hover, :has(:focus-visible)) > .engine-pv-moves {
+    display: flex;
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+
+  .stockfish-inline .engine-pv-moves > .engine-pv-move {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+}
+
 .engine-pv-move {
   min-height: 1.7rem;
   padding: 0.1rem 0.3rem;
