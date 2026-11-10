@@ -1,3 +1,7 @@
+import type { Key } from '@lichess-org/chessground/types';
+
+export type BoardAnnotation = { orig: Key; dest?: Key };
+
 export type MoveNode = {
   id: string;
   parentId: string | null;
@@ -7,6 +11,7 @@ export type MoveNode = {
   stockfishEval?: string | null;
   inactiveStatus?: 'historical' | 'experimental';
   comment?: string;
+  annotations?: BoardAnnotation[];
   children: string[];
 };
 

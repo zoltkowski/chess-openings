@@ -37,9 +37,9 @@ import { useMaiaPopularity } from './useMaiaPopularity';
 import { PlayerRepertoireTable, type PlayerMoveRow } from './analysis/PlayerRepertoireTable';
 import { LichessStatsBar } from './analysis/LichessStatsBar';
 import { CompactEngineArrowsButton } from './CompactEngineArrowsButton';
-import { isTouchContextMenu, useLongPressMenu } from './useLongPressMenu';
+import { isTouchContextMenu, useLongPressAction, useLongPressMenu } from './useLongPressMenu';
 import { mainMoveId, repertoireMoveStatus, setRepertoireMoveStatus, trainingMoveIds,
-  type MoveNode, type MoveTree, type RepertoireMoveStatus } from './repertoireMoves';
+  type BoardAnnotation, type MoveNode, type MoveTree, type RepertoireMoveStatus } from './repertoireMoves';
 import {
   indexPlayerGameHistory, playerGameHistoryStart, playerHistoryCovers, playerHistoryIndexIsCurrent,
   playerRepertoireDeviations, preprocessPlayerGameHistory, syncPlayerGameHistory, type PlayerGameHistory, type PlayerHistoryDates,
@@ -354,6 +354,7 @@ type PersistedAppState = {
   version: 2;
   repertoiresBySide: Record<Side, RepertoireEntry[]>;
   activeRepertoireIdBySide: Record<Side, string | null>;
+  browseAnnotations?: Record<string, BoardAnnotation[]>;
 };
 
 type LegacyPersistedAppState = {
@@ -443,6 +444,7 @@ const FIGURINES: Record<string, string> = {
   N: '♘',
 };
 const ARROW_BRUSHES: DrawBrushes = {
+  annotation: { key: 'annotation', color: '#d10076', opacity: 1, lineWidth: 11 },
   green: { key: 'g', color: '#15781b', opacity: 1, lineWidth: 10 },
   red: { key: 'r', color: '#882020', opacity: 1, lineWidth: 10 },
   blue: { key: 'b', color: '#003088', opacity: 1, lineWidth: 10 },
@@ -699,6 +701,16 @@ function isValidMoveTree(value: unknown): value is MoveTree {
   return true;
 }
 
+function readBoardAnnotations(value: unknown): BoardAnnotation[] {
+  const isSquare = (square: unknown): square is Key => typeof square === 'string' && /^[a-h][1-8]$/.test(square);
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item: unknown) => {
+    if (!item || typeof item !== 'object' || !('orig' in item) || !isSquare(item.orig)) return [];
+    if ('dest' in item && item.dest !== undefined && !isSquare(item.dest)) return [];
+    return [{ orig: item.orig, dest: 'dest' in item && isSquare(item.dest) ? item.dest : undefined }];
+  });
+}
+
 function normalizePersistedState(value: unknown): PersistedAppState | null {
   if (!value || typeof value !== 'object') return null;
 
@@ -734,6 +746,8 @@ function normalizePersistedState(value: unknown): PersistedAppState | null {
 
     return {
       version: 2,
+      browseAnnotations: Object.fromEntries(Object.entries(parsedV2.browseAnnotations ?? {})
+        .map(([key, value]) => [key, readBoardAnnotations(value)] as const).filter(([, value]) => value.length > 0)),
       repertoiresBySide: {
         white: whiteList,
         black: blackList,
@@ -1045,6 +1059,15 @@ function DbIcon() {
       <ellipse cx="12" cy="5" rx="7" ry="3" fill="none" stroke="currentColor" strokeWidth="1.9" />
       <path d="M5 5v5c0 1.7 3.1 3 7 3s7-1.3 7-3V5" fill="none" stroke="currentColor" strokeWidth="1.9" />
       <path d="M5 10v5c0 1.7 3.1 3 7 3s7-1.3 7-3v-5" fill="none" stroke="currentColor" strokeWidth="1.9" />
+    </TabIconBase>
+  );
+}
+
+function DrawIcon() {
+  return (
+    <TabIconBase>
+      <path d="M5 19 19 5M9 5h10v10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="6" cy="7" r="2" fill="none" stroke="currentColor" strokeWidth="1.5" />
     </TabIconBase>
   );
 }
@@ -2142,18 +2165,27 @@ async function readExplorerResponse(
   }
 }
 
+function boardAnnotationShapes(annotations: BoardAnnotation[]): DrawShape[] {
+  return annotations.map(annotation => ({ ...annotation, brush: 'annotation' }));
+}
+
 function Board(props: {
   fen: string;
   orientation: 'white' | 'black';
   lastMove: [Key, Key] | undefined;
   arrows: DrawShape[];
+  annotations: BoardAnnotation[];
+  annotationDraft?: BoardAnnotation[];
+  onAnnotationsChange: (annotations: BoardAnnotation[]) => void;
   readOnly?: boolean;
   onMove: (orig: Key, dest: Key) => void;
 }) {
-  const { fen, orientation, lastMove, arrows, readOnly, onMove } = props;
+  const { fen, orientation, lastMove, arrows, annotations, annotationDraft, onAnnotationsChange, readOnly, onMove } = props;
+  const drawing = annotationDraft !== undefined;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const apiRef = useRef<ChessgroundApi | null>(null);
   const onMoveRef = useRef(onMove);
+  const drawingGesture = useRef<{ pointerId: number; orig: Key; preview?: BoardAnnotation } | null>(null);
 
   useEffect(() => {
     onMoveRef.current = onMove;
@@ -2183,6 +2215,9 @@ function Board(props: {
   }, []);
 
   useEffect(() => {
+    if (!drawing) drawingGesture.current = null;
+    const locked = readOnly || drawing;
+    const preview = drawingGesture.current?.preview;
     apiRef.current?.set({
       fen: fullBoardFen(fen),
       orientation,
@@ -2192,24 +2227,70 @@ function Board(props: {
       turnColor: toTurnColor(fen),
       blockTouchScroll: true,
       movable: {
-        color: readOnly ? undefined : 'both',
+        color: locked ? undefined : 'both',
         free: false,
-        dests: readOnly ? new Map() : buildDests(fen),
+        dests: locked ? new Map() : buildDests(fen),
         events: {
           after: (orig, dest) => onMove(orig, dest),
         },
       },
+      selectable: { enabled: !drawing },
+      draggable: { enabled: !drawing },
       drawable: {
-        enabled: true,
+        enabled: !drawing,
         visible: true,
-        autoShapes: arrows,
+        shapes: annotationDraft ? boardAnnotationShapes(preview ? [...annotationDraft, preview] : annotationDraft) : undefined,
+        autoShapes: drawing ? [] : [...arrows, ...boardAnnotationShapes(annotations)],
         brushes: ARROW_BRUSHES,
       },
       lastMove,
     });
-  }, [fen, orientation, arrows, lastMove, readOnly, onMove]);
+  }, [fen, orientation, arrows, lastMove, readOnly, drawing, annotations, annotationDraft, onMove]);
 
-  return <div ref={containerRef} className="board" />;
+  const squareAtPointer = (event: PointerEvent<HTMLDivElement>) =>
+    apiRef.current?.getKeyAtDomPos([event.clientX, event.clientY]);
+
+  const startAnnotation = (event: PointerEvent<HTMLDivElement>) => {
+    if (!annotationDraft || !event.isPrimary || (event.button !== 0 && event.button !== 2)) return;
+    const orig = squareAtPointer(event);
+    if (!orig) return;
+    event.preventDefault();
+    apiRef.current?.cancelMove();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    drawingGesture.current = { pointerId: event.pointerId, orig, preview: { orig } };
+    apiRef.current?.setShapes(boardAnnotationShapes([...annotationDraft, { orig }]));
+  };
+
+  const moveAnnotation = (event: PointerEvent<HTMLDivElement>) => {
+    const gesture = drawingGesture.current;
+    if (!annotationDraft || gesture?.pointerId !== event.pointerId) return;
+    const square = squareAtPointer(event);
+    const preview = square ? { orig: gesture.orig, dest: square === gesture.orig ? undefined : square } : undefined;
+    if (preview?.orig === gesture.preview?.orig && preview?.dest === gesture.preview?.dest) return;
+    gesture.preview = preview;
+    apiRef.current?.setShapes(boardAnnotationShapes(preview ? [...annotationDraft, preview] : annotationDraft));
+  };
+
+  const endAnnotation = (event: PointerEvent<HTMLDivElement>, commit: boolean) => {
+    const gesture = drawingGesture.current;
+    if (!annotationDraft || gesture?.pointerId !== event.pointerId) return;
+    drawingGesture.current = null;
+    const square = commit ? squareAtPointer(event) : undefined;
+    if (!square) {
+      apiRef.current?.setShapes(boardAnnotationShapes(annotationDraft));
+      return;
+    }
+    const annotation = { orig: gesture.orig, dest: square === gesture.orig ? undefined : square };
+    const matches = (shape: BoardAnnotation) => shape.orig === annotation.orig && shape.dest === annotation.dest;
+    const next = annotationDraft.some(matches) ? annotationDraft.filter(shape => !matches(shape)) : [...annotationDraft, annotation];
+    apiRef.current?.setShapes(boardAnnotationShapes(next));
+    onAnnotationsChange(next);
+  };
+
+  return <div ref={containerRef} className="board" data-drawing={drawing || undefined}
+    onPointerDown={startAnnotation} onPointerMove={moveAnnotation}
+    onPointerUp={event => endAnnotation(event, true)} onPointerCancel={event => endAnnotation(event, false)}
+    onLostPointerCapture={event => endAnnotation(event, false)} />;
 }
 
 function MaiaStatusView({ status }: { status: MaiaLoadingStatus | null }) {
@@ -2429,6 +2510,8 @@ function App() {
     openedAt: number;
   } | null>(null);
   const [moveCommentEditor, setMoveCommentEditor] = useState<{ nodeId: string; draft: string } | null>(null);
+  const [browseAnnotations, setBrowseAnnotations] = useState<Record<string, BoardAnnotation[]>>({});
+  const [annotationDraft, setAnnotationDraft] = useState<{ target: string; shapes: BoardAnnotation[] } | null>(null);
   const [renamingRepertoireId, setRenamingRepertoireId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [importMode, setImportMode] = useState<'current' | 'db' | 'review'>('current');
@@ -2982,6 +3065,8 @@ function App() {
   }, []);
 
   const applyPersistedDatabaseState = useCallback((persisted: PersistedAppState | null) => {
+    setBrowseAnnotations(persisted?.browseAnnotations ?? {});
+    setAnnotationDraft(null);
     if (persisted) {
       setRepertoiresBySide(persisted.repertoiresBySide);
       setActiveRepertoireIdBySide({ white: null, black: null });
@@ -3107,6 +3192,7 @@ function App() {
       version: 2,
       repertoiresBySide,
       activeRepertoireIdBySide,
+      browseAnnotations,
     };
 
     const timeout = window.setTimeout(() => {
@@ -3116,7 +3202,7 @@ function App() {
     }, 120);
 
     return () => window.clearTimeout(timeout);
-  }, [hasHydratedAppState, repertoiresBySide, activeRepertoireIdBySide]);
+  }, [hasHydratedAppState, repertoiresBySide, activeRepertoireIdBySide, browseAnnotations]);
 
   useEffect(() => {
     if (!hasHydratedAppState) return;
@@ -6035,6 +6121,7 @@ function App() {
         version: 2,
         repertoiresBySide,
         activeRepertoireIdBySide,
+        browseAnnotations,
       },
       settings: settingsPayload,
       trainingStats: trainingStatsBySide,
@@ -8182,7 +8269,49 @@ function App() {
     setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: snapshot.selectedNodeId }));
   };
 
-  const canPlayEngineMove = !isTrainingActive && !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride && !suddenDeathGameOver;
+  const isTreeBoard = !trainingSession && !hasExampleReplayBoardOverride && !suddenDeathGameOver &&
+    !analysisScratchPosition && !browseMistakePosition && !browseOpponentPosition;
+  const canAnnotateBoard = hasHydratedAppState && isTreeBoard && !isGameReviewRunning && !isTreeEvalRunning;
+  const annotationPositionKey = `${activeSide}|${positionFenKey(selectedNode.fen)}`;
+  const annotationTarget = JSON.stringify([activeRepertoireId, selectedNode.id, annotationPositionKey]);
+  const savedAnnotations = isTreeBoard ? (isBrowseMode ? browseAnnotations[annotationPositionKey] ?? []
+    : readBoardAnnotations(selectedNode.annotations)) : [];
+  const activeAnnotationDraft = canAnnotateBoard && annotationDraft?.target === annotationTarget ? annotationDraft : null;
+
+  useEffect(() => {
+    setAnnotationDraft(draft => canAnnotateBoard && draft?.target === annotationTarget ? draft : null);
+  }, [annotationTarget, canAnnotateBoard]);
+
+  const toggleAnnotationDrawing = () => {
+    if (!canAnnotateBoard) return;
+    setHoveredEngineMove(null);
+    setAnnotationDraft(activeAnnotationDraft ? null : { target: annotationTarget, shapes: savedAnnotations });
+  };
+
+  const updateAnnotationDraft = (shapes: BoardAnnotation[]) => {
+    setAnnotationDraft(draft => draft?.target === annotationTarget ? { ...draft, shapes } : draft);
+  };
+
+  const saveAnnotations = () => {
+    if (!activeAnnotationDraft) return;
+    const { shapes } = activeAnnotationDraft;
+    if (isBrowseMode) {
+      setBrowseAnnotations(previous => {
+        const next = { ...previous };
+        if (shapes.length) next[annotationPositionKey] = shapes;
+        else delete next[annotationPositionKey];
+        return next;
+      });
+    } else {
+      const annotatedNode = { ...selectedNode, annotations: shapes.length ? shapes : undefined };
+      updateMoveTree({ ...tree, nodes: { ...tree.nodes, [annotatedNode.id]: annotatedNode } });
+    }
+    setAnnotationDraft(null);
+  };
+
+  const movesTabDrawing = useLongPressAction(toggleAnnotationDrawing, () => setPortraitTab('moves'), 420);
+  const canPlayEngineMove = !isTrainingActive && !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride &&
+    !suddenDeathGameOver && !activeAnnotationDraft;
   const renderEngineMove = (move: ReturnType<typeof buildEnginePvMoves>[number] | undefined,
     className = '', action?: 'play' | 'preview', key?: number) => {
     if (!move) return <span>—</span>;
@@ -8212,7 +8341,7 @@ function App() {
   const reviewScore = liveReviewLine?.scoreText ?? (reviewEvaluation?.hasScore ? reviewEvaluation.scoreText : null);
   const reviewPv = liveReviewLine?.pv || reviewEvaluation?.pv || reviewEvaluation?.bestMove || '';
   const reviewPvMoves = suddenDeathReviewPosition && reviewPv ? buildEnginePvMoves(suddenDeathReviewPosition.fen, reviewPv) : [];
-  const boardPreview = !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride ? hoveredEngineMove : null;
+  const boardPreview = !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride && !activeAnnotationDraft ? hoveredEngineMove : null;
   const suddenDeathReviewPanel = suddenDeathGameOver && (
     <>
       <div className="controls-row sudden-death-review-controls">
@@ -8776,11 +8905,19 @@ function App() {
                   <div className="opening-title" title={openingFullTitle}>
                     {openingTitleContent}
                   </div>
+                  {canAnnotateBoard && <button type="button" className="board-draw-btn" aria-label="Draw annotations"
+                    aria-pressed={Boolean(activeAnnotationDraft)}
+                    title={activeAnnotationDraft ? 'Return to move entry' : 'Draw arrows and mark squares'}
+                    onClick={toggleAnnotationDrawing}><DrawIcon /></button>}
                   <button className="hamburger-btn board-options-btn" aria-label="Options menu" onClick={() => setIsOptionsOpen(true)}>
                     &#9776;
                   </button>
                 </div>
-                <div className="stats-row">
+                {activeAnnotationDraft ? <div className="board-annotation-actions" aria-label="Drawing tools">
+                  <button type="button" onClick={saveAnnotations}>Save annotations</button>
+                  <button type="button" disabled={!activeAnnotationDraft.shapes.length} onClick={() => updateAnnotationDraft([])}>Clear</button>
+                  <button type="button" onClick={toggleAnnotationDrawing}>Cancel</button>
+                </div> : <div className="stats-row">
                   <LichessStatsBar
                     white={explorerData?.white ?? 0}
                     draws={explorerData?.draws ?? 0}
@@ -8790,13 +8927,16 @@ function App() {
                     {formatGamesCount(explorerData ? lichessTotal : 0)}
                     {visibleEngineEval && <span className="games-eval-inline">{` ${visibleEngineEval}`}</span>}
                   </span>
-                </div>
+                </div>}
               </div>
               <Board
                 fen={boardPreview?.fen ?? boardFen}
                 orientation={boardOrientation}
                 lastMove={boardPreview?.lastMove ?? boardLastMove}
                 arrows={boardPreview ? [] : trainingForActive ? trainingHintArrow : autoArrows}
+                annotations={boardPreview ? [] : savedAnnotations}
+                annotationDraft={activeAnnotationDraft?.shapes}
+                onAnnotationsChange={updateAnnotationDraft}
                 readOnly={Boolean(suddenDeathGameOver || (isSuddenDeathActive && (suddenDeathThinking || toTurnColor(boardFen) !== activeSide)))}
                 onMove={makeMove}
               />
@@ -8873,12 +9013,12 @@ function App() {
                     </button>
                     <button
                       type="button"
-                      className={portraitTab === 'moves' ? 'active' : ''}
-                      onClick={() => setPortraitTab('moves')}
+                      className={`${portraitTab === 'moves' ? 'active' : ''}${canAnnotateBoard ? ' long-pressable-btn' : ''}${activeAnnotationDraft ? ' drawing-mode-active' : ''}`}
+                      {...movesTabDrawing}
                       aria-label="Moves"
-                      title="Moves"
+                      title={canAnnotateBoard ? `Moves (long press: ${activeAnnotationDraft ? 'return to move entry' : 'draw annotations'})` : 'Moves'}
                     >
-                      <MoveIcon />
+                      {activeAnnotationDraft ? <DrawIcon /> : <MoveIcon />}
                     </button>
                   </>
                 )}
