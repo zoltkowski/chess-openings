@@ -21,6 +21,7 @@ select {
 }
 
 .app {
+  --stockfish-arrow-blue: #2563eb;
   padding: 1rem;
   height: 100dvh;
   min-height: 100dvh;
@@ -846,8 +847,8 @@ select {
   justify-self: start;
 }
 
-.player-stockfish-best { color: #1d4ed8; }
-.app.theme-dark .player-stockfish-best { color: #93c5fd; }
+.player-stockfish-best,
+.player-stockfish-score { color: var(--stockfish-arrow-blue); }
 
 .player-repertoire-status {
   font-size: 0.8rem;
@@ -1915,7 +1916,7 @@ span.engine-pv-move {
 }
 
 .compact-engine-arrows:enabled .compact-arrow.stockfish {
-  color: #2563eb;
+  color: var(--stockfish-arrow-blue);
   text-shadow: 0 0 2px #111827;
 }
 
@@ -1947,7 +1948,7 @@ span.engine-pv-move {
 }
 
 .icon-toggle-btn.with-diagonal-arrow.arrow-stockfish::after {
-  color: #2563eb;
+  color: var(--stockfish-arrow-blue);
 }
 
 .icon-toggle-btn.with-diagonal-arrow.arrow-maia::after {
@@ -2324,6 +2325,7 @@ select {
 }
 
 .app.theme-dark {
+  --stockfish-arrow-blue: #93c5fd;
   background: #0b1220;
   color: #e2e8f0;
 }

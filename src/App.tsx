@@ -8808,7 +8808,8 @@ function App() {
                     </div>}
                     {!opponentReviewOpen && playerAssessment && playerBestMove && playerBestSan && !playerRows.some(row => row.best) && (
                       <button type="button" className="player-best-move" onClick={() => playPlayerMove(playerBestMove)}>
-                        {STOCKFISH_ENGINE_LABEL} best: {toFigurineSan(playerBestSan)} {playerScoreForWhite(playerAssessment.best.scoreText, activeSide)}
+                        {STOCKFISH_ENGINE_LABEL} best: {toFigurineSan(playerBestSan)}{' '}
+                        <span className="player-stockfish-score">{playerScoreForWhite(playerAssessment.best.scoreText, activeSide)}</span>
                       </button>
                     )}
                     {(!opponentReviewOpen || showingOpponentResult) && playerRows.length > 0 && (
