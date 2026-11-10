@@ -598,6 +598,15 @@ select {
   gap: 0.2rem;
 }
 
+.move-list .sudden-death-review-controls {
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.sudden-death-review-reason {
+  margin: 0 0 0.35rem;
+}
+
 .analysis-pv-move {
   padding: 0.1rem 0.25rem;
   border: 0;
@@ -1663,11 +1672,6 @@ span.engine-pv-move {
   gap: 0.35rem;
 }
 
-.training-game-over-row .status {
-  color: #b91c1c;
-  font-weight: 600;
-}
-
 .training-position-stats-row {
   display: flex;
   align-items: center;
@@ -2253,10 +2257,6 @@ select {
 .app.theme-dark .tree-option-leaves,
 .app.theme-dark .move-table th {
   color: #cbd5e1;
-}
-
-.app.theme-dark .training-game-over-row .status {
-  color: #fca5a5;
 }
 
 .app.theme-dark .eval-progress-track {

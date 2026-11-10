@@ -289,7 +289,6 @@ type TrainingSession = {
   flashcardMode: boolean;
   suddenDeathMode: boolean;
   suddenDeathBaseEvalCp: number | null;
-  suddenDeathPromptFen: string | null;
   hintRequested: boolean;
   hintVisible: boolean;
   hintMoveUci: string | null;
@@ -315,13 +314,31 @@ type TreeEvalProgressState = {
   local: EvalPassProgress;
 };
 
+type SuddenDeathPosition = {
+  fen: string;
+  move?: { uci: string; label: string; squares: [Key, Key] };
+  evaluation?: StockfishEvaluationResult;
+  terminal?: string;
+};
+
+type SuddenDeathRound = {
+  startNodeId: string;
+  chess: Chess;
+  positions: SuddenDeathPosition[];
+};
+
 type SuddenDeathGameOverState = {
   side: Side;
   startNodeId: string;
-  baselineEvalCp: number;
-  failedEvalCp: number;
-  thresholdCp: number;
+  positions: SuddenDeathPosition[];
+  index: number;
+  reason: 'drop' | 'terminal' | 'unavailable';
 };
+
+function suddenDeathPositionCommand(positions: SuddenDeathPosition[], index = positions.length - 1) {
+  const moves = positions.slice(1, index + 1).map(position => position.move!.uci);
+  return `position fen ${positions[0].fen}${moves.length ? ` moves ${moves.join(' ')}` : ''}`;
+}
 
 type ExampleReplayState = {
   side: Side;
@@ -2130,9 +2147,10 @@ function Board(props: {
   orientation: 'white' | 'black';
   lastMove: [Key, Key] | undefined;
   arrows: DrawShape[];
+  readOnly?: boolean;
   onMove: (orig: Key, dest: Key) => void;
 }) {
-  const { fen, orientation, lastMove, arrows, onMove } = props;
+  const { fen, orientation, lastMove, arrows, readOnly, onMove } = props;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const apiRef = useRef<ChessgroundApi | null>(null);
   const onMoveRef = useRef(onMove);
@@ -2174,9 +2192,9 @@ function Board(props: {
       turnColor: toTurnColor(fen),
       blockTouchScroll: true,
       movable: {
-        color: 'both',
+        color: readOnly ? undefined : 'both',
         free: false,
-        dests: buildDests(fen),
+        dests: readOnly ? new Map() : buildDests(fen),
         events: {
           after: (orig, dest) => onMove(orig, dest),
         },
@@ -2189,7 +2207,7 @@ function Board(props: {
       },
       lastMove,
     });
-  }, [fen, orientation, arrows, lastMove, onMove]);
+  }, [fen, orientation, arrows, lastMove, readOnly, onMove]);
 
   return <div ref={containerRef} className="board" />;
 }
@@ -2424,6 +2442,7 @@ function App() {
   const [suddenDeathStartNodeId, setSuddenDeathStartNodeId] = useState<string | null>(null);
   const [suddenDeathCurrentFen, setSuddenDeathCurrentFen] = useState<string | null>(null);
   const [suddenDeathLastMove, setSuddenDeathLastMove] = useState<[Key, Key] | null>(null);
+  const suddenDeathRoundRef = useRef<SuddenDeathRound | null>(null);
   const [treeEvalProgress, setTreeEvalProgress] = useState<TreeEvalProgressState | null>(null);
   const [isEvalManagerOpen, setIsEvalManagerOpen] = useState(false);
   const [isDbStatsOpen, setIsDbStatsOpen] = useState(false);
@@ -2437,7 +2456,7 @@ function App() {
   const engineReadyRef = useRef(false);
   const isSearchingRef = useRef(false);
   const engineRunningRef = useRef(false);
-  const pendingAnalysisRef = useRef<{ fen: string; depth: number; multipv: number } | null>(null);
+  const pendingAnalysisRef = useRef<{ fen: string; depth: number; multipv: number; positionCommand?: string } | null>(null);
   const tryStartPendingRef = useRef<(() => void) | null>(null);
   const currentAnalysisRef = useRef(0);
   const lineCacheRef = useRef<Map<number, EngineLine>>(new Map());
@@ -2571,24 +2590,26 @@ function App() {
   const hasOpponentReviewNodes = repertoireReviewNodes.some(({ node }) => toTurnColor(node.fen) !== activeSide);
   const analysisScratchFen = analysisScratchPosition?.fen ?? null;
   const selectedBoardFen = analysisScratchFen ?? browseMistakePosition?.node.fen ?? browseOpponentPosition?.fen ?? selectedNode.fen;
+  const suddenDeathReviewPosition = suddenDeathGameOver?.positions[suddenDeathGameOver.index];
+  const suddenDeathReviewCommand = suddenDeathGameOver
+    ? suddenDeathPositionCommand(suddenDeathGameOver.positions, suddenDeathGameOver.index)
+    : undefined;
   const hasSuddenDeathBoardOverride = Boolean(
-    suddenDeathCurrentFen &&
-      ((trainingSession && trainingSession.side === activeSide && trainingSession.suddenDeathMode) ||
-        (suddenDeathGameOver && suddenDeathGameOver.side === activeSide)),
+    suddenDeathCurrentFen && trainingSession?.side === activeSide && trainingSession.suddenDeathMode,
   );
   const hasExampleReplayBoardOverride = Boolean(exampleReplay && exampleReplay.side === activeSide);
-  const boardFen = hasExampleReplayBoardOverride
+  const boardFen = suddenDeathReviewPosition?.fen ?? (hasExampleReplayBoardOverride
     ? (exampleReplay as ExampleReplayState).fens[(exampleReplay as ExampleReplayState).currentIndex]
     : hasSuddenDeathBoardOverride
       ? (suddenDeathCurrentFen as string)
-      : selectedBoardFen;
+      : selectedBoardFen);
   const showLichessArrowsOnBoard = showLichessArrows && (!lichessArrowsOpponentOnly || toTurnColor(boardFen) !== activeSide);
   const playerPositionKey = bookPositionFenKey(selectedBoardFen);
   const playerReviewKey = playerAssessmentKey(playerHandle, activeSide, playerPositionKey);
   const playerAssessment = playerAssessments[playerReviewKey];
   const playerRepertoireMoves = playerRepertoire?.movesByFen.get(playerPositionKey);
-  const enginePvFen = selectedEngine === 'stockfish' ? stockfishLinesFen : selectedBoardFen;
-  const maiaPositionFen = selectedBoardFen === START_FEN ? START_POS_FEN : selectedBoardFen;
+  const maiaPositionFen = fullBoardFen(suddenDeathReviewPosition?.fen ?? selectedBoardFen);
+  const enginePvFen = selectedEngine === 'stockfish' ? stockfishLinesFen : maiaPositionFen;
   const currentMaiaKey = `${maiaPositionFen}|${maiaStrengthElo}`;
   const maiaComparisonKey = `${currentMaiaKey}|${engineMultiPv}`;
   const showMixedEngines = bothEngines && selectedEngine === 'maia';
@@ -2883,8 +2904,10 @@ function App() {
       }];
     });
 
-    return softenOverlappingArrows([...treeArrows, ...lichessArrows, ...maiaArrows, ...stockfishArrows, ...mistakeArrows]);
+    return suddenDeathReviewPosition ? [...maiaArrows, ...stockfishArrows]
+      : softenOverlappingArrows([...treeArrows, ...lichessArrows, ...maiaArrows, ...stockfishArrows, ...mistakeArrows]);
   }, [
+    suddenDeathReviewPosition,
     reviewPosition,
     reviewPositionOnBoard,
     opponentFindingOnBoard,
@@ -2984,6 +3007,7 @@ function App() {
     setUndoStackBySide({ white: [], black: [] });
     setTrainingSession(null);
     setSuddenDeathGameOver(null);
+    suddenDeathRoundRef.current = null;
     setSuddenDeathStartNodeId(null);
     setSuddenDeathCurrentFen(null);
     setSuddenDeathLastMove(null);
@@ -3265,7 +3289,7 @@ function App() {
       engineWhitePerspectiveMultiplierRef.current = whitePerspectiveMultiplierFromFen(pending.fen);
       w.postMessage(`setoption name MultiPV value ${pending.multipv}`);
       w.postMessage('setoption name UCI_LimitStrength value false');
-      w.postMessage(`position fen ${pending.fen}`);
+      w.postMessage(pending.positionCommand ?? `position fen ${pending.fen}`);
       w.postMessage(`go depth ${pending.depth}`);
       isSearchingRef.current = true;
     };
@@ -3444,7 +3468,7 @@ function App() {
         return;
       }
 
-      const fen = selectedBoardFen === START_FEN ? new Chess().fen() : selectedBoardFen;
+      const fen = maiaPositionFen;
       const requestId = maiaAnalysisRequestRef.current + 1;
       maiaAnalysisRequestRef.current = requestId;
       setEngineStatus('analyzing');
@@ -3491,13 +3515,14 @@ function App() {
       return;
     }
 
-    const fen = selectedBoardFen === START_FEN ? new Chess().fen() : selectedBoardFen;
     const analysisId = currentAnalysisRef.current + 1;
     currentAnalysisRef.current = analysisId;
-    pendingAnalysisRef.current = { fen, depth: engineDepth, multipv: engineMultiPv };
+    pendingAnalysisRef.current = { fen: maiaPositionFen, depth: engineDepth, multipv: engineMultiPv,
+      positionCommand: suddenDeathReviewCommand };
     tryStartPendingRef.current?.();
   }, [
-    selectedBoardFen,
+    maiaPositionFen,
+    suddenDeathReviewCommand,
     engineDepth,
     engineRunning,
     engineMultiPv,
@@ -4256,7 +4281,7 @@ function App() {
     const maiaMoves = engineLines.map(line => line.bestMove);
     const query = (multipv: number, movetimeMs: number, searchMoves?: readonly string[]) => runStockfishSingleQuery({
       fen: maiaPositionFen, depth: engineDepth, perspectiveSide: 'white', engineChoice: 'stockfish',
-      multipv, movetimeMs, searchMoves, preserveInteractiveLines: true, signal,
+      multipv, movetimeMs, searchMoves, preserveInteractiveLines: true, signal, positionCommand: suddenDeathReviewCommand,
     });
     const compare = async () => {
       let top: CandidateEvaluation[] = [];
@@ -4298,7 +4323,7 @@ function App() {
     };
   }, [showMixedEngines, engineRunning, stockfishLoaded, engineStatus, maiaResultKey, currentMaiaKey, engineLines,
     isGameReviewRunning, isTreeEvalRunning, playerAssessmentRunning, trainingSession, exampleReplay, maiaPositionFen,
-    engineDepth, engineMultiPv, maiaComparisonKey, runStockfishSingleQuery]);
+    engineDepth, engineMultiPv, maiaComparisonKey, suddenDeathReviewCommand, runStockfishSingleQuery]);
 
   const withPlayerEngine = async <T,>(controller: AbortController, run: () => Promise<T>) => {
     playerAssessmentJobRef.current = controller;
@@ -4383,7 +4408,7 @@ function App() {
       return;
     }
     if (!hasHydratedAppState || !stockfishLoaded || analysisGameProgress || isTreeEvalRunning ||
-      trainingSession || isExampleReplayActive || findMissingControllerRef.current || !moves.size ||
+      trainingSession || suddenDeathGameOver || isExampleReplayActive || findMissingControllerRef.current || !moves.size ||
       toTurnColor(selectedBoardFen) !== activeSide) return;
     const controller = new AbortController();
     setPlayerAssessmentNotice(null);
@@ -4398,7 +4423,7 @@ function App() {
   };
 
   const analyzeCurrentGame = async (deep = false) => {
-    if (!isBrowseMode || isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning || playerAssessmentJobRef.current) return;
+    if (!isBrowseMode || isTrainingActive || isSuddenDeathActive || suddenDeathGameOver || isExampleReplayActive || isTreeEvalRunning || playerAssessmentJobRef.current) return;
     if (analysisGameProgress) {
       analysisGameCancelRef.current = true;
       analysisReviewAbortRef.current?.abort();
@@ -4730,6 +4755,54 @@ function App() {
     );
   };
 
+  const recordSuddenDeathMove = (round: SuddenDeathRound, move: Move, prefix: string) => {
+    const squares: [Key, Key] = [move.from, move.to];
+    const fen = round.chess.fen();
+    round.positions.push({ fen, move: { uci: uciFromMove(move), label: `${prefix} ${toFigurineSan(move.san)}`, squares } });
+    setSuddenDeathCurrentFen(fen);
+    setSuddenDeathLastMove(squares);
+  };
+
+  const querySuddenDeathPosition = (round: SuddenDeathRound, opponent = false) => runStockfishSingleQuery({
+    fen: round.chess.fen(),
+    positionCommand: suddenDeathPositionCommand(round.positions),
+    depth: opponent ? Math.max(10, Math.min(18, engineDepth)) : engineDepth,
+    perspectiveSide: 'white',
+    movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
+    limitStrengthElo: opponent && suddenDeathEngine === 'stockfish' ? suddenDeathStockfishElo : null,
+    engineChoice: opponent ? suddenDeathEngine : 'stockfish',
+    maiaElo: suddenDeathMaiaElo,
+  });
+
+  const evaluateSuddenDeathPosition = async (round: SuddenDeathRound) => {
+    const position = round.positions[round.positions.length - 1];
+    if (round.chess.isGameOver()) {
+      position.terminal = round.chess.isCheckmate()
+        ? (round.chess.turn() === 'b' ? '1–0 · Checkmate' : '0–1 · Checkmate')
+        : '½–½ · Draw';
+      return null;
+    }
+    const evaluation = await querySuddenDeathPosition(round);
+    position.evaluation = evaluation;
+    return evaluation;
+  };
+
+  const playSuddenDeathReply = async (round: SuddenDeathRound) => {
+    const reply = await querySuddenDeathPosition(round, true);
+    if (suddenDeathRoundRef.current !== round || !reply.bestMove) return;
+    const input = uciToMoveInput(reply.bestMove);
+    if (!input || !/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(reply.bestMove)) return;
+    const prefix = formatMovePrefix(round.chess);
+    recordSuddenDeathMove(round, round.chess.move(input), prefix);
+  };
+
+  const reviewSuddenDeathRound = (round: SuddenDeathRound, side: Side, reason: SuddenDeathGameOverState['reason']) => {
+    setSuddenDeathGameOver({ side, startNodeId: round.startNodeId, positions: round.positions, index: round.positions.length - 1, reason });
+    setTrainingSession(null);
+    setHoveredEngineMove(null);
+    setPortraitTab('moves');
+  };
+
   const startSuddenDeathRound = async (session: TrainingSession, sourceTreeOverride?: MoveTree) => {
     const side = session.side;
     const sideTree = sourceTreeOverride ?? trees[side];
@@ -4740,7 +4813,13 @@ function App() {
         : sideTree.rootId;
     const fixedStartNode = sideTree.nodes[fixedStartNodeId];
     if (!fixedStartNode) return;
-    const fixedStartFen = fixedStartNode.fen === START_FEN ? new Chess().fen() : fixedStartNode.fen;
+    const chess = fenToChess(fixedStartNode.fen);
+    const fixedStartFen = chess.fen();
+    const round: SuddenDeathRound = { startNodeId: fixedStartNodeId, chess, positions: [{ fen: fixedStartFen }] };
+    suddenDeathRoundRef.current = round;
+    setExampleReplay(null);
+    setAnalysisScratchPosition(null);
+    setHoveredEngineMove(null);
     setSuddenDeathStartNodeId(fixedStartNodeId);
     setSuddenDeathCurrentFen(fixedStartFen);
     setSuddenDeathLastMove(null);
@@ -4748,55 +4827,29 @@ function App() {
 
     setSuddenDeathThinking(true);
     try {
-      const openingReply = await runStockfishSingleQuery({
-        fen: fixedStartFen,
-        depth: Math.max(10, Math.min(18, engineDepth)),
-        perspectiveSide: 'white',
-        multipv: 1,
-        movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
-        limitStrengthElo: suddenDeathEngine === 'stockfish' ? suddenDeathStockfishElo : null,
-        engineChoice: suddenDeathEngine,
-        maiaElo: suddenDeathMaiaElo,
-      });
+      const baseEval = await evaluateSuddenDeathPosition(round);
+      if (suddenDeathRoundRef.current !== round) return;
+      if (!chess.isGameOver() && toTurnColor(fixedStartFen) !== side) await playSuddenDeathReply(round);
+      if (suddenDeathRoundRef.current !== round) return;
 
-      let promptFen = fixedStartFen;
-      let promptLastMove: [Key, Key] | null = null;
-      if (openingReply.bestMove) {
-        const promptChess = fenToChess(fixedStartFen);
-        const promotionChar = (openingReply.bestMove[4] ?? 'q').toLowerCase();
-        const promotion: 'q' | 'r' | 'b' | 'n' = ['q', 'r', 'b', 'n'].includes(promotionChar)
-          ? (promotionChar as 'q' | 'r' | 'b' | 'n')
-          : 'q';
-        const openingMove = promptChess.move({
-          from: openingReply.bestMove.slice(0, 2),
-          to: openingReply.bestMove.slice(2, 4),
-          promotion,
-        });
-        if (openingMove) {
-          promptFen = promptChess.fen();
-          promptLastMove = parseUciMove(openingReply.bestMove) ?? null;
-        }
+      const promptFen = chess.fen();
+      const promptEval = promptFen === fixedStartFen ? baseEval : await evaluateSuddenDeathPosition(round);
+      if (suddenDeathRoundRef.current !== round) return;
+      if (chess.isGameOver()) {
+        reviewSuddenDeathRound(round, side, 'terminal');
+        return;
       }
-      setSuddenDeathCurrentFen(promptFen);
-      setSuddenDeathLastMove(promptLastMove);
-
-      const baseEval = await runStockfishSingleQuery({
-        fen: promptFen,
-        depth: engineDepth,
-        perspectiveSide: 'white',
-        multipv: 1,
-        movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
-        limitStrengthElo: null,
-        engineChoice: 'stockfish',
-      });
+      if (toTurnColor(promptFen) !== side) {
+        reviewSuddenDeathRound(round, side, 'unavailable');
+        return;
+      }
       const userPerspectiveMultiplier = side === 'white' ? 1 : -1;
       setTrainingSession((prev) =>
         prev && prev.side === side && prev.suddenDeathMode
           ? {
               ...prev,
               currentPromptFen: promptFen,
-              suddenDeathPromptFen: promptFen,
-              suddenDeathBaseEvalCp: baseEval.evalCp * userPerspectiveMultiplier,
+              suddenDeathBaseEvalCp: promptEval?.hasScore ? promptEval.evalCp * userPerspectiveMultiplier : null,
               currentPromptHadError: false,
               currentPromptScopeIds: getScopeIdsForTrainingPosition(side, promptFen),
               hintRequested: false,
@@ -4806,7 +4859,7 @@ function App() {
           : prev,
       );
     } finally {
-      setSuddenDeathThinking(false);
+      if (suddenDeathRoundRef.current === round) setSuddenDeathThinking(false);
     }
   };
 
@@ -4918,23 +4971,33 @@ function App() {
   };
 
   const clearSuddenDeathRuntime = () => {
+    suddenDeathRoundRef.current = null;
     setSuddenDeathThinking(false);
     setSuddenDeathStartNodeId(null);
     setSuddenDeathCurrentFen(null);
     setSuddenDeathLastMove(null);
   };
 
-  const closeSuddenDeathGameOverPopup = () => {
+  const finishSuddenDeathReview = () => {
     if (!suddenDeathGameOver) return;
-    // Close the game-over popup but keep sudden-death runtime state so the
-    // user can step through the sudden-death continuation. Deactivation and
-    // restoring the start position is handled when the user toggles sudden
-    // death off via the sudden-death button (stopTraining).
+    restoreSuddenDeathStartPosition(suddenDeathGameOver.side, suddenDeathGameOver.startNodeId);
+    clearSuddenDeathRuntime();
     setSuddenDeathGameOver(null);
+    setHoveredEngineMove(null);
+    setAnalysisScratchPosition(null);
+    setEngineLines([]);
+    setPortraitTab('moves');
+  };
+
+  const selectSuddenDeathPosition = (index: number) => {
+    setHoveredEngineMove(null);
+    setSuddenDeathGameOver((review) => review && ({
+      ...review, index: Math.max(0, Math.min(index, review.positions.length - 1)),
+    }));
   };
 
   const startTraining = () => {
-    if (playerAssessmentJobRef.current) return;
+    if (suddenDeathGameOver || playerAssessmentJobRef.current) return;
     const side = activeSide;
     if (!hasSideTrainingContent(side)) {
       setStatus('No lines to train on this side.');
@@ -4956,7 +5019,6 @@ function App() {
       flashcardMode: false,
       suddenDeathMode: false,
       suddenDeathBaseEvalCp: null,
-      suddenDeathPromptFen: null,
       hintRequested: false,
       hintVisible: false,
       hintMoveUci: null,
@@ -4983,7 +5045,6 @@ function App() {
       flashcardMode: false,
       suddenDeathMode: true,
       suddenDeathBaseEvalCp: null,
-      suddenDeathPromptFen: null,
       hintRequested: false,
       hintVisible: false,
       hintMoveUci: null,
@@ -5000,7 +5061,7 @@ function App() {
   };
 
   const toggleSuddenDeathMode = () => {
-    if (playerAssessmentJobRef.current) return;
+    if (suddenDeathGameOver || playerAssessmentJobRef.current) return;
     if (!trainingSession) {
       startSuddenDeathTraining();
       return;
@@ -5022,7 +5083,6 @@ function App() {
             suddenDeathMode: true,
             flashcardMode: false,
             suddenDeathBaseEvalCp: null,
-            suddenDeathPromptFen: null,
             hintRequested: false,
             hintVisible: false,
             hintMoveUci: null,
@@ -5037,7 +5097,6 @@ function App() {
       suddenDeathMode: true,
       flashcardMode: false,
       suddenDeathBaseEvalCp: null,
-      suddenDeathPromptFen: null,
     });
   };
 
@@ -5074,7 +5133,6 @@ function App() {
             flashcardMode: nextFlashcardMode,
             suddenDeathMode: false,
             suddenDeathBaseEvalCp: null,
-            suddenDeathPromptFen: null,
             hintRequested: false,
             hintVisible: false,
             hintMoveUci: null,
@@ -5137,8 +5195,7 @@ function App() {
       setTrainingSession(null);
       return;
     }
-    if (!hasSideTrainingContent(trainingSession.side)) {
-      if (trainingSession.suddenDeathMode) clearSuddenDeathRuntime();
+    if (!trainingSession.suddenDeathMode && !hasSideTrainingContent(trainingSession.side)) {
       setTrainingSession(null);
       setSuddenDeathGameOver(null);
       return;
@@ -5158,21 +5215,18 @@ function App() {
   };
 
   const makeMove = (orig: Key, dest: Key, promotion: 'q' | 'r' | 'b' | 'n' = 'q') => {
-    if (exampleReplay && exampleReplay.side === activeSide) return;
+    if (suddenDeathGameOver || (exampleReplay && exampleReplay.side === activeSide)) return;
+    const round = isSuddenDeathActive ? suddenDeathRoundRef.current : null;
+    if (isSuddenDeathActive && (!round || suddenDeathThinking || toTurnColor(round.chess.fen()) !== activeSide)) return;
     const currentTree = trees[activeSide];
     const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
     const currentNode = currentTree.nodes[currentSelectedId] ?? currentTree.nodes[currentTree.rootId];
     const reviewBoard = Boolean(reviewPositionOnBoard || opponentFindingOnBoard);
-    const moveSourceFen = (analysisScratchPosition || reviewBoard) && !isTrainingActive
+    const moveSourceFen = round?.chess.fen() ?? ((analysisScratchPosition || reviewBoard) && !isTrainingActive
       ? selectedBoardFen
-      :
-      trainingSession &&
-      trainingSession.side === activeSide &&
-      trainingSession.suddenDeathMode &&
-      suddenDeathCurrentFen
-        ? suddenDeathCurrentFen
-        : currentNode.fen;
-    const chess = fenToChess(moveSourceFen);
+      : currentNode.fen);
+    const chess = round?.chess ?? fenToChess(moveSourceFen);
+    const movePrefix = round ? formatMovePrefix(chess) : '';
     const move = chess.move({ from: orig, to: dest, promotion });
 
     if (!move) return;
@@ -5195,7 +5249,7 @@ function App() {
 
     // Engine-line previews stay separate from the move list. Review moves use
     // the working tree below; without an active repertoire it is not persisted.
-    if (!isTrainingActive && (analysisScratchPosition || reviewBoard)) {
+    if (!round && !isTrainingActive && (analysisScratchPosition || reviewBoard)) {
       if (analysisScratchPosition?.enginePreview) {
         openEnginePreview({ fen: chess.fen(), lastMove: [move.from as Key, move.to as Key] });
         return;
@@ -5209,7 +5263,7 @@ function App() {
       return;
     }
 
-    if (isBrowseMode && !isTrainingActive) {
+    if (isBrowseMode && !isTrainingActive && !round) {
       const uci = uciFromMove(move);
       const matchingChildId = currentNode.children.find((id) => currentTree.nodes[id]?.moveUci === uci);
       const existingChildId = currentNode.children[0] === matchingChildId ? matchingChildId : undefined;
@@ -5262,118 +5316,59 @@ function App() {
     const existingChildId = currentNode.children.find((id) => currentTree.nodes[id].moveUci === uci);
 
     if (trainingSession && trainingSession.side === activeSide) {
-      if (trainingSession.suddenDeathMode) {
-        if (suddenDeathThinking || !suddenDeathCurrentFen) return;
-        const userFen = chess.fen();
-        setSuddenDeathCurrentFen(userFen);
-        setSuddenDeathLastMove(parseUciMove(uci) ?? null);
+      if (round) {
+        recordSuddenDeathMove(round, move, movePrefix);
+        const promptFen = moveSourceFen;
+        const baseEvalCp = trainingSession.suddenDeathBaseEvalCp;
+        const promptScopeIds = trainingSession.currentPromptScopeIds.length > 0
+          ? trainingSession.currentPromptScopeIds
+          : getScopeIdsForTrainingPosition(activeSide, promptFen);
+        const thresholdCp = Math.round(suddenDeathThreshold * 100);
+        const userPerspective = activeSide === 'white' ? 1 : -1;
+        const exceedsDrop = (evaluation: StockfishEvaluationResult) =>
+          evaluation.hasScore && baseEvalCp !== null && evaluation.evalCp * userPerspective <= baseEvalCp - thresholdCp;
+        const finishPosition = (evaluation: StockfishEvaluationResult | null) => {
+          const terminal = evaluation === null;
+          const lost = terminal ? round.chess.isCheckmate() && toTurnColor(round.chess.fen()) === activeSide
+            : exceedsDrop(evaluation);
+          if (!lost && !terminal) return false;
+          appendTrainingAnswer(activeSide, promptFen, promptScopeIds, lost ? 0 : 1);
+          reviewSuddenDeathRound(round, activeSide, terminal ? 'terminal' : 'drop');
+          return true;
+        };
 
-        const promptFen = trainingSession.suddenDeathPromptFen ?? trainingSession.currentPromptFen ?? suddenDeathCurrentFen;
-        const baseEvalCp = trainingSession.suddenDeathBaseEvalCp ?? 0;
-        const promptScopeIds =
-          trainingSession.currentPromptScopeIds.length > 0
-            ? trainingSession.currentPromptScopeIds
-            : getScopeIdsForTrainingPosition(activeSide, promptFen);
-
+        setSuddenDeathThinking(true);
         void (async () => {
-          setSuddenDeathThinking(true);
           try {
-            const postUserEval = await runStockfishSingleQuery({
-              fen: userFen,
-              depth: engineDepth,
-              perspectiveSide: 'white',
-              multipv: 1,
-              movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
-              limitStrengthElo: null,
-              engineChoice: 'stockfish',
-            });
-            const thresholdCp = Math.round(suddenDeathThreshold * 100);
-            const userPerspectiveMultiplier = activeSide === 'white' ? 1 : -1;
-            const postUserEvalCp = postUserEval.evalCp * userPerspectiveMultiplier;
-            const failedAfterUserMove = postUserEvalCp <= baseEvalCp - thresholdCp;
-            if (failedAfterUserMove) {
-              setSuddenDeathGameOver({
-                side: activeSide,
-                startNodeId: suddenDeathStartNodeId ?? trainingSession.entryNodeId,
-                baselineEvalCp: baseEvalCp,
-                failedEvalCp: postUserEvalCp,
-                thresholdCp,
-              });
-              appendTrainingAnswer(activeSide, promptFen, promptScopeIds, 0);
+            const postUserEval = await evaluateSuddenDeathPosition(round);
+            if (suddenDeathRoundRef.current !== round || finishPosition(postUserEval)) return;
+
+            const userFen = round.chess.fen();
+            await playSuddenDeathReply(round);
+            if (suddenDeathRoundRef.current !== round) return;
+            const replyFen = round.chess.fen();
+            if (replyFen === userFen) {
+              reviewSuddenDeathRound(round, activeSide, 'unavailable');
               return;
             }
 
-            const engineReply = await runStockfishSingleQuery({
-              fen: userFen,
-              depth: Math.max(10, Math.min(18, engineDepth)),
-              perspectiveSide: 'white',
-              multipv: 1,
-              movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
-              limitStrengthElo: suddenDeathEngine === 'stockfish' ? suddenDeathStockfishElo : null,
-              engineChoice: suddenDeathEngine,
-              maiaElo: suddenDeathMaiaElo,
-            });
+            const replyEval = await evaluateSuddenDeathPosition(round);
+            if (suddenDeathRoundRef.current !== round || finishPosition(replyEval)) return;
 
-            let evalFen = userFen;
-            let evalLastMove: [Key, Key] | null = parseUciMove(uci) ?? null;
-            if (engineReply.bestMove) {
-              const engineChess = fenToChess(userFen);
-              const promotionChar = (engineReply.bestMove[4] ?? 'q').toLowerCase();
-              const promotion: 'q' | 'r' | 'b' | 'n' = ['q', 'r', 'b', 'n'].includes(promotionChar)
-                ? (promotionChar as 'q' | 'r' | 'b' | 'n')
-                : 'q';
-              const engineMove = engineChess.move({
-                from: engineReply.bestMove.slice(0, 2),
-                to: engineReply.bestMove.slice(2, 4),
-                promotion,
-              });
-              if (engineMove) {
-                evalFen = engineChess.fen();
-                evalLastMove = parseUciMove(engineReply.bestMove) ?? null;
-              }
-            }
-            setSuddenDeathCurrentFen(evalFen);
-            setSuddenDeathLastMove(evalLastMove);
-
-            const evalResult = await runStockfishSingleQuery({
-              fen: evalFen,
-              depth: engineDepth,
-              perspectiveSide: 'white',
-              multipv: 1,
-              movetimeMs: Math.max(100, Math.round(suddenDeathMaxThinkTimeSec * 1000)),
-              limitStrengthElo: null,
-              engineChoice: 'stockfish',
-            });
-
-            const evalResultUserCp = evalResult.evalCp * userPerspectiveMultiplier;
-            const failed = evalResultUserCp <= baseEvalCp - thresholdCp;
-
-            if (failed) {
-              setSuddenDeathGameOver({
-                side: activeSide,
-                startNodeId: suddenDeathStartNodeId ?? trainingSession.entryNodeId,
-                baselineEvalCp: baseEvalCp,
-                failedEvalCp: evalResultUserCp,
-                thresholdCp,
-              });
-              appendTrainingAnswer(activeSide, promptFen, promptScopeIds, 0);
-            } else {
-              appendTrainingAnswer(activeSide, promptFen, promptScopeIds, 1);
-              setTrainingSession((prev) =>
-                prev && prev.side === activeSide
-                  ? {
-                      ...prev,
-                      correctCount: prev.correctCount + 1,
-                      currentPromptFen: evalFen,
-                      suddenDeathPromptFen: evalFen,
-                      currentPromptScopeIds: getScopeIdsForTrainingPosition(activeSide, evalFen),
-                      currentPromptHadError: false,
-                    }
-                  : prev,
-              );
-            }
+            appendTrainingAnswer(activeSide, promptFen, promptScopeIds, 1);
+            setTrainingSession((prev) =>
+              prev && prev.side === activeSide && prev.suddenDeathMode
+                ? {
+                    ...prev,
+                    correctCount: prev.correctCount + 1,
+                    currentPromptFen: replyFen,
+                    currentPromptScopeIds: getScopeIdsForTrainingPosition(activeSide, replyFen),
+                    currentPromptHadError: false,
+                  }
+                : prev,
+            );
           } finally {
-            setSuddenDeathThinking(false);
+            if (suddenDeathRoundRef.current === round) setSuddenDeathThinking(false);
           }
         })();
         return;
@@ -5557,7 +5552,7 @@ function App() {
   };
 
   const playSuggestedMove = (uci: string) => {
-    if (isTrainingActive) return;
+    if (isTrainingActive || isSuddenDeathActive || suddenDeathGameOver) return;
     const keyPair = parseUciMove(uci);
     if (!keyPair) return;
     const promotionChar = (uci[4] ?? 'q').toLowerCase();
@@ -5568,7 +5563,7 @@ function App() {
   };
 
   const playPlayerMove = (uci: string) => {
-    if (trainingSession || isExampleReplayActive || isTreeEvalRunning) return;
+    if (trainingSession || suddenDeathGameOver || isExampleReplayActive || isTreeEvalRunning) return;
     const chess = fenToChess(selectedBoardFen);
     try {
       const move = chess.move(uci);
@@ -6630,7 +6625,9 @@ function App() {
   const isTrainingActive = Boolean(
     trainingSession && trainingSession.side === activeSide && !trainingSession.suddenDeathMode,
   );
-  const boardLastMove = hasExampleReplayBoardOverride
+  const boardLastMove = suddenDeathReviewPosition
+    ? suddenDeathReviewPosition.move?.squares
+    : hasExampleReplayBoardOverride
     ? (exampleReplay as ExampleReplayState).lastMoves[(exampleReplay as ExampleReplayState).currentIndex] ?? undefined
     : hasSuddenDeathBoardOverride
       ? suddenDeathLastMove ?? undefined
@@ -6688,8 +6685,9 @@ function App() {
     const [orig, dest] = keyPair;
     return [{ orig, dest, brush: 'green' }];
   }, [isTrainingActive, trainingSession]);
-  const canGoBack = Boolean(analysisScratchPosition?.enginePreview || analysisScratchPosition?.playerMoves?.length || selectedNode.parentId);
-  const backTitle = analysisScratchPosition?.enginePreview ? 'Back (long press: original position)' : null;
+  const canGoBack = suddenDeathGameOver ? suddenDeathGameOver.index > 0
+    : Boolean(analysisScratchPosition?.enginePreview || analysisScratchPosition?.playerMoves?.length || selectedNode.parentId);
+  const backTitle = suddenDeathGameOver || analysisScratchPosition?.enginePreview ? 'Back (long press: original position)' : null;
   const isEngineEnabled = engineRunning;
   const canToggleMaiaArrows = maiaLoaded && engineRunning;
   const canToggleStockfishArrows = stockfishLoaded && engineRunning;
@@ -6843,6 +6841,7 @@ function App() {
   }, [exampleReplay, activeSide]);
 
   const loadExampleReplayGame = async (game: LichessExampleGame) => {
+    if (suddenDeathGameOver || isSuddenDeathActive) return;
     const gameId = typeof game.id === 'string' ? game.id.trim() : '';
     if (!gameId) return;
     setExampleReplayLoadingId(gameId);
@@ -7949,6 +7948,10 @@ function App() {
   };
 
   const goBackOneMove = () => {
+    if (suddenDeathGameOver) {
+      selectSuddenDeathPosition(suddenDeathGameOver.index - 1);
+      return;
+    }
     if (analysisScratchPosition?.enginePreview) {
       setHoveredEngineMove(null);
       setAnalysisScratchPosition(analysisScratchPosition.enginePreview.previous);
@@ -7962,6 +7965,10 @@ function App() {
   };
 
   const goBackToPreviousBranchMove = () => {
+    if (suddenDeathGameOver) {
+      selectSuddenDeathPosition(0);
+      return;
+    }
     if (isTrainingActive || isSuddenDeathActive) return;
     let cursorId = selectedNode.parentId;
     while (cursorId) {
@@ -8007,7 +8014,7 @@ function App() {
         backLongPressHandledRef.current = true;
         backLongPressStageRef.current = 1;
         backLongPressActionRef.current(1);
-        if (!analysisScratchPosition?.enginePreview) scheduleBackLongPressStage();
+        if (!analysisScratchPosition?.enginePreview && !suddenDeathGameOver) scheduleBackLongPressStage();
       }, 450);
       return;
     }
@@ -8137,7 +8144,7 @@ function App() {
   );
 
   const navigateToNode = useCallback((side: Side, nextId: string) => {
-    if (trainingSession && trainingSession.side === side) return;
+    if (suddenDeathGameOver || trainingSession?.side === side) return;
     setAnalysisScratchPosition(null);
     setEngineLines([]);
     lineCacheRef.current = new Map();
@@ -8148,7 +8155,7 @@ function App() {
       [side]: [...prev[side], { tree: trees[side], selectedNodeId: currentId }].slice(-200),
     }));
     setSelectedNodeBySide((prev) => ({ ...prev, [side]: nextId }));
-  }, [trainingSession, selectedNodeBySide, trees]);
+  }, [suddenDeathGameOver, trainingSession, selectedNodeBySide, trees]);
 
   useEffect(() => {
     if (displayedOpponentFindingRef.current === opponentFinding) return;
@@ -8175,7 +8182,7 @@ function App() {
     setSelectedNodeBySide((prev) => ({ ...prev, [activeSide]: snapshot.selectedNodeId }));
   };
 
-  const canPlayEngineMove = !isTrainingActive && !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride;
+  const canPlayEngineMove = !isTrainingActive && !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride && !suddenDeathGameOver;
   const renderEngineMove = (move: ReturnType<typeof buildEnginePvMoves>[number] | undefined,
     className = '', action?: 'play' | 'preview', key?: number) => {
     if (!move) return <span>—</span>;
@@ -8199,6 +8206,47 @@ function App() {
       {moves.slice(1).map((move, index) => renderEngineMove(move, '', canPlayEngineMove ? 'preview' : undefined, index))}
     </div>
   );
+  const reviewEvaluation = suddenDeathReviewPosition?.evaluation;
+  const liveReviewLine = suddenDeathReviewPosition && !suddenDeathReviewPosition.terminal && engineRunning && selectedEngine === 'stockfish' &&
+    stockfishLinesFen === suddenDeathReviewPosition.fen ? engineLines[0] : undefined;
+  const reviewScore = liveReviewLine?.scoreText ?? (reviewEvaluation?.hasScore ? reviewEvaluation.scoreText : null);
+  const reviewPv = liveReviewLine?.pv || reviewEvaluation?.pv || reviewEvaluation?.bestMove || '';
+  const reviewPvMoves = suddenDeathReviewPosition && reviewPv ? buildEnginePvMoves(suddenDeathReviewPosition.fen, reviewPv) : [];
+  const boardPreview = !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride ? hoveredEngineMove : null;
+  const suddenDeathReviewPanel = suddenDeathGameOver && (
+    <>
+      <div className="controls-row sudden-death-review-controls">
+        <strong>Sudden Death review</strong>
+        <button type="button" onClick={finishSuddenDeathReview}>Finish review</button>
+      </div>
+      {suddenDeathGameOver.reason !== 'terminal' && <p className="status sudden-death-review-reason">
+        {suddenDeathGameOver.reason === 'drop' ? 'The evaluation crossed the drop limit.' : 'The opponent’s reply was unavailable.'}
+      </p>}
+      <div className="controls-row sudden-death-review-controls">
+        <button type="button" aria-label="Previous move" disabled={suddenDeathGameOver.index === 0}
+          onClick={() => selectSuddenDeathPosition(suddenDeathGameOver.index - 1)}>‹</button>
+        <span aria-live="polite">{suddenDeathGameOver.index} / {suddenDeathGameOver.positions.length - 1}</span>
+        <button type="button" aria-label="Next move" disabled={suddenDeathGameOver.index === suddenDeathGameOver.positions.length - 1}
+          onClick={() => selectSuddenDeathPosition(suddenDeathGameOver.index + 1)}>›</button>
+      </div>
+      <div className="move-notation-line" aria-label="Sudden Death game history">
+        {suddenDeathGameOver.positions.map((position, index) => (
+          <button key={index} type="button" aria-current={index === suddenDeathGameOver.index ? 'step' : undefined}
+            className={`move-inline-item${index === suddenDeathGameOver.index ? ' analysis-selected' : ''}`}
+            onClick={() => selectSuddenDeathPosition(index)}>{position.move?.label ?? 'Start'}</button>
+        ))}
+      </div>
+      <div className="game-analysis-comment">
+        <div aria-live="polite">
+          <strong>{suddenDeathReviewPosition?.terminal ?? (reviewScore ? `${STOCKFISH_ENGINE_LABEL} ${reviewScore}` : 'Stockfish evaluation unavailable')}</strong>
+          {reviewScore && <span className="status"> · White’s perspective</span>}
+        </div>
+        {reviewPvMoves.length > 0 && <div className="analysis-comment-line" aria-label="Stockfish continuation">
+          {reviewPvMoves.map((move, index) => renderEngineMove(move, '', undefined, index))}
+        </div>}
+      </div>
+    </>
+  );
   const maiaLines = maiaResultKey === currentMaiaKey ? engineLines : [];
   const mixedRows = [
     ...maiaLines.map(line => ({ uci: line.bestMove, maia: line, score: comparison?.scores.get(line.bestMove) })),
@@ -8211,7 +8259,7 @@ function App() {
   }
   const engineTable = (
     <div className="table ai-eval-table">
-      {selectedEngine === 'stockfish' ? engineLines.map(line => {
+      {selectedEngine === 'stockfish' ? (suddenDeathGameOver && enginePvFen !== maiaPositionFen ? [] : engineLines).map(line => {
         const moves = buildEnginePvMoves(enginePvFen, line.pv || line.bestMove);
         return (
           <div className="table-row engine-pv-row" key={line.multipv}>
@@ -8537,7 +8585,7 @@ function App() {
               {!mistakeReview && !isPlayerExplorer && !explorerData && !lichessAuthRequired && (
                 <div className="lichess-table-actions desktop-only">
                   <button className="gear-btn" type="button" aria-label="Filters" title="Filters"
-                    onClick={() => setIsLichessFilterOpen(true)}>⚙</button>
+                    onClick={() => setIsLichessFilterOpen(true)}><DbIcon /></button>
                 </div>
               )}
               {!mistakeReview && (!opponentReviewOpen || showingOpponentResult) && (explorerData || isPlayerExplorer) && (
@@ -8621,7 +8669,7 @@ function App() {
                       title="Filters"
                       onClick={() => setIsLichessFilterOpen(true)}
                     >
-                      ⚙
+                      <DbIcon />
                     </button>
                   </div>
                 </>
@@ -8713,7 +8761,7 @@ function App() {
                       title="AI options"
                       onClick={() => setIsStockfishQuickOpen(true)}
                     >
-                      ⚙
+                      <ComputerIcon />
                     </button>
                   </div>
                   {engineTable}
@@ -8745,10 +8793,11 @@ function App() {
                 </div>
               </div>
               <Board
-                fen={hoveredEngineMove && !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride ? hoveredEngineMove.fen : boardFen}
+                fen={boardPreview?.fen ?? boardFen}
                 orientation={boardOrientation}
-                lastMove={hoveredEngineMove && !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride ? hoveredEngineMove.lastMove : boardLastMove}
-                arrows={hoveredEngineMove ? [] : trainingForActive ? trainingHintArrow : autoArrows}
+                lastMove={boardPreview?.lastMove ?? boardLastMove}
+                arrows={boardPreview ? [] : trainingForActive ? trainingHintArrow : autoArrows}
+                readOnly={Boolean(suddenDeathGameOver || (isSuddenDeathActive && (suddenDeathThinking || toTurnColor(boardFen) !== activeSide)))}
                 onMove={makeMove}
               />
               <div className="portrait-tabbar">
@@ -8840,7 +8889,7 @@ function App() {
                     {...(isTrainingActive ? { onClick: () => stopTraining() } : trainButtonMenu)}
                     aria-label={isTrainingActive ? 'Stop training' : 'Train'}
                     title={isTrainingActive ? 'Stop training' : 'Train (long press: options)'}
-                    disabled={!isTrainingActive && !canStartTrainingForActiveSide}
+                    disabled={Boolean(suddenDeathGameOver) || (!isTrainingActive && !canStartTrainingForActiveSide)}
                   >
                     {isTrainingActive ? 'Stop training' : <TrainIcon />}
                   </button>
@@ -8856,7 +8905,7 @@ function App() {
                     {...suddenDeathMenu}
                     aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
                     title={isSuddenDeathActive ? 'Restart sudden death round (long press: options)' : 'Start sudden death training (long press: options)'}
-                    disabled={suddenDeathThinking}
+                    disabled={suddenDeathThinking || Boolean(suddenDeathGameOver)}
                   >
                     <SuddenDeathIcon />
                   </button>
@@ -9004,10 +9053,10 @@ function App() {
             </aside>}
 
             <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''} ${isTrainingActive ? 'training-pane' : ''}`}>
-              {selectedNode.comment && boardFen === selectedNode.fen && !analysisScratchFen && (
+              {!suddenDeathGameOver && selectedNode.comment && boardFen === selectedNode.fen && !analysisScratchFen && (
                 <p className="active-move-comment"><strong>{toFigurineSan(selectedNode.moveSan ?? '')}</strong> {selectedNode.comment}</p>
               )}
-              {isTrainingActive ? (
+              {suddenDeathReviewPanel || (isTrainingActive ? (
                 <>
                   <div className="controls-row desktop-only">
                     <button type="button" className="stop-training-btn" onClick={stopTraining}>
@@ -9056,17 +9105,6 @@ function App() {
                   <div className="controls-row training-position-stats">
                     <span className="status">{`This position success rate: ${trainingPositionSuccessPct}%`}</span>
                   </div>
-                  {suddenDeathGameOver && (
-                    <div className="controls-row training-position-stats training-game-over-row">
-                      <span className="status">{`Sudden death over (${suddenDeathGameOver.side}): ${formatSignedCp(
-                        suddenDeathGameOver.baselineEvalCp * (suddenDeathGameOver.side === 'white' ? 1 : -1),
-                      )} -> ${formatSignedCp(
-                        suddenDeathGameOver.failedEvalCp * (suddenDeathGameOver.side === 'white' ? 1 : -1),
-                      )} (threshold ${(
-                        suddenDeathGameOver.thresholdCp / 100
-                      ).toFixed(2)})`}</span>
-                    </div>
-                  )}
                   {isTrainingActive && trainingSession?.hintVisible && trainingHintMoveText && (
                     <div className="controls-row training-position-stats">
                       <span className="status">{`Hint move: ${trainingHintMoveText}`}</span>
@@ -9240,17 +9278,6 @@ function App() {
                       </>
                     )}
                   </div>
-                  {suddenDeathGameOver && (
-                    <div className="controls-row training-position-stats training-game-over-row">
-                      <span className="status">{`Sudden death over (${suddenDeathGameOver.side}): ${formatSignedCp(
-                        suddenDeathGameOver.baselineEvalCp * (suddenDeathGameOver.side === 'white' ? 1 : -1),
-                      )} -> ${formatSignedCp(
-                        suddenDeathGameOver.failedEvalCp * (suddenDeathGameOver.side === 'white' ? 1 : -1),
-                      )} (threshold ${(
-                        suddenDeathGameOver.thresholdCp / 100
-                      ).toFixed(2)})`}</span>
-                    </div>
-                  )}
                   {isBrowseMode && analysisGameProgress && (
                     <div className="game-analysis-progress-inline" aria-live="polite">
                       <div className="game-analysis-progress-label">
@@ -9434,7 +9461,7 @@ function App() {
                     </div>
                   )}
                 </>
-              )}
+              ))}
             </aside>
           </div>
 
@@ -9973,22 +10000,6 @@ function App() {
         </div>
       )}
 
-      {suddenDeathGameOver && (
-        <div className="modal-backdrop" onClick={closeSuddenDeathGameOverPopup}>
-          <div className="modal-card stockfish-quick-modal eval-manager-modal" onClick={(e) => e.stopPropagation()}>
-            <h3 className="eval-manager-title">Sudden death over</h3>
-            <div className="status">{`${suddenDeathGameOver.side}: ${formatSignedCp(
-              suddenDeathGameOver.baselineEvalCp * (suddenDeathGameOver.side === 'white' ? 1 : -1),
-            )} -> ${formatSignedCp(suddenDeathGameOver.failedEvalCp * (suddenDeathGameOver.side === 'white' ? 1 : -1))}`}</div>
-            <div className="status">{`Drop threshold: ${(suddenDeathGameOver.thresholdCp / 100).toFixed(2)}`}</div>
-            <div className="eval-manager-actions">
-              <button type="button" onClick={closeSuddenDeathGameOverPopup}>
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {isDbStatsOpen && (
         <div className="modal-backdrop" onClick={() => setIsDbStatsOpen(false)}>
