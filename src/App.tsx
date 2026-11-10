@@ -1273,6 +1273,14 @@ function BackIcon() {
   );
 }
 
+function UndoIcon() {
+  return (
+    <TabIconBase>
+      <path d="M9 5 4 10l5 5M4 10h10a5 5 0 0 1 0 10h-3" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+    </TabIconBase>
+  );
+}
+
 function ForwardIcon() {
   return (
     <TabIconBase>
@@ -9496,8 +9504,9 @@ function App() {
                           onClick={toggleAnnotationDrawing}>
                           {!isDrawingAnnotations && <MoveIcon />}
                         </button>
-                        <button type="button" onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
-                          Undo
+                        <button type="button" className="mode-icon-btn" aria-label="Undo" title="Undo"
+                          onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
+                          <UndoIcon />
                         </button>
                         {renderForwardReviewButton('portrait-only')}
                         <div ref={movesArrowGroupRef} className={`arrow-toggle-group portrait-panel-arrows ${showMixedEngines ? 'mixed-engine-arrows' : ''}`}>{renderArrowToggleButtons(useCompactEngineArrows)}</div>
