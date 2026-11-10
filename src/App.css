@@ -1729,7 +1729,7 @@ span.engine-pv-move {
 
   .lichess-panel {
     display: grid;
-    grid-template: minmax(0, 65fr) minmax(0, 35fr) / minmax(0, 1fr);
+    grid-template: minmax(0, 60fr) minmax(0, 40fr) / minmax(0, 1fr);
     overflow: hidden;
   }
 
