@@ -2017,6 +2017,32 @@ function toFigurineSan(san: string) {
     .replace(/=([KQRBN])/g, (_match, piece: string) => `=${FIGURINES[piece] ?? piece}`);
 }
 
+function renderCommentText(comment: string): ReactNode {
+  const parts: ReactNode[] = [];
+  let offset = 0;
+  for (const match of comment.matchAll(/\b(?:https?:\/\/|www\.)[^\s<>"']+/gi)) {
+    let text = match[0];
+    if (text !== comment.trim()) {
+      text = text.replace(/[.,!?;:]+$/, '');
+      const unmatchedParens = text.split(')').length - text.split('(').length;
+      const trailingParens = text.match(/\)+$/)?.[0].length ?? 0;
+      const trim = Math.min(Math.max(0, unmatchedParens), trailingParens);
+      if (trim) text = text.slice(0, -trim);
+    }
+    const href = /^www\./i.test(text) ? `https://${text}` : text;
+    try {
+      new URL(href);
+    } catch {
+      continue;
+    }
+    parts.push(comment.slice(offset, match.index));
+    parts.push(<a key={match.index} href={href} target="_blank" rel="noopener noreferrer">{text}</a>);
+    offset = match.index + text.length;
+  }
+  parts.push(comment.slice(offset));
+  return parts;
+}
+
 function uciToFigurineSan(fen: string, uci: string) {
   if (!uci || uci.length < 4) return '';
   const chess = fenToChess(fen);
@@ -8342,6 +8368,12 @@ function App() {
   const reviewPv = liveReviewLine?.pv || reviewEvaluation?.pv || reviewEvaluation?.bestMove || '';
   const reviewPvMoves = suddenDeathReviewPosition && reviewPv ? buildEnginePvMoves(suddenDeathReviewPosition.fen, reviewPv) : [];
   const boardPreview = !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride && !activeAnnotationDraft ? hoveredEngineMove : null;
+  const activeMoveComment = !suddenDeathGameOver && selectedNode.comment && boardFen === selectedNode.fen && !analysisScratchFen
+    ? <p className="active-move-comment">
+        {selectedNode.moveSan && <><strong>{toFigurineSan(selectedNode.moveSan)}</strong>{' '}</>}
+        {renderCommentText(selectedNode.comment)}
+      </p>
+    : null;
   const suddenDeathReviewPanel = suddenDeathGameOver && (
     <>
       <div className="controls-row sudden-death-review-controls">
@@ -9193,9 +9225,6 @@ function App() {
             </aside>}
 
             <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''} ${isTrainingActive ? 'training-pane' : ''}`}>
-              {!suddenDeathGameOver && selectedNode.comment && boardFen === selectedNode.fen && !analysisScratchFen && (
-                <p className="active-move-comment"><strong>{toFigurineSan(selectedNode.moveSan ?? '')}</strong> {selectedNode.comment}</p>
-              )}
               {suddenDeathReviewPanel || (isTrainingActive ? (
                 <>
                   <div className="controls-row desktop-only">
@@ -9266,6 +9295,7 @@ function App() {
                       </button>
                     )}
                   </div>
+                  {activeMoveComment}
                 </>
               ) : (
                 <>
@@ -9465,6 +9495,7 @@ function App() {
                         </button>
                       ))}
                     </div>
+                    {activeMoveComment}
                   </div>}
                   {selectedAnalysisResult && (
                     <div className={`game-analysis-comment ${selectedAnalysisResult.greatFind ? 'excellent' : selectedAnalysisResult.category === 'excellent' ? 'good' : selectedAnalysisResult.category}`} aria-live="polite">

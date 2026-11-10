@@ -1135,12 +1135,15 @@ button.board-draw-btn[aria-pressed='true'],
 .commented-move { text-decoration: underline; text-underline-offset: 0.18em; }
 
 .active-move-comment {
-  margin: 0 0 0.45rem;
+  margin: 0.5rem 0 0;
   padding: 0.35rem 0.55rem;
   border-inline-start: 2px solid #64748b;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.active-move-comment a { color: #1d4ed8; }
+.app.theme-dark .active-move-comment a { color: #93c5fd; }
 
 .move-comment-editor textarea { display: block; width: 100%; margin-top: 0.4rem; resize: vertical; }
 .move-comment-editor .game-analysis-modal-actions { gap: 0.4rem; }
