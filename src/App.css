@@ -1611,6 +1611,10 @@ span.engine-pv-move {
   touch-action: manipulation;
 }
 
+.next-missing-btn[data-search-unavailable] {
+  opacity: 0.55;
+}
+
 .next-missing-btn.has-long-press-menu::after {
   content: "•";
   position: absolute;
@@ -1701,6 +1705,11 @@ span.engine-pv-move {
   overflow: auto;
   position: relative;
   padding-bottom: 3rem;
+}
+
+.lichess-filters-bar {
+  margin-bottom: 0.35rem;
+  text-align: right;
 }
 
 .stockfish-inline {

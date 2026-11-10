@@ -415,6 +415,7 @@ type PersistedSettingsState = {
   suddenDeathStockfishElo: number;
   suddenDeathMaxThinkTimeSec: number;
   nextMissingMoveThreshold: MoveThreshold;
+  playerNextMissingMoveThreshold: MoveThreshold;
 };
 
 type BackupPayload = {
@@ -891,6 +892,7 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
     nextMissingMoveThreshold: normalizeMoveThreshold(
       (parsed as Partial<PersistedSettingsState>).nextMissingMoveThreshold,
     ),
+    playerNextMissingMoveThreshold: normalizeMoveThreshold(parsed.playerNextMissingMoveThreshold ?? 0),
   };
 }
 
@@ -2458,6 +2460,7 @@ function App() {
   const [dateRange, setDateRange] = useState<DateRange>(initialDateRange);
   const [lichessArrowThreshold, setLichessArrowThreshold] = useState<MoveThreshold>(initialLichessArrowThreshold);
   const [nextMissingMoveThreshold, setNextMissingMoveThreshold] = useState<MoveThreshold>(5);
+  const [playerNextMissingMoveThreshold, setPlayerNextMissingMoveThreshold] = useState<MoveThreshold>(0);
   const [selectedSpeeds, setSelectedSpeeds] = useState<string[]>(
     initialSelectedSpeeds.length > 0 ? initialSelectedSpeeds : [...SPEEDS],
   );
@@ -3053,6 +3056,7 @@ function App() {
     setDateRange(persistedSettings.dateRange);
     setLichessArrowThreshold(persistedSettings.lichessArrowThreshold);
     setNextMissingMoveThreshold(persistedSettings.nextMissingMoveThreshold);
+    setPlayerNextMissingMoveThreshold(persistedSettings.playerNextMissingMoveThreshold);
     setEngineDepth(persistedSettings.engineDepth);
     setEngineMultiPv(persistedSettings.engineMultiPv);
     setSelectedSpeeds(
@@ -3263,6 +3267,7 @@ function App() {
       suddenDeathStockfishElo,
       suddenDeathMaxThinkTimeSec,
       nextMissingMoveThreshold,
+      playerNextMissingMoveThreshold,
     };
 
     const timeout = window.setTimeout(() => {
@@ -3290,6 +3295,7 @@ function App() {
     dateRange,
     lichessArrowThreshold,
     nextMissingMoveThreshold,
+    playerNextMissingMoveThreshold,
     engineDepth,
     engineMultiPv,
     selectedSpeeds,
@@ -5817,6 +5823,7 @@ function App() {
 
   const jumpToNextMissingLichessMove = async () => {
     const player = lichessSource === 'player';
+    const minFrequency = player ? playerNextMissingMoveThreshold : nextMissingMoveThreshold;
     if (!hasOpponentReviewNodes || isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning ||
       (player && !playerHandle.trim())) return;
     if (opponentReview && isFindMissingSearchRunning) {
@@ -5858,7 +5865,7 @@ function App() {
         for (const move of moves) {
           const count = explorerGameCount(move);
           if (prepared.has(move.uci) || count === 0) continue;
-          if (!player && (!total || count / total < nextMissingMoveThreshold / 100)) continue;
+          if (minFrequency > 0 && (!total || count / total < minFrequency / 100)) continue;
           if (personal && !prepared.size) {
             const reply = explorerReplyFen(node.fen, move.uci);
             if (!reply || !await inspectPlayerReply(reply, personal.query, controller)) continue;
@@ -6131,6 +6138,7 @@ function App() {
       suddenDeathStockfishElo,
       suddenDeathMaxThinkTimeSec,
       nextMissingMoveThreshold,
+      playerNextMissingMoveThreshold,
     };
     return {
       version: 1,
@@ -8223,7 +8231,10 @@ function App() {
   );
   const findMissingMenu = useLongPressMenu(
     () => setIsFindMissingOptionsOpen(true),
-    () => opponentReviewOpen ? setPortraitTab('lichess') : void jumpToNextMissingLichessMove(),
+    () => {
+      if (opponentReviewOpen) setPortraitTab('lichess');
+      else if (canRunFindMissingSearch) void jumpToNextMissingLichessMove();
+    },
     420,
   );
   const lichessTabMenu = useLongPressMenu(
@@ -8583,6 +8594,10 @@ function App() {
         <section className="left-panel">
           <div className={`board-row ${isTrainingActive ? 'training-mode' : ''}`}>
             {!isTrainingActive && <aside className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}>
+              <div className="lichess-filters-bar desktop-only">
+                <button type="button" className="mode-icon-btn" aria-label="Lichess filters" title="Lichess filters"
+                  onClick={() => setIsLichessFilterOpen(true)}><DbIcon /></button>
+              </div>
               {opponentReview && (
                 <div className="player-repertoire-panel">
                   <div className="player-repertoire-controls mistake-review-controls">
@@ -9210,34 +9225,28 @@ function App() {
             </aside>}
 
             <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''} ${isTrainingActive ? 'training-pane' : ''}`}>
-              {!isTrainingActive && <div className="controls-row desktop-only">
-                {showDesktopMoveActions && <>
-                  <button type="button" className="mode-icon-btn has-submenu-dot train-options-btn"
-                    {...trainButtonMenu} aria-label="Train" title="Train (long press: options)"
-                    disabled={!canStartTrainingForActiveSide}>
-                    <TrainIcon />
-                  </button>
-                  <button type="button" className="sudden-death-toggle-btn mode-icon-btn has-submenu-dot"
-                    {...suddenDeathMenu}
-                    aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
-                    title={isSuddenDeathActive ? 'Restart sudden death round (long press: options)' : 'Start sudden death training (long press: options)'}
-                    disabled={suddenDeathThinking}>
-                    <SuddenDeathIcon />
-                  </button>
-                </>}
+              {!isTrainingActive && showDesktopMoveActions && <div className="controls-row desktop-only">
+                <button type="button" className="mode-icon-btn has-submenu-dot train-options-btn"
+                  {...trainButtonMenu} aria-label="Train" title="Train (long press: options)"
+                  disabled={!canStartTrainingForActiveSide}>
+                  <TrainIcon />
+                </button>
+                <button type="button" className="sudden-death-toggle-btn mode-icon-btn has-submenu-dot"
+                  {...suddenDeathMenu}
+                  aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
+                  title={isSuddenDeathActive ? 'Restart sudden death round (long press: options)' : 'Start sudden death training (long press: options)'}
+                  disabled={suddenDeathThinking}>
+                  <SuddenDeathIcon />
+                </button>
                 <div className="desktop-review-navigation">
-                  {showDesktopMoveActions && <>
-                    {renderForwardReviewButton()}
-                    <button type="button" className="back-btn" onClick={handleBackClick}
-                      onContextMenu={handleBackContextMenu} onPointerDown={handleBackPointerDown}
-                      onPointerUp={handleBackPointerEnd} onPointerCancel={handleBackPointerEnd}
-                      onPointerLeave={handleBackPointerEnd} disabled={!canGoBack} aria-label="Back 1 move"
-                      title={backTitle ?? 'Back 1 move'}>
-                      <BackIcon />
-                    </button>
-                  </>}
-                  <button type="button" className="mode-icon-btn" aria-label="Lichess filters" title="Lichess filters"
-                    onClick={() => setIsLichessFilterOpen(true)}><DbIcon /></button>
+                  {renderForwardReviewButton()}
+                  <button type="button" className="back-btn has-submenu-dot" onClick={handleBackClick}
+                    onContextMenu={handleBackContextMenu} onPointerDown={handleBackPointerDown}
+                    onPointerUp={handleBackPointerEnd} onPointerCancel={handleBackPointerEnd}
+                    onPointerLeave={handleBackPointerEnd} disabled={!canGoBack} aria-label="Back 1 move"
+                    title={backTitle ?? 'Back 1 move (long press: previous branch)'}>
+                    <BackIcon />
+                  </button>
                 </div>
               </div>}
               {suddenDeathReviewPanel || (isTrainingActive ? (
@@ -9369,13 +9378,11 @@ function App() {
                       <>
                         <button
                           type="button"
-                          className={`next-missing-btn mode-icon-btn${isPlayerExplorer ? '' : ' has-long-press-menu'}`}
-                          {...(isPlayerExplorer ? {
-                            onClick: () => opponentReviewOpen ? setPortraitTab('lichess') : void jumpToNextMissingLichessMove(),
-                          } : findMissingMenu)}
-                          disabled={!opponentReviewOpen && !canRunFindMissingSearch}
+                          className="next-missing-btn mode-icon-btn has-long-press-menu"
+                          {...findMissingMenu}
+                          data-search-unavailable={!opponentReviewOpen && !canRunFindMissingSearch || undefined}
                           aria-label={isPlayerExplorer ? 'Find missing opponent moves' : 'Find missing popular opponent move'}
-                          title={isPlayerExplorer ? 'Find missing opponent moves in your games'
+                          title={isPlayerExplorer ? 'Find missing opponent moves in your games (long press: options)'
                             : 'Find missing popular opponent move (long press: options)'}
                         >
                           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -9736,9 +9743,11 @@ function App() {
 
       {isFindMissingOptionsOpen && (
         <div className="modal-backdrop" onClick={() => setIsFindMissingOptionsOpen(false)}>
-          <div className="modal-card stockfish-quick-modal" role="dialog" aria-modal="true" aria-label="Find missing popular moves options" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-card stockfish-quick-modal" role="dialog" aria-modal="true"
+            aria-label={isPlayerExplorer ? 'Find missing opponent moves options' : 'Find missing popular moves options'}
+            onClick={(event) => event.stopPropagation()}>
             <label>
-              {`Min frequency: ${nextMissingMoveThreshold}%`}
+              {`Min frequency: ${isPlayerExplorer ? playerNextMissingMoveThreshold : nextMissingMoveThreshold}%`}
               <span className="slider-field">
                 <input
                   className="threshold-slider min-frequency-slider"
@@ -9746,9 +9755,12 @@ function App() {
                   min={0}
                   max={MOVE_THRESHOLD_OPTIONS.length - 1}
                   step={1}
-                  value={MOVE_THRESHOLD_OPTIONS.indexOf(nextMissingMoveThreshold)}
+                  value={MOVE_THRESHOLD_OPTIONS.indexOf(isPlayerExplorer ? playerNextMissingMoveThreshold : nextMissingMoveThreshold)}
                   onChange={(event) => {
-                    setNextMissingMoveThreshold(MOVE_THRESHOLD_OPTIONS[Number(event.target.value)] ?? 5);
+                    const threshold = MOVE_THRESHOLD_OPTIONS[Number(event.target.value)];
+                    if (threshold === undefined) return;
+                    if (isPlayerExplorer) setPlayerNextMissingMoveThreshold(threshold);
+                    else setNextMissingMoveThreshold(threshold);
                     if (opponentReview) closeOpponentFinding();
                   }}
                 />
