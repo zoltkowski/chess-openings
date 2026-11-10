@@ -35,7 +35,7 @@ export function PlayerRepertoireTable({ rows, complete, side, positionGames, onM
             <span className="player-repertoire-move">
               <strong className={row.best ? 'player-stockfish-best' : undefined}
                 title={row.best ? 'Best move according to Stockfish' : undefined}>{row.san}</strong>
-              {row.score && <span className="player-stockfish-score" title={row.provisional ? 'Provisional Stockfish evaluation' : undefined}>
+              {row.score && <span className={row.best ? 'player-stockfish-score' : undefined} title={row.provisional ? 'Provisional Stockfish evaluation' : undefined}>
                 {row.provisional && '≈'}{playerScoreForWhite(row.score, side)}
               </span>}
               {row.note && <small>{row.note}</small>}
