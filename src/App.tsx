@@ -8594,255 +8594,257 @@ function App() {
         <section className="left-panel">
           <div className={`board-row ${isTrainingActive ? 'training-mode' : ''}`}>
             {!isTrainingActive && <aside className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}>
-              <div className="lichess-filters-bar desktop-only">
-                <button type="button" className="mode-icon-btn" aria-label="Lichess filters" title="Lichess filters"
-                  onClick={() => setIsLichessFilterOpen(true)}><DbIcon /></button>
-              </div>
-              {opponentReview && (
-                <div className="player-repertoire-panel">
-                  <div className="player-repertoire-controls mistake-review-controls">
-                    <span title={activeRepertoireName}>Missing opponent moves{opponentReview.index >= 0 &&
-                      ` · ${opponentReview.index + 1}/${opponentReview.findings.length}`}</span>
-                    <button type="button" aria-label="Previous problem" title="Previous problem"
-                      disabled={opponentReview.index <= 0}
-                      onClick={() => setOpponentReview(prev => prev && ({
-                        ...prev, index: prev.index - 1, waitingForNext: false,
-                      }))}><PrevIcon /></button>
-                    <button type="button" className="review-text-btn"
-                      disabled={!hasNextOpponentFinding && (opponentReview.exhausted ||
-                        (isFindMissingSearchRunning && opponentReview.waitingForNext))}
-                      onClick={() => void jumpToNextMissingLichessMove()}>
-                      <NextIcon /> <span>Next problem</span>
-                    </button>
-                    <button type="button" className="review-text-btn" onClick={closeOpponentFinding}>
-                      <QuitIcon /> <span>Close review</span>
-                    </button>
-                  </div>
-                  <div role="status" className="player-repertoire-status">
-                    {playerSearchNote || (opponentReview.exhausted && !hasNextOpponentFinding &&
-                      (opponentFinding ? 'No further missing opponent moves.' : 'No missing opponent moves found.'))}
-                  </div>
-                  {opponentReview.fromHistory && <div className="player-repertoire-status">Local game history · last 12 months</div>}
+              <section className="lichess-scroll" aria-label="Lichess explorer">
+                <div className="lichess-filters-bar desktop-only">
+                  <button type="button" className="mode-icon-btn" aria-label="Lichess filters" title="Lichess filters"
+                    onClick={() => setIsLichessFilterOpen(true)}><DbIcon /></button>
                 </div>
-              )}
-              {mistakeReview ? (
-                <div className="player-repertoire-panel">
-                  <div className="player-repertoire-controls mistake-review-controls">
-                    <span title={isBrowseMode ? 'All repertoires for this side' : activeRepertoireName}>
-                      {isBrowseMode ? 'Repertoire mistakes' : 'Opening mistakes'} {mistakeReview.index >= 0 &&
-                      `· ${mistakeReview.index + 1}/${mistakeReview.positions.length}`}</span>
-                    <button type="button" aria-label="Previous mistake position" title="Previous mistake position"
-                      disabled={mistakeReview.index <= 0 || isFindMissingSearchRunning}
-                      onClick={() => void findCommonMistakes(-1)}><PrevIcon /></button>
-                    <button type="button" aria-label="Next mistake position" title="Next mistake position"
-                      disabled={isFindMissingSearchRunning ||
-                        (mistakeReview.exhausted && mistakeReview.index >= mistakeReview.positions.length - 1)}
-                      onClick={() => void findCommonMistakes(1)}><NextIcon /></button>
-                    <button type="button" className="review-text-btn"
-                      onClick={closeMistakeReview}>
-                      <QuitIcon /> <span>Close review</span>
-                    </button>
-                  </div>
-                  <div className="player-repertoire-status" role="status">{playerSearchNote}</div>
-                  {isFindMissingSearchRunning && (
-                    <button type="button" className="player-best-move" onClick={() => {
-                      findMissingControllerRef.current?.abort();
-                      setPlayerSearchNote('Search stopped. Use Next to continue.');
-                    }}>Stop search</button>
-                  )}
-                  {reviewPosition && !reviewPositionOnBoard && (
-                    <button type="button" className="player-best-move" onClick={() => showMistakePosition(reviewPosition)}>
-                      Return to mistake position
-                    </button>
-                  )}
-                  {reviewPositionOnBoard && (analysisScratchFen ? (
-                    <div className="player-repertoire-controls">
-                      <span>Preview</span>
-                      <button type="button" onClick={backPlayerPreview}>Back</button>
-                      <button type="button" onClick={() => setAnalysisScratchPosition(null)}>Return</button>
-                      {!isBrowseMode && analysisScratchPosition?.playerMoves?.length ? (
-                        <button type="button" onClick={savePlayerLine}>Save line</button>
-                      ) : null}
+                {opponentReview && (
+                  <div className="player-repertoire-panel">
+                    <div className="player-repertoire-controls mistake-review-controls">
+                      <span title={activeRepertoireName}>Missing opponent moves{opponentReview.index >= 0 &&
+                        ` · ${opponentReview.index + 1}/${opponentReview.findings.length}`}</span>
+                      <button type="button" aria-label="Previous problem" title="Previous problem"
+                        disabled={opponentReview.index <= 0}
+                        onClick={() => setOpponentReview(prev => prev && ({
+                          ...prev, index: prev.index - 1, waitingForNext: false,
+                        }))}><PrevIcon /></button>
+                      <button type="button" className="review-text-btn"
+                        disabled={!hasNextOpponentFinding && (opponentReview.exhausted ||
+                          (isFindMissingSearchRunning && opponentReview.waitingForNext))}
+                        onClick={() => void jumpToNextMissingLichessMove()}>
+                        <NextIcon /> <span>Next problem</span>
+                      </button>
+                      <button type="button" className="review-text-btn" onClick={closeOpponentFinding}>
+                        <QuitIcon /> <span>Close review</span>
+                      </button>
                     </div>
-                  ) : (
-                    <>
-                      {!reviewPosition.moves.some(move => move.inRepertoire) &&
-                        <div className="player-repertoire-status">No repertoire move saved for this position.</div>}
-                      <PlayerRepertoireTable rows={mistakeRows} complete side={activeSide} onMove={playPlayerMove} />
-                      <div className="player-repertoire-status">
-                        {reviewPosition.fromHistory && 'Local game history. Dates show game start. '}
-                        Recent = last 3 calendar months.
-                      </div>
-                    </>
-                  ))}
-                </div>
-              ) : isPlayerExplorer && (
-                <div className="player-repertoire-panel">
-                  {!opponentReviewOpen && <div className="player-repertoire-controls">
-                    {isFindMissingSearchRunning && <button type="button" onClick={() => findMissingControllerRef.current?.abort()}>
-                      Stop search
-                    </button>}
-                    {playerToMove && !isFindMissingSearchRunning && <button type="button"
-                      disabled={!playerAssessmentRunning && (!stockfishLoaded || !playerMoveCounts.size ||
-                        !hasHydratedAppState || !playerHandle.trim() || isTreeEvalRunning || isExampleReplayActive ||
-                        Boolean(analysisGameProgress) || Boolean(trainingSession) || isFindMissingSearchRunning)}
-                      onClick={() => void assessPlayerMoves(playerMoveCounts)}>
-                      {playerAssessmentRunning ? 'Stop checking' : 'Check moves'}
-                    </button>}
-                    {playerAfterLine && !isFindMissingSearchRunning && Boolean(explorerData?.moves.length) && (
-                      <button type="button" disabled={!stockfishLoaded || playerAssessmentRunning || isTreeEvalRunning ||
-                        isExampleReplayActive || Boolean(trainingSession) || Boolean(analysisGameProgress)}
-                        onClick={() => void checkPlayerReplies()}>Check replies</button>
+                    <div role="status" className="player-repertoire-status">
+                      {playerSearchNote || (opponentReview.exhausted && !hasNextOpponentFinding &&
+                        (opponentFinding ? 'No further missing opponent moves.' : 'No missing opponent moves found.'))}
+                    </div>
+                    {opponentReview.fromHistory && <div className="player-repertoire-status">Local game history · last 12 months</div>}
+                  </div>
+                )}
+                {mistakeReview ? (
+                  <div className="player-repertoire-panel">
+                    <div className="player-repertoire-controls mistake-review-controls">
+                      <span title={isBrowseMode ? 'All repertoires for this side' : activeRepertoireName}>
+                        {isBrowseMode ? 'Repertoire mistakes' : 'Opening mistakes'} {mistakeReview.index >= 0 &&
+                        `· ${mistakeReview.index + 1}/${mistakeReview.positions.length}`}</span>
+                      <button type="button" aria-label="Previous mistake position" title="Previous mistake position"
+                        disabled={mistakeReview.index <= 0 || isFindMissingSearchRunning}
+                        onClick={() => void findCommonMistakes(-1)}><PrevIcon /></button>
+                      <button type="button" aria-label="Next mistake position" title="Next mistake position"
+                        disabled={isFindMissingSearchRunning ||
+                          (mistakeReview.exhausted && mistakeReview.index >= mistakeReview.positions.length - 1)}
+                        onClick={() => void findCommonMistakes(1)}><NextIcon /></button>
+                      <button type="button" className="review-text-btn"
+                        onClick={closeMistakeReview}>
+                        <QuitIcon /> <span>Close review</span>
+                      </button>
+                    </div>
+                    <div className="player-repertoire-status" role="status">{playerSearchNote}</div>
+                    {isFindMissingSearchRunning && (
+                      <button type="button" className="player-best-move" onClick={() => {
+                        findMissingControllerRef.current?.abort();
+                        setPlayerSearchNote('Search stopped. Use Next to continue.');
+                      }}>Stop search</button>
                     )}
-                  </div>}
-                  {analysisScratchPosition?.playerMoves && (
-                    <div className="player-repertoire-controls">
-                      <span>Preview</span>
-                      <button type="button" onClick={backPlayerPreview}>Back</button>
-                      <button type="button" onClick={() => setAnalysisScratchPosition(null)}>Return</button>
-                      {!isBrowseMode && <button type="button" disabled={isTreeEvalRunning || isExampleReplayActive}
-                        onClick={savePlayerLine}>Save line</button>}
-                    </div>
-                  )}
-                  {!opponentReviewOpen && <div role="status" className="player-repertoire-status">
-                    {!playerHandle.trim() ? 'Enter your Lichess username in the database options.'
-                      : usingLocalExplorer ? (!lichessTotal ? 'No synced games in this position.' : dateRange === '3y' ? 'Showing synced games from the last 12 months.' : '')
-                      : lichessStatus === 'indexing' ? (explorerData?.queuePosition
-                        ? `Partial results · Lichess queue: ${explorerData.queuePosition}` : 'Partial results · Lichess is indexing.')
-                      : lichessStatus === 'refreshing' ? 'Showing saved results · refreshing…'
-                      : lichessStatus === 'cached' ? 'Showing saved results · refresh unavailable.'
-                      : lichessStatus === 'partial' ? 'Partial results · refresh to continue.'
-                      : lichessStatus === 'loading' ? 'Waiting for Lichess…'
-                      : lichessStatus === 'done' && explorerData && !explorerData.moves.length ? 'No games in this position.'
-                      : ''}
-                    {playerSearchNote && <div>{playerSearchNote}</div>}
-                    {playerAssessmentNotice?.key === playerReviewKey && <div>{playerAssessmentNotice.message}</div>}
-                    {isFindMissingSearchRunning && <div>Checking opponent moves…</div>}
-                    {playerAfterLine && !playerRows.length && Boolean(explorerData?.moves.length) &&
-                      !isFindMissingSearchRunning && !playerSearchNote && <div>End of the line · check your replies to reveal problems.</div>}
-                  </div>}
-                  {!opponentReviewOpen && playerAssessment && playerBestMove && playerBestSan && (
-                    <button type="button" className="player-best-move" onClick={() => playPlayerMove(playerBestMove)}>
-                      {STOCKFISH_ENGINE_LABEL} best: {toFigurineSan(playerBestSan)} {playerScoreForWhite(playerAssessment.best.scoreText, activeSide)}
-                    </button>
-                  )}
-                  {(!opponentReviewOpen || showingOpponentResult) && playerRows.length > 0 && (
-                    <PlayerRepertoireTable rows={playerRows} complete={usingLocalExplorer || showingOpponentResult ||
-                      Boolean(explorerData) && ['done', 'cached', 'refreshing'].includes(lichessStatus)}
-                      side={activeSide} positionGames={lichessTotal} onMove={playPlayerMove} />
-                  )}
-                </div>
-              )}
-              {!mistakeReview && !opponentReviewOpen && !isPlayerExplorer && (playerSearchNote || isFindMissingSearchRunning) && (
-                <div className="player-repertoire-controls">
-                  <span role="status">{playerSearchNote || 'Checking opponent moves…'}</span>
-                  {isFindMissingSearchRunning && (
-                    <button type="button" onClick={() => findMissingControllerRef.current?.abort()}>Stop search</button>
-                  )}
-                </div>
-              )}
-              {!mistakeReview && !opponentReviewOpen && !isPlayerExplorer && !lichessAuthRequired &&
-                (visibleLichessStatus || lichessStatus === 'loading') && (
-                <div className="status lichess-status-row">
-                  {lichessStatus === 'loading' && <span className="spinner" aria-hidden="true" />}
-                  <span>{visibleLichessStatus || 'loading'}</span>
-                </div>
-              )}
-              {!mistakeReview && lichessStatus === 'limited' && !explorerData && (
-                <div className="status lichess-rate-limit-note">
-                  {`Lichess API error (429), ${lichessData ? 'showing cached data' : 'no cached data'}`}
-                </div>
-              )}
-              {!mistakeReview && !usingLocalExplorer && !lichessAuthRequired && lichessApiIssueNote && (!explorerData || isPlayerExplorer) && (
-                <div className="status lichess-rate-limit-note">{lichessApiIssueNote}</div>
-              )}
-              {!mistakeReview && !usingLocalExplorer && lichessAuthRequired && (
-                <div className="status lichess-auth-note">
-                  <span>Lichess token missing or invalid (401).</span>
-                  <button
-                    type="button"
-                    onClick={() => setIsLichessFilterOpen(true)}
-                  >
-                    Open options
-                  </button>
-                </div>
-              )}
-              {!mistakeReview && (!opponentReviewOpen || showingOpponentResult) && (explorerData || isPlayerExplorer) && (
-                <>
-                  {!isPlayerExplorer && <div className="table">
-                    {filteredLichessMoves.map((move) => {
-                      const total = move.white + move.draws + move.black;
-                      return (
-                        <div
-                          className={`table-row lichess-clickable-row ${isTrainingActive ? 'disabled' : ''}`}
-                          key={`${move.uci}-${move.san}`}
-                          role="button"
-                          tabIndex={isTrainingActive ? -1 : 0}
-                          onClick={() => playSuggestedMove(move.uci)}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.preventDefault();
-                              playSuggestedMove(move.uci);
-                            }
-                          }}
-                        >
-                          <span className="lichess-cell-move">{toFigurineSan(move.san)}</span>
-                          <span className="lichess-cell-games">
-                            {formatGamesCount(total)} ({formatPercent(total, lichessTotal)})
-                          </span>
-                          <span className="lichess-cell-elo">{formatAverageElo(move)}</span>
-                          <span className="lichess-cell-bar">
-                            <LichessStatsBar white={move.white} draws={move.draws} black={move.black} />
-                          </span>
+                    {reviewPosition && !reviewPositionOnBoard && (
+                      <button type="button" className="player-best-move" onClick={() => showMistakePosition(reviewPosition)}>
+                        Return to mistake position
+                      </button>
+                    )}
+                    {reviewPositionOnBoard && (analysisScratchFen ? (
+                      <div className="player-repertoire-controls">
+                        <span>Preview</span>
+                        <button type="button" onClick={backPlayerPreview}>Back</button>
+                        <button type="button" onClick={() => setAnalysisScratchPosition(null)}>Return</button>
+                        {!isBrowseMode && analysisScratchPosition?.playerMoves?.length ? (
+                          <button type="button" onClick={savePlayerLine}>Save line</button>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <>
+                        {!reviewPosition.moves.some(move => move.inRepertoire) &&
+                          <div className="player-repertoire-status">No repertoire move saved for this position.</div>}
+                        <PlayerRepertoireTable rows={mistakeRows} complete side={activeSide} onMove={playPlayerMove} />
+                        <div className="player-repertoire-status">
+                          {reviewPosition.fromHistory && 'Local game history. Dates show game start. '}
+                          Recent = last 3 calendar months.
                         </div>
-                      );
-                    })}
-                  </div>}
-                  {(!isPlayerExplorer || hasLichessExampleGames) && <div className="lichess-example-games">
-                    {!hasLichessExampleGames && (
-                      <span className="status">No example games for current filters.</span>
-                    )}
-                    {hasLichessExampleGames && (
-                      <div className="lichess-example-lists">
-                        {lichessTopGames.map((game, index) => {
-                          const gameId = typeof game.id === 'string' ? game.id.trim() : '';
-                          const gameLine = formatLichessExampleLine(game);
-                          return (
-                            <div key={`top-${gameId || index}`} className="lichess-example-item">
-                              <button
-                                type="button"
-                                className="lichess-example-load-btn"
-                                onClick={() => void loadExampleReplayGame(game)}
-                                disabled={!gameId || exampleReplayLoadingId === gameId}
-                              >
-                                {exampleReplayLoadingId === gameId ? 'Loading...' : gameLine}
-                              </button>
-                            </div>
-                          );
-                        })}
-                        {lichessRecentGames.map((game, index) => {
-                          const gameId = typeof game.id === 'string' ? game.id.trim() : '';
-                          const gameLine = formatLichessExampleLine(game);
-                          return (
-                            <div key={`recent-${gameId || index}`} className="lichess-example-item">
-                              <button
-                                type="button"
-                                className="lichess-example-load-btn"
-                                onClick={() => void loadExampleReplayGame(game)}
-                                disabled={!gameId || exampleReplayLoadingId === gameId}
-                              >
-                                {exampleReplayLoadingId === gameId ? 'Loading...' : gameLine}
-                              </button>
-                            </div>
-                          );
-                        })}
+                      </>
+                    ))}
+                  </div>
+                ) : isPlayerExplorer && (
+                  <div className="player-repertoire-panel">
+                    {!opponentReviewOpen && <div className="player-repertoire-controls">
+                      {isFindMissingSearchRunning && <button type="button" onClick={() => findMissingControllerRef.current?.abort()}>
+                        Stop search
+                      </button>}
+                      {playerToMove && !isFindMissingSearchRunning && <button type="button"
+                        disabled={!playerAssessmentRunning && (!stockfishLoaded || !playerMoveCounts.size ||
+                          !hasHydratedAppState || !playerHandle.trim() || isTreeEvalRunning || isExampleReplayActive ||
+                          Boolean(analysisGameProgress) || Boolean(trainingSession) || isFindMissingSearchRunning)}
+                        onClick={() => void assessPlayerMoves(playerMoveCounts)}>
+                        {playerAssessmentRunning ? 'Stop checking' : 'Check moves'}
+                      </button>}
+                      {playerAfterLine && !isFindMissingSearchRunning && Boolean(explorerData?.moves.length) && (
+                        <button type="button" disabled={!stockfishLoaded || playerAssessmentRunning || isTreeEvalRunning ||
+                          isExampleReplayActive || Boolean(trainingSession) || Boolean(analysisGameProgress)}
+                          onClick={() => void checkPlayerReplies()}>Check replies</button>
+                      )}
+                    </div>}
+                    {analysisScratchPosition?.playerMoves && (
+                      <div className="player-repertoire-controls">
+                        <span>Preview</span>
+                        <button type="button" onClick={backPlayerPreview}>Back</button>
+                        <button type="button" onClick={() => setAnalysisScratchPosition(null)}>Return</button>
+                        {!isBrowseMode && <button type="button" disabled={isTreeEvalRunning || isExampleReplayActive}
+                          onClick={savePlayerLine}>Save line</button>}
                       </div>
                     )}
-                    {exampleReplayError && <span className="status">{exampleReplayError}</span>}
-                  </div>}
-                </>
-              )}
-              <div className="stockfish-inline desktop-only">
+                    {!opponentReviewOpen && <div role="status" className="player-repertoire-status">
+                      {!playerHandle.trim() ? 'Enter your Lichess username in the database options.'
+                        : usingLocalExplorer ? (!lichessTotal ? 'No synced games in this position.' : dateRange === '3y' ? 'Showing synced games from the last 12 months.' : '')
+                        : lichessStatus === 'indexing' ? (explorerData?.queuePosition
+                          ? `Partial results · Lichess queue: ${explorerData.queuePosition}` : 'Partial results · Lichess is indexing.')
+                        : lichessStatus === 'refreshing' ? 'Showing saved results · refreshing…'
+                        : lichessStatus === 'cached' ? 'Showing saved results · refresh unavailable.'
+                        : lichessStatus === 'partial' ? 'Partial results · refresh to continue.'
+                        : lichessStatus === 'loading' ? 'Waiting for Lichess…'
+                        : lichessStatus === 'done' && explorerData && !explorerData.moves.length ? 'No games in this position.'
+                        : ''}
+                      {playerSearchNote && <div>{playerSearchNote}</div>}
+                      {playerAssessmentNotice?.key === playerReviewKey && <div>{playerAssessmentNotice.message}</div>}
+                      {isFindMissingSearchRunning && <div>Checking opponent moves…</div>}
+                      {playerAfterLine && !playerRows.length && Boolean(explorerData?.moves.length) &&
+                        !isFindMissingSearchRunning && !playerSearchNote && <div>End of the line · check your replies to reveal problems.</div>}
+                    </div>}
+                    {!opponentReviewOpen && playerAssessment && playerBestMove && playerBestSan && (
+                      <button type="button" className="player-best-move" onClick={() => playPlayerMove(playerBestMove)}>
+                        {STOCKFISH_ENGINE_LABEL} best: {toFigurineSan(playerBestSan)} {playerScoreForWhite(playerAssessment.best.scoreText, activeSide)}
+                      </button>
+                    )}
+                    {(!opponentReviewOpen || showingOpponentResult) && playerRows.length > 0 && (
+                      <PlayerRepertoireTable rows={playerRows} complete={usingLocalExplorer || showingOpponentResult ||
+                        Boolean(explorerData) && ['done', 'cached', 'refreshing'].includes(lichessStatus)}
+                        side={activeSide} positionGames={lichessTotal} onMove={playPlayerMove} />
+                    )}
+                  </div>
+                )}
+                {!mistakeReview && !opponentReviewOpen && !isPlayerExplorer && (playerSearchNote || isFindMissingSearchRunning) && (
+                  <div className="player-repertoire-controls">
+                    <span role="status">{playerSearchNote || 'Checking opponent moves…'}</span>
+                    {isFindMissingSearchRunning && (
+                      <button type="button" onClick={() => findMissingControllerRef.current?.abort()}>Stop search</button>
+                    )}
+                  </div>
+                )}
+                {!mistakeReview && !opponentReviewOpen && !isPlayerExplorer && !lichessAuthRequired &&
+                  (visibleLichessStatus || lichessStatus === 'loading') && (
+                  <div className="status lichess-status-row">
+                    {lichessStatus === 'loading' && <span className="spinner" aria-hidden="true" />}
+                    <span>{visibleLichessStatus || 'loading'}</span>
+                  </div>
+                )}
+                {!mistakeReview && lichessStatus === 'limited' && !explorerData && (
+                  <div className="status lichess-rate-limit-note">
+                    {`Lichess API error (429), ${lichessData ? 'showing cached data' : 'no cached data'}`}
+                  </div>
+                )}
+                {!mistakeReview && !usingLocalExplorer && !lichessAuthRequired && lichessApiIssueNote && (!explorerData || isPlayerExplorer) && (
+                  <div className="status lichess-rate-limit-note">{lichessApiIssueNote}</div>
+                )}
+                {!mistakeReview && !usingLocalExplorer && lichessAuthRequired && (
+                  <div className="status lichess-auth-note">
+                    <span>Lichess token missing or invalid (401).</span>
+                    <button
+                      type="button"
+                      onClick={() => setIsLichessFilterOpen(true)}
+                    >
+                      Open options
+                    </button>
+                  </div>
+                )}
+                {!mistakeReview && (!opponentReviewOpen || showingOpponentResult) && (explorerData || isPlayerExplorer) && (
+                  <>
+                    {!isPlayerExplorer && <div className="table">
+                      {filteredLichessMoves.map((move) => {
+                        const total = move.white + move.draws + move.black;
+                        return (
+                          <div
+                            className={`table-row lichess-clickable-row ${isTrainingActive ? 'disabled' : ''}`}
+                            key={`${move.uci}-${move.san}`}
+                            role="button"
+                            tabIndex={isTrainingActive ? -1 : 0}
+                            onClick={() => playSuggestedMove(move.uci)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                playSuggestedMove(move.uci);
+                              }
+                            }}
+                          >
+                            <span className="lichess-cell-move">{toFigurineSan(move.san)}</span>
+                            <span className="lichess-cell-games">
+                              {formatGamesCount(total)} ({formatPercent(total, lichessTotal)})
+                            </span>
+                            <span className="lichess-cell-elo">{formatAverageElo(move)}</span>
+                            <span className="lichess-cell-bar">
+                              <LichessStatsBar white={move.white} draws={move.draws} black={move.black} />
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>}
+                    {(!isPlayerExplorer || hasLichessExampleGames) && <div className="lichess-example-games">
+                      {!hasLichessExampleGames && (
+                        <span className="status">No example games for current filters.</span>
+                      )}
+                      {hasLichessExampleGames && (
+                        <div className="lichess-example-lists">
+                          {lichessTopGames.map((game, index) => {
+                            const gameId = typeof game.id === 'string' ? game.id.trim() : '';
+                            const gameLine = formatLichessExampleLine(game);
+                            return (
+                              <div key={`top-${gameId || index}`} className="lichess-example-item">
+                                <button
+                                  type="button"
+                                  className="lichess-example-load-btn"
+                                  onClick={() => void loadExampleReplayGame(game)}
+                                  disabled={!gameId || exampleReplayLoadingId === gameId}
+                                >
+                                  {exampleReplayLoadingId === gameId ? 'Loading...' : gameLine}
+                                </button>
+                              </div>
+                            );
+                          })}
+                          {lichessRecentGames.map((game, index) => {
+                            const gameId = typeof game.id === 'string' ? game.id.trim() : '';
+                            const gameLine = formatLichessExampleLine(game);
+                            return (
+                              <div key={`recent-${gameId || index}`} className="lichess-example-item">
+                                <button
+                                  type="button"
+                                  className="lichess-example-load-btn"
+                                  onClick={() => void loadExampleReplayGame(game)}
+                                  disabled={!gameId || exampleReplayLoadingId === gameId}
+                                >
+                                  {exampleReplayLoadingId === gameId ? 'Loading...' : gameLine}
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {exampleReplayError && <span className="status">{exampleReplayError}</span>}
+                    </div>}
+                  </>
+                )}
+              </section>
+              <section className="stockfish-inline desktop-only" aria-label="AI analysis">
                 <div className="controls-row stockfish-controls-row ai-engine-controls">
                   <div className="ai-engine-row">
                     <span className="ai-engine-select">
@@ -8935,7 +8937,7 @@ function App() {
                   {engineTable}
                   {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
                 </div>
-              </div>
+              </section>
             </aside>}
 
             <div className="board-center">

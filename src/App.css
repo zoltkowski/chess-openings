@@ -1704,7 +1704,6 @@ span.engine-pv-move {
   max-height: 100%;
   overflow: auto;
   position: relative;
-  padding-bottom: 3rem;
 }
 
 .lichess-filters-bar {
@@ -1712,9 +1711,36 @@ span.engine-pv-move {
   text-align: right;
 }
 
-.stockfish-inline {
-  margin-top: 1.15rem;
-  padding-top: 0.75rem;
+@media (orientation: landscape) {
+  html {
+    overflow: hidden;
+  }
+
+  .board-row {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .lichess-panel {
+    display: grid;
+    grid-template: repeat(2, minmax(0, 1fr)) / minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .lichess-scroll,
+  .stockfish-inline {
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+  }
+
+  .stockfish-inline {
+    border-top: 1px solid #e5ebf3;
+    padding-top: 0.75rem;
+  }
+
+  .app.theme-dark .stockfish-inline {
+    border-color: #334155;
+  }
 }
 
 .stockfish-inline .table {
@@ -2712,6 +2738,7 @@ select {
 
   .lichess-panel {
     order: initial;
+    padding-bottom: 3rem;
   }
 
   .stockfish-panel {
