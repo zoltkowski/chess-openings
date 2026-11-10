@@ -2598,7 +2598,6 @@ function App() {
   const [isStockfishQuickOpen, setIsStockfishQuickOpen] = useState(false);
   const [isTrainingStatsMenuOpen, setIsTrainingStatsMenuOpen] = useState(false);
   const [isSuddenDeathSettingsOpen, setIsSuddenDeathSettingsOpen] = useState(false);
-  const [isMoveToolsOpen, setIsMoveToolsOpen] = useState(false);
   const [isLichessArrowOptionsOpen, setIsLichessArrowOptionsOpen] = useState(false);
   const [isFindMissingOptionsOpen, setIsFindMissingOptionsOpen] = useState(false);
   const findMissingSearchAutoNavigationRef = useRef(false);
@@ -7060,7 +7059,7 @@ function App() {
 
     const preceding = [...row.children].filter(child => child !== group);
     const update = () => {
-      if (getComputedStyle(topGroup).display !== 'none') {
+      if (topGroup.getClientRects().length > 0) {
         setMovesArrowGroupNeedsCompact(false);
         return;
       }
@@ -8210,14 +8209,12 @@ function App() {
 
   const trainButtonMenu = useLongPressMenu(() => {
     setIsTrainingStatsMenuOpen(true);
-    setIsMoveToolsOpen(false);
   }, () => startTraining());
 
   const suddenDeathMenu = useLongPressMenu(() => {
     setPortraitTab('moves');
     setIsSuddenDeathSettingsOpen(true);
     setIsTrainingStatsMenuOpen(false);
-    setIsMoveToolsOpen(false);
   }, toggleSuddenDeathMode, 420);
   const lichessArrowMenu = useLongPressMenu(
     () => setIsLichessArrowOptionsOpen(true),
@@ -8473,7 +8470,30 @@ function App() {
       else if (canFindCommonMistakes) void findCommonMistakes();
     },
   );
-  const renderArrowToggleButtons = (compact = false, includeDrawing = false) => (
+  const renderForwardReviewButton = (className = '') => canGoForward && (
+    <button
+      type="button"
+      className={`review-forward-btn mode-icon-btn has-submenu-dot ${className}`}
+      onClick={handleForwardClick}
+      onContextMenu={handleForwardContextMenu}
+      onPointerDown={handleForwardPointerDown}
+      onPointerUp={clearForwardLongPress}
+      onPointerCancel={clearForwardLongPress}
+      onPointerLeave={clearForwardLongPress}
+      onKeyDown={(event) => {
+        if (event.key === 'End') {
+          event.preventDefault();
+          goForward(true);
+        }
+      }}
+      disabled={isTreeEvalRunning}
+      aria-label="Forward 1 move"
+      title="Forward 1 move (long press: end of game)"
+    >
+      <ForwardIcon />
+    </button>
+  );
+  const renderArrowToggleButtons = (compact = false) => (
     <>
       <button
         type="button"
@@ -8534,16 +8554,10 @@ function App() {
         aria-label="Toggle tree arrows"
         title="Toggle tree arrows (hold for options)"
       />
-      {includeDrawing && canAnnotateBoard && <button
-        type="button"
-        className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-annotation${isDrawingAnnotations ? ' active' : ''}`}
-        aria-label="Draw annotations"
-        aria-pressed={isDrawingAnnotations}
-        title={isDrawingAnnotations ? 'Return to move entry' : 'Draw arrows and mark squares'}
-        onClick={toggleAnnotationDrawing}
-      />}
     </>
   );
+
+  const showDesktopMoveActions = !isExampleReplayActive && !suddenDeathGameOver;
 
   return (
     <div className={`app ${themeMode === 'dark' ? 'theme-dark' : ''}`}>
@@ -8738,12 +8752,6 @@ function App() {
                   </button>
                 </div>
               )}
-              {!mistakeReview && !isPlayerExplorer && !explorerData && !lichessAuthRequired && (
-                <div className="lichess-table-actions desktop-only">
-                  <button className="gear-btn" type="button" aria-label="Filters" title="Filters"
-                    onClick={() => setIsLichessFilterOpen(true)}><DbIcon /></button>
-                </div>
-              )}
               {!mistakeReview && (!opponentReviewOpen || showingOpponentResult) && (explorerData || isPlayerExplorer) && (
                 <>
                   {!isPlayerExplorer && <div className="table">
@@ -8817,17 +8825,6 @@ function App() {
                     )}
                     {exampleReplayError && <span className="status">{exampleReplayError}</span>}
                   </div>}
-                  <div className="lichess-table-actions desktop-only">
-                    <button
-                      className="gear-btn"
-                      type="button"
-                      aria-label="Filters"
-                      title="Filters"
-                      onClick={() => setIsLichessFilterOpen(true)}
-                    >
-                      <DbIcon />
-                    </button>
-                  </div>
                 </>
               )}
               <div className="stockfish-inline desktop-only">
@@ -9213,6 +9210,36 @@ function App() {
             </aside>}
 
             <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''} ${isTrainingActive ? 'training-pane' : ''}`}>
+              {!isTrainingActive && <div className="controls-row desktop-only">
+                {showDesktopMoveActions && <>
+                  <button type="button" className="mode-icon-btn has-submenu-dot train-options-btn"
+                    {...trainButtonMenu} aria-label="Train" title="Train (long press: options)"
+                    disabled={!canStartTrainingForActiveSide}>
+                    <TrainIcon />
+                  </button>
+                  <button type="button" className="sudden-death-toggle-btn mode-icon-btn has-submenu-dot"
+                    {...suddenDeathMenu}
+                    aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
+                    title={isSuddenDeathActive ? 'Restart sudden death round (long press: options)' : 'Start sudden death training (long press: options)'}
+                    disabled={suddenDeathThinking}>
+                    <SuddenDeathIcon />
+                  </button>
+                </>}
+                <div className="desktop-review-navigation">
+                  {showDesktopMoveActions && <>
+                    {renderForwardReviewButton()}
+                    <button type="button" className="back-btn" onClick={handleBackClick}
+                      onContextMenu={handleBackContextMenu} onPointerDown={handleBackPointerDown}
+                      onPointerUp={handleBackPointerEnd} onPointerCancel={handleBackPointerEnd}
+                      onPointerLeave={handleBackPointerEnd} disabled={!canGoBack} aria-label="Back 1 move"
+                      title={backTitle ?? 'Back 1 move'}>
+                      <BackIcon />
+                    </button>
+                  </>}
+                  <button type="button" className="mode-icon-btn" aria-label="Lichess filters" title="Lichess filters"
+                    onClick={() => setIsLichessFilterOpen(true)}><DbIcon /></button>
+                </div>
+              </div>}
               {suddenDeathReviewPanel || (isTrainingActive ? (
                 <>
                   <div className="controls-row desktop-only">
@@ -9287,7 +9314,7 @@ function App() {
                 </>
               ) : (
                 <>
-                  <div className="controls-row">
+                  <div className={`controls-row${isExampleReplayActive ? '' : ' move-toolbar'}`}>
                     {isExampleReplayActive ? (
                       <>
                         <button
@@ -9340,98 +9367,45 @@ function App() {
                       </>
                     ) : (
                       <>
-                        <div className="desktop-navigation desktop-only">
-                          <div className="arrow-toggle-group">{renderArrowToggleButtons(false, true)}</div>
-                          <button
-                            className="back-btn"
-                            onClick={handleBackClick}
-                            onContextMenu={handleBackContextMenu}
-                            onPointerDown={handleBackPointerDown}
-                            onPointerUp={handleBackPointerEnd}
-                            onPointerCancel={handleBackPointerEnd}
-                            onPointerLeave={handleBackPointerEnd}
-                            disabled={!canGoBack}
-                            aria-label="Back 1 move"
-                            title={backTitle ?? 'Back 1 move'}
-                          >
-                            <BackIcon />
-                          </button>
-                        </div>
-                          <button
-                            type="button"
-                            className={`next-missing-btn mode-icon-btn${isPlayerExplorer ? '' : ' has-long-press-menu'}`}
-                            {...(isPlayerExplorer ? {
-                              onClick: () => opponentReviewOpen ? setPortraitTab('lichess') : void jumpToNextMissingLichessMove(),
-                            } : findMissingMenu)}
-                            disabled={!opponentReviewOpen && !canRunFindMissingSearch}
-                            aria-label={isPlayerExplorer ? 'Find missing opponent moves' : 'Find missing popular opponent move'}
-                            title={isPlayerExplorer ? 'Find missing opponent moves in your games'
-                              : 'Find missing popular opponent move (long press: options)'}
-                          >
-                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                              <circle cx="12" cy="12" r="4.2" />
-                              <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
-                              <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2" />
-                            </svg>
-                          </button>
-                          <button type="button" className={`mode-icon-btn find-mistakes-btn has-submenu-dot ${mistakeReview ? 'active' : ''}`}
-                            {...mistakeHistoryMenu}
-                            aria-disabled={!mistakeReview && !canFindCommonMistakes} aria-pressed={mistakeReviewOpen}
-                            aria-label="Find common mistakes" title={playerHandle.trim()
-                              ? 'Find common mistakes in your games (hold for time range)' : 'Set your Lichess username in Player settings (hold for time range)'}>
-                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                              <circle cx="12" cy="12" r="8.5" />
-                              <path d="m9 9 6 6m0-6-6 6" />
-                            </svg>
-                          </button>
-                        <button onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
+                        <button
+                          type="button"
+                          className={`next-missing-btn mode-icon-btn${isPlayerExplorer ? '' : ' has-long-press-menu'}`}
+                          {...(isPlayerExplorer ? {
+                            onClick: () => opponentReviewOpen ? setPortraitTab('lichess') : void jumpToNextMissingLichessMove(),
+                          } : findMissingMenu)}
+                          disabled={!opponentReviewOpen && !canRunFindMissingSearch}
+                          aria-label={isPlayerExplorer ? 'Find missing opponent moves' : 'Find missing popular opponent move'}
+                          title={isPlayerExplorer ? 'Find missing opponent moves in your games'
+                            : 'Find missing popular opponent move (long press: options)'}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <circle cx="12" cy="12" r="4.2" />
+                            <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
+                            <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2" />
+                          </svg>
+                        </button>
+                        <button type="button" className={`mode-icon-btn find-mistakes-btn has-submenu-dot ${mistakeReview ? 'active' : ''}`}
+                          {...mistakeHistoryMenu}
+                          aria-disabled={!mistakeReview && !canFindCommonMistakes} aria-pressed={mistakeReviewOpen}
+                          aria-label="Find common mistakes" title={playerHandle.trim()
+                            ? 'Find common mistakes in your games (hold for time range)' : 'Set your Lichess username in Player settings (hold for time range)'}>
+                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <circle cx="12" cy="12" r="8.5" />
+                            <path d="m9 9 6 6m0-6-6 6" />
+                          </svg>
+                        </button>
+                        <button type="button"
+                          className={`mode-icon-btn desktop-only move-entry-toggle${isDrawingAnnotations ? ' icon-toggle-btn with-diagonal-arrow only-arrow arrow-annotation' : ''}`}
+                          aria-label="Moves"
+                          title={isDrawingAnnotations ? 'Return to move entry' : 'Draw arrows and mark squares'}
+                          aria-pressed={isDrawingAnnotations} disabled={!canAnnotateBoard}
+                          onClick={toggleAnnotationDrawing}>
+                          {!isDrawingAnnotations && <MoveIcon />}
+                        </button>
+                        <button type="button" onClick={undoNavigation} disabled={undoStackBySide[activeSide].length === 0}>
                           Undo
                         </button>
-                        {canGoForward && (
-                          <button
-                            type="button"
-                            className="review-forward-btn mode-icon-btn has-submenu-dot"
-                            onClick={handleForwardClick}
-                            onContextMenu={handleForwardContextMenu}
-                            onPointerDown={handleForwardPointerDown}
-                            onPointerUp={clearForwardLongPress}
-                            onPointerCancel={clearForwardLongPress}
-                            onPointerLeave={clearForwardLongPress}
-                            onKeyDown={(event) => {
-                              if (event.key === 'End') {
-                                event.preventDefault();
-                                goForward(true);
-                              }
-                            }}
-                            disabled={isTreeEvalRunning}
-                            aria-label="Forward 1 move"
-                            title="Forward 1 move (long press: end of game)"
-                          >
-                            <ForwardIcon />
-                          </button>
-                        )}
-                          <>
-                            <button
-                              className="desktop-only has-submenu-dot train-options-btn"
-                              type="button"
-                              {...trainButtonMenu}
-                              aria-label="Train"
-                              title="Train (long press: options)"
-                              disabled={!canStartTrainingForActiveSide}
-                            >
-                              Train
-                            </button>
-                            <button
-                              type="button"
-                              className="sudden-death-toggle-btn mode-icon-btn has-submenu-dot desktop-only"
-                              {...suddenDeathMenu}
-                              aria-label={isSuddenDeathActive ? 'Restart sudden death round' : 'Start sudden death training'}
-                              title={isSuddenDeathActive ? 'Restart sudden death round (long press: options)' : 'Start sudden death training (long press: options)'}
-                              disabled={suddenDeathThinking}
-                            >
-                              <SuddenDeathIcon />
-                            </button>
-                          </>
+                        {renderForwardReviewButton('portrait-only')}
                         <div ref={movesArrowGroupRef} className={`arrow-toggle-group portrait-panel-arrows ${showMixedEngines ? 'mixed-engine-arrows' : ''}`}>{renderArrowToggleButtons(useCompactEngineArrows)}</div>
                       </>
                     )}
@@ -9563,41 +9537,10 @@ function App() {
                       ))}
                     </div>
                   )}
-                  {!analysisGameProgress && repertoiresAtPosition.length === 0 && (
-                    <div className="repertoire-hit-block move-tools-only desktop-only">
-                      <div className="repertoire-hit-head">
-                        <span />
-                        <button
-                          type="button"
-                          className={`gear-btn ${isMoveToolsOpen ? 'active' : ''}`}
-                          aria-label="Move tools"
-                          title="Move tools"
-                          onClick={() => {
-                            setIsMoveToolsOpen((prev) => !prev);
-                            setIsTrainingStatsMenuOpen(false);
-                          }}
-                        >
-                          ⚙
-                        </button>
-                      </div>
-                    </div>
-                  )}
                   {!analysisGameProgress && repertoiresAtPosition.length > 0 && (
                     <div className="repertoire-hit-block">
                       <div className="repertoire-hit-head">
                         <strong>Repertoires with this position</strong>
-                        <button
-                          type="button"
-                          className={`gear-btn desktop-only ${isMoveToolsOpen ? 'active' : ''}`}
-                          aria-label="Move tools"
-                          title="Move tools"
-                          onClick={() => {
-                            setIsMoveToolsOpen((prev) => !prev);
-                            setIsTrainingStatsMenuOpen(false);
-                          }}
-                        >
-                          ⚙
-                        </button>
                       </div>
                       <div className="repertoire-hit-list">
                         {repertoiresAtPosition.map((item) => (
@@ -9858,125 +9801,6 @@ function App() {
                 <option value={12}>Last year</option>
               </select>
             </label>
-          </div>
-        </div>
-      )}
-
-      {isMoveToolsOpen && (
-        <div className="modal-backdrop" onClick={() => setIsMoveToolsOpen(false)}>
-          <div className="modal-card stockfish-quick-modal move-tools-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="desktop-only">
-              <h3 className="eval-manager-title">Sudden death settings</h3>
-              <div className="slider-stack single-column">
-                <label>
-                  Engine
-                  <span className="toggle-group database-toggle">
-                    <button
-                      type="button"
-                      className={suddenDeathEngine === 'stockfish' ? 'active' : ''}
-                      onClick={() => setSuddenDeathEngine('stockfish')}
-                    >
-                      {STOCKFISH_ENGINE_LABEL}
-                    </button>
-                    <button
-                      type="button"
-                      className={suddenDeathEngine === 'maia' ? 'active' : ''}
-                      onClick={() => setSuddenDeathEngine('maia')}
-                    >
-                      {MAIA_ENGINE_LABEL}
-                    </button>
-                  </span>
-                </label>
-                <label>
-                  {`Max think time: ${suddenDeathMaxThinkTimeSec.toFixed(1)}s`}
-                  <span className="slider-field">
-                    <input
-                      className="threshold-slider"
-                      type="range"
-                      min={SUDDEN_DEATH_THINK_TIME_MIN}
-                      max={SUDDEN_DEATH_THINK_TIME_MAX}
-                      step={0.1}
-                      value={suddenDeathMaxThinkTimeSec}
-                      onChange={(e) => {
-                        const next = Number.parseFloat(e.target.value);
-                        if (Number.isFinite(next)) {
-                          setSuddenDeathMaxThinkTimeSec(
-                            Math.min(SUDDEN_DEATH_THINK_TIME_MAX, Math.max(SUDDEN_DEATH_THINK_TIME_MIN, next)),
-                          );
-                        }
-                      }}
-                    />
-                  </span>
-                </label>
-                <label>
-                  {`Drop threshold: ${suddenDeathThreshold.toFixed(1)}`}
-                  <span className="slider-field">
-                    <input
-                      className="threshold-slider"
-                      type="range"
-                      min={SUDDEN_DEATH_THRESHOLD_MIN}
-                      max={SUDDEN_DEATH_THRESHOLD_MAX}
-                      step={0.1}
-                      value={suddenDeathThreshold}
-                      onChange={(e) => {
-                        const next = Number.parseFloat(e.target.value);
-                        if (Number.isFinite(next)) {
-                          setSuddenDeathThreshold(
-                            Math.min(SUDDEN_DEATH_THRESHOLD_MAX, Math.max(SUDDEN_DEATH_THRESHOLD_MIN, next)),
-                          );
-                        }
-                      }}
-                    />
-                  </span>
-                </label>
-                {suddenDeathEngine === 'stockfish' && (
-                  <label>
-                    {`${STOCKFISH_ENGINE_NAME}: ${suddenDeathStockfishElo >= SUDDEN_DEATH_STOCKFISH_ELO_MAX ? 'Max' : suddenDeathStockfishElo}`}
-                    <span className="slider-field">
-                      <input
-                        className="threshold-slider"
-                        type="range"
-                        min={SUDDEN_DEATH_STOCKFISH_ELO_MIN}
-                        max={SUDDEN_DEATH_STOCKFISH_ELO_MAX}
-                        step={50}
-                        value={suddenDeathStockfishElo}
-                        onChange={(e) => {
-                          const next = Number.parseInt(e.target.value, 10);
-                          if (Number.isFinite(next)) {
-                            setSuddenDeathStockfishElo(
-                              Math.min(SUDDEN_DEATH_STOCKFISH_ELO_MAX, Math.max(SUDDEN_DEATH_STOCKFISH_ELO_MIN, next)),
-                            );
-                          }
-                        }}
-                      />
-                    </span>
-                  </label>
-                )}
-                {suddenDeathEngine === 'maia' && (
-                  <label>
-                    {`${MAIA_ENGINE_LABEL}: ${suddenDeathMaiaElo}`}
-                    <span className="slider-field">
-                      <input
-                        className="threshold-slider"
-                        type="range"
-                        min={MAIA_STRENGTH_ELO_MIN}
-                        max={MAIA_STRENGTH_ELO_MAX}
-                        step={MAIA_STRENGTH_ELO_STEP}
-                        value={suddenDeathMaiaElo}
-                        onChange={(e) => {
-                          const next = Number.parseInt(e.target.value, 10);
-                          if (Number.isFinite(next)) {
-                            setSuddenDeathMaiaElo(
-                              Math.min(MAIA_STRENGTH_ELO_MAX, Math.max(MAIA_STRENGTH_ELO_MIN, next)),
-                            );
-                          }
-                        }}
-                      />
-                    </span>
-                  </label>
-                )}
-              </div>
-            </div>
           </div>
         </div>
       )}
