@@ -1207,7 +1207,7 @@ select {
 
 .engine-pv-row {
   display: grid;
-  grid-template-columns: 5.25rem 3.6rem minmax(0, 1fr);
+  grid-template-columns: 3.75rem 3.6rem minmax(0, 1fr);
   align-items: center;
   gap: 0.45rem;
   min-height: 2.2rem;
@@ -1257,7 +1257,7 @@ select {
 }
 
 .mixed-engine-row {
-  grid-template-columns: 5.25rem 3.6rem 3.6rem minmax(0, 1fr);
+  grid-template-columns: 3.75rem 3.6rem 3.6rem minmax(0, 1fr);
 }
 
 .mixed-engine-head {
