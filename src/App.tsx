@@ -1063,15 +1063,6 @@ function DbIcon() {
   );
 }
 
-function DrawIcon() {
-  return (
-    <TabIconBase>
-      <path d="M5 19 19 5M9 5h10v10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="6" cy="7" r="2" fill="none" stroke="currentColor" strokeWidth="1.5" />
-    </TabIconBase>
-  );
-}
-
 function ComputerIcon() {
   return (
     <TabIconBase viewBox="0 0 512 512">
@@ -2201,17 +2192,17 @@ function Board(props: {
   lastMove: [Key, Key] | undefined;
   arrows: DrawShape[];
   annotations: BoardAnnotation[];
-  annotationDraft?: BoardAnnotation[];
+  annotationTarget?: string;
+  drawing: boolean;
   onAnnotationsChange: (annotations: BoardAnnotation[]) => void;
   readOnly?: boolean;
   onMove: (orig: Key, dest: Key) => void;
 }) {
-  const { fen, orientation, lastMove, arrows, annotations, annotationDraft, onAnnotationsChange, readOnly, onMove } = props;
-  const drawing = annotationDraft !== undefined;
+  const { fen, orientation, lastMove, arrows, annotations, annotationTarget, drawing, onAnnotationsChange, readOnly, onMove } = props;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const apiRef = useRef<ChessgroundApi | null>(null);
   const onMoveRef = useRef(onMove);
-  const drawingGesture = useRef<{ pointerId: number; orig: Key; preview?: BoardAnnotation } | null>(null);
+  const drawingGesture = useRef<{ pointerId: number; target: string; orig: Key; preview?: BoardAnnotation } | null>(null);
 
   useEffect(() => {
     onMoveRef.current = onMove;
@@ -2225,6 +2216,7 @@ function Board(props: {
       coordinatesOnSquares: false,
       ranksPosition: 'left',
       blockTouchScroll: true,
+      disableContextMenu: true,
       movable: {
         color: 'both',
         free: true,
@@ -2241,7 +2233,7 @@ function Board(props: {
   }, []);
 
   useEffect(() => {
-    if (!drawing) drawingGesture.current = null;
+    if (drawingGesture.current?.target !== annotationTarget) drawingGesture.current = null;
     const locked = readOnly || drawing;
     const preview = drawingGesture.current?.preview;
     apiRef.current?.set({
@@ -2263,52 +2255,53 @@ function Board(props: {
       selectable: { enabled: !drawing },
       draggable: { enabled: !drawing },
       drawable: {
-        enabled: !drawing,
+        enabled: !annotationTarget,
         visible: true,
-        shapes: annotationDraft ? boardAnnotationShapes(preview ? [...annotationDraft, preview] : annotationDraft) : undefined,
-        autoShapes: drawing ? [] : [...arrows, ...boardAnnotationShapes(annotations)],
+        shapes: annotationTarget ? boardAnnotationShapes(preview ? [...annotations, preview] : annotations) : undefined,
+        autoShapes: drawing ? [] : annotationTarget ? arrows : [...arrows, ...boardAnnotationShapes(annotations)],
         brushes: ARROW_BRUSHES,
       },
       lastMove,
     });
-  }, [fen, orientation, arrows, lastMove, readOnly, drawing, annotations, annotationDraft, onMove]);
+  }, [fen, orientation, arrows, lastMove, readOnly, drawing, annotations, annotationTarget, onMove]);
 
   const squareAtPointer = (event: PointerEvent<HTMLDivElement>) =>
     apiRef.current?.getKeyAtDomPos([event.clientX, event.clientY]);
 
   const startAnnotation = (event: PointerEvent<HTMLDivElement>) => {
-    if (!annotationDraft || !event.isPrimary || (event.button !== 0 && event.button !== 2)) return;
+    const drawGesture = event.button === 2 || (event.button === 0 && (drawing || event.shiftKey));
+    if (!annotationTarget || !event.isPrimary || !drawGesture) return;
     const orig = squareAtPointer(event);
     if (!orig) return;
     event.preventDefault();
     apiRef.current?.cancelMove();
     event.currentTarget.setPointerCapture(event.pointerId);
-    drawingGesture.current = { pointerId: event.pointerId, orig, preview: { orig } };
-    apiRef.current?.setShapes(boardAnnotationShapes([...annotationDraft, { orig }]));
+    drawingGesture.current = { pointerId: event.pointerId, target: annotationTarget, orig, preview: { orig } };
+    apiRef.current?.setShapes(boardAnnotationShapes([...annotations, { orig }]));
   };
 
   const moveAnnotation = (event: PointerEvent<HTMLDivElement>) => {
     const gesture = drawingGesture.current;
-    if (!annotationDraft || gesture?.pointerId !== event.pointerId) return;
+    if (gesture?.pointerId !== event.pointerId || gesture.target !== annotationTarget) return;
     const square = squareAtPointer(event);
     const preview = square ? { orig: gesture.orig, dest: square === gesture.orig ? undefined : square } : undefined;
     if (preview?.orig === gesture.preview?.orig && preview?.dest === gesture.preview?.dest) return;
     gesture.preview = preview;
-    apiRef.current?.setShapes(boardAnnotationShapes(preview ? [...annotationDraft, preview] : annotationDraft));
+    apiRef.current?.setShapes(boardAnnotationShapes(preview ? [...annotations, preview] : annotations));
   };
 
   const endAnnotation = (event: PointerEvent<HTMLDivElement>, commit: boolean) => {
     const gesture = drawingGesture.current;
-    if (!annotationDraft || gesture?.pointerId !== event.pointerId) return;
+    if (gesture?.pointerId !== event.pointerId || gesture.target !== annotationTarget) return;
     drawingGesture.current = null;
     const square = commit ? squareAtPointer(event) : undefined;
     if (!square) {
-      apiRef.current?.setShapes(boardAnnotationShapes(annotationDraft));
+      apiRef.current?.setShapes(boardAnnotationShapes(annotations));
       return;
     }
     const annotation = { orig: gesture.orig, dest: square === gesture.orig ? undefined : square };
     const matches = (shape: BoardAnnotation) => shape.orig === annotation.orig && shape.dest === annotation.dest;
-    const next = annotationDraft.some(matches) ? annotationDraft.filter(shape => !matches(shape)) : [...annotationDraft, annotation];
+    const next = annotations.some(matches) ? annotations.filter(shape => !matches(shape)) : [...annotations, annotation];
     apiRef.current?.setShapes(boardAnnotationShapes(next));
     onAnnotationsChange(next);
   };
@@ -2537,7 +2530,7 @@ function App() {
   } | null>(null);
   const [moveCommentEditor, setMoveCommentEditor] = useState<{ nodeId: string; draft: string } | null>(null);
   const [browseAnnotations, setBrowseAnnotations] = useState<Record<string, BoardAnnotation[]>>({});
-  const [annotationDraft, setAnnotationDraft] = useState<{ target: string; shapes: BoardAnnotation[] } | null>(null);
+  const [drawingTarget, setDrawingTarget] = useState<string | null>(null);
   const [renamingRepertoireId, setRenamingRepertoireId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [importMode, setImportMode] = useState<'current' | 'db' | 'review'>('current');
@@ -3092,7 +3085,7 @@ function App() {
 
   const applyPersistedDatabaseState = useCallback((persisted: PersistedAppState | null) => {
     setBrowseAnnotations(persisted?.browseAnnotations ?? {});
-    setAnnotationDraft(null);
+    setDrawingTarget(null);
     if (persisted) {
       setRepertoiresBySide(persisted.repertoiresBySide);
       setActiveRepertoireIdBySide({ white: null, black: null });
@@ -8302,25 +8295,20 @@ function App() {
   const annotationTarget = JSON.stringify([activeRepertoireId, selectedNode.id, annotationPositionKey]);
   const savedAnnotations = isTreeBoard ? (isBrowseMode ? browseAnnotations[annotationPositionKey] ?? []
     : readBoardAnnotations(selectedNode.annotations)) : [];
-  const activeAnnotationDraft = canAnnotateBoard && annotationDraft?.target === annotationTarget ? annotationDraft : null;
+  const isDrawingAnnotations = canAnnotateBoard && drawingTarget === annotationTarget;
 
   useEffect(() => {
-    setAnnotationDraft(draft => canAnnotateBoard && draft?.target === annotationTarget ? draft : null);
+    setDrawingTarget(target => canAnnotateBoard && target === annotationTarget ? target : null);
   }, [annotationTarget, canAnnotateBoard]);
 
   const toggleAnnotationDrawing = () => {
     if (!canAnnotateBoard) return;
     setHoveredEngineMove(null);
-    setAnnotationDraft(activeAnnotationDraft ? null : { target: annotationTarget, shapes: savedAnnotations });
+    setDrawingTarget(isDrawingAnnotations ? null : annotationTarget);
   };
 
-  const updateAnnotationDraft = (shapes: BoardAnnotation[]) => {
-    setAnnotationDraft(draft => draft?.target === annotationTarget ? { ...draft, shapes } : draft);
-  };
-
-  const saveAnnotations = () => {
-    if (!activeAnnotationDraft) return;
-    const { shapes } = activeAnnotationDraft;
+  const saveAnnotations = (shapes: BoardAnnotation[]) => {
+    if (!canAnnotateBoard) return;
     if (isBrowseMode) {
       setBrowseAnnotations(previous => {
         const next = { ...previous };
@@ -8332,12 +8320,11 @@ function App() {
       const annotatedNode = { ...selectedNode, annotations: shapes.length ? shapes : undefined };
       updateMoveTree({ ...tree, nodes: { ...tree.nodes, [annotatedNode.id]: annotatedNode } });
     }
-    setAnnotationDraft(null);
   };
 
   const movesTabDrawing = useLongPressAction(toggleAnnotationDrawing, () => setPortraitTab('moves'), 420);
   const canPlayEngineMove = !isTrainingActive && !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride &&
-    !suddenDeathGameOver && !activeAnnotationDraft;
+    !suddenDeathGameOver && !isDrawingAnnotations;
   const renderEngineMove = (move: ReturnType<typeof buildEnginePvMoves>[number] | undefined,
     className = '', action?: 'play' | 'preview', key?: number) => {
     if (!move) return <span>—</span>;
@@ -8367,7 +8354,7 @@ function App() {
   const reviewScore = liveReviewLine?.scoreText ?? (reviewEvaluation?.hasScore ? reviewEvaluation.scoreText : null);
   const reviewPv = liveReviewLine?.pv || reviewEvaluation?.pv || reviewEvaluation?.bestMove || '';
   const reviewPvMoves = suddenDeathReviewPosition && reviewPv ? buildEnginePvMoves(suddenDeathReviewPosition.fen, reviewPv) : [];
-  const boardPreview = !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride && !activeAnnotationDraft ? hoveredEngineMove : null;
+  const boardPreview = !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride && !isDrawingAnnotations ? hoveredEngineMove : null;
   const activeMoveComment = !suddenDeathGameOver && selectedNode.comment && boardFen === selectedNode.fen && !analysisScratchFen
     ? <p className="active-move-comment">
         {selectedNode.moveSan && <><strong>{toFigurineSan(selectedNode.moveSan)}</strong>{' '}</>}
@@ -8486,7 +8473,7 @@ function App() {
       else if (canFindCommonMistakes) void findCommonMistakes();
     },
   );
-  const renderArrowToggleButtons = (compact = false) => (
+  const renderArrowToggleButtons = (compact = false, includeDrawing = false) => (
     <>
       <button
         type="button"
@@ -8547,6 +8534,14 @@ function App() {
         aria-label="Toggle tree arrows"
         title="Toggle tree arrows (hold for options)"
       />
+      {includeDrawing && canAnnotateBoard && <button
+        type="button"
+        className={`icon-toggle-btn with-diagonal-arrow only-arrow arrow-annotation${isDrawingAnnotations ? ' active' : ''}`}
+        aria-label="Draw annotations"
+        aria-pressed={isDrawingAnnotations}
+        title={isDrawingAnnotations ? 'Return to move entry' : 'Draw arrows and mark squares'}
+        onClick={toggleAnnotationDrawing}
+      />}
     </>
   );
 
@@ -8937,19 +8932,11 @@ function App() {
                   <div className="opening-title" title={openingFullTitle}>
                     {openingTitleContent}
                   </div>
-                  {canAnnotateBoard && <button type="button" className="board-draw-btn" aria-label="Draw annotations"
-                    aria-pressed={Boolean(activeAnnotationDraft)}
-                    title={activeAnnotationDraft ? 'Return to move entry' : 'Draw arrows and mark squares'}
-                    onClick={toggleAnnotationDrawing}><DrawIcon /></button>}
                   <button className="hamburger-btn board-options-btn" aria-label="Options menu" onClick={() => setIsOptionsOpen(true)}>
                     &#9776;
                   </button>
                 </div>
-                {activeAnnotationDraft ? <div className="board-annotation-actions" aria-label="Drawing tools">
-                  <button type="button" onClick={saveAnnotations}>Save annotations</button>
-                  <button type="button" disabled={!activeAnnotationDraft.shapes.length} onClick={() => updateAnnotationDraft([])}>Clear</button>
-                  <button type="button" onClick={toggleAnnotationDrawing}>Cancel</button>
-                </div> : <div className="stats-row">
+                <div className="stats-row">
                   <LichessStatsBar
                     white={explorerData?.white ?? 0}
                     draws={explorerData?.draws ?? 0}
@@ -8959,7 +8946,7 @@ function App() {
                     {formatGamesCount(explorerData ? lichessTotal : 0)}
                     {visibleEngineEval && <span className="games-eval-inline">{` ${visibleEngineEval}`}</span>}
                   </span>
-                </div>}
+                </div>
               </div>
               <Board
                 fen={boardPreview?.fen ?? boardFen}
@@ -8967,8 +8954,9 @@ function App() {
                 lastMove={boardPreview?.lastMove ?? boardLastMove}
                 arrows={boardPreview ? [] : trainingForActive ? trainingHintArrow : autoArrows}
                 annotations={boardPreview ? [] : savedAnnotations}
-                annotationDraft={activeAnnotationDraft?.shapes}
-                onAnnotationsChange={updateAnnotationDraft}
+                annotationTarget={canAnnotateBoard && !boardPreview ? annotationTarget : undefined}
+                drawing={isDrawingAnnotations}
+                onAnnotationsChange={saveAnnotations}
                 readOnly={Boolean(suddenDeathGameOver || (isSuddenDeathActive && (suddenDeathThinking || toTurnColor(boardFen) !== activeSide)))}
                 onMove={makeMove}
               />
@@ -9045,12 +9033,12 @@ function App() {
                     </button>
                     <button
                       type="button"
-                      className={`${portraitTab === 'moves' ? 'active' : ''}${canAnnotateBoard ? ' long-pressable-btn' : ''}${activeAnnotationDraft ? ' drawing-mode-active' : ''}`}
+                      className={`${portraitTab === 'moves' ? 'active' : ''}${canAnnotateBoard ? ' long-pressable-btn' : ''}${isDrawingAnnotations ? ' icon-toggle-btn with-diagonal-arrow only-arrow arrow-annotation' : ''}`}
                       {...movesTabDrawing}
                       aria-label="Moves"
-                      title={canAnnotateBoard ? `Moves (long press: ${activeAnnotationDraft ? 'return to move entry' : 'draw annotations'})` : 'Moves'}
+                      title={canAnnotateBoard ? `Moves (long press: ${isDrawingAnnotations ? 'return to move entry' : 'draw annotations'})` : 'Moves'}
                     >
-                      {activeAnnotationDraft ? <DrawIcon /> : <MoveIcon />}
+                      {!isDrawingAnnotations && <MoveIcon />}
                     </button>
                   </>
                 )}
@@ -9353,7 +9341,7 @@ function App() {
                     ) : (
                       <>
                         <div className="desktop-navigation desktop-only">
-                          <div className="arrow-toggle-group">{renderArrowToggleButtons()}</div>
+                          <div className="arrow-toggle-group">{renderArrowToggleButtons(false, true)}</div>
                           <button
                             className="back-btn"
                             onClick={handleBackClick}
