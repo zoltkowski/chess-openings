@@ -416,6 +416,7 @@ type PersistedSettingsState = {
   suddenDeathMaxThinkTimeSec: number;
   nextMissingMoveThreshold: MoveThreshold;
   playerNextMissingMoveThreshold: MoveThreshold;
+  desktopLichessShare: number;
 };
 
 type BackupPayload = {
@@ -432,6 +433,9 @@ const START_POS_FEN = new Chess().fen();
 const FIXED_VARIANT = 'standard';
 const FIXED_SOURCE = 'analysis';
 const MOVE_THRESHOLD_OPTIONS = [0, 1, 2, 3, 4, 5, 10, 20] as const;
+const DESKTOP_SPLIT_DEFAULT = 50;
+const DESKTOP_SPLIT_MIN = 15;
+const DESKTOP_SPLIT_MAX = 85;
 type MoveThreshold = (typeof MOVE_THRESHOLD_OPTIONS)[number];
 const SPEEDS = ['bullet', 'blitz', 'rapid', 'classical', 'correspondence'] as const;
 const PLAYER_SPEEDS = ['ultraBullet', ...SPEEDS] as const;
@@ -893,7 +897,13 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
       (parsed as Partial<PersistedSettingsState>).nextMissingMoveThreshold,
     ),
     playerNextMissingMoveThreshold: normalizeMoveThreshold(parsed.playerNextMissingMoveThreshold ?? 0),
+    desktopLichessShare: normalizeDesktopLichessShare(parsed.desktopLichessShare),
   };
+}
+
+function normalizeDesktopLichessShare(value: unknown) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DESKTOP_SPLIT_DEFAULT;
+  return Math.min(DESKTOP_SPLIT_MAX, Math.max(DESKTOP_SPLIT_MIN, value));
 }
 
 function createEmptyTrainingStatsState(): TrainingStatsState {
@@ -2184,6 +2194,71 @@ async function readExplorerResponse(
   }
 }
 
+function ExplorerPanel({ className, split, onSplitChange, children }: {
+  className: string;
+  split: number;
+  onSplitChange: (split: number) => void;
+  children: [ReactNode, ReactNode];
+}) {
+  const [dragSplit, setDragSplit] = useState<number | null>(null);
+  const drag = useRef<{ pointerId: number; startY: number; startSplit: number; height: number } | null>(null);
+  const shownSplit = dragSplit ?? split;
+
+  const splitAtPointer = (event: PointerEvent<HTMLDivElement>) => {
+    const start = drag.current;
+    if (start?.pointerId !== event.pointerId) return null;
+    return normalizeDesktopLichessShare(start.startSplit + 100 * (event.clientY - start.startY) / start.height);
+  };
+
+  const cancelDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (drag.current?.pointerId !== event.pointerId) return;
+    drag.current = null;
+    setDragSplit(null);
+  };
+
+  return (
+    <aside className={className}
+      style={{ gridTemplateRows: `minmax(0, ${shownSplit}fr) 0.65rem minmax(0, ${100 - shownSplit}fr)` }}>
+      {children[0]}
+      <div className="explorer-divider desktop-only" role="separator" tabIndex={0}
+        aria-label="Resize Lichess and AI panels" aria-orientation="horizontal" aria-controls="lichess-explorer-panel"
+        aria-valuemin={DESKTOP_SPLIT_MIN} aria-valuemax={DESKTOP_SPLIT_MAX} aria-valuenow={Math.round(shownSplit)}
+        aria-valuetext={`Lichess ${Math.round(shownSplit)}%, AI ${100 - Math.round(shownSplit)}%`}
+        onPointerDown={(event) => {
+          if (!event.isPrimary || event.button !== 0) return;
+          const handle = event.currentTarget;
+          const height = (handle.previousElementSibling?.getBoundingClientRect().height ?? 0) +
+            (handle.nextElementSibling?.getBoundingClientRect().height ?? 0);
+          if (!height) return;
+          event.preventDefault();
+          handle.focus({ preventScroll: true });
+          handle.setPointerCapture(event.pointerId);
+          drag.current = { pointerId: event.pointerId, startY: event.clientY, startSplit: split, height };
+        }}
+        onPointerMove={(event) => {
+          const value = splitAtPointer(event);
+          if (value !== null) setDragSplit(value);
+        }}
+        onPointerUp={(event) => {
+          const value = splitAtPointer(event);
+          if (value === null) return;
+          cancelDrag(event);
+          onSplitChange(value);
+        }}
+        onPointerCancel={cancelDrag} onLostPointerCapture={cancelDrag}
+        onKeyDown={(event) => {
+          if (drag.current) return;
+          const steps = { ArrowUp: split - 2, ArrowDown: split + 2, Home: DESKTOP_SPLIT_MIN, End: DESKTOP_SPLIT_MAX };
+          if (!Object.hasOwn(steps, event.key)) return;
+          event.preventDefault();
+          onSplitChange(normalizeDesktopLichessShare(steps[event.key as keyof typeof steps]));
+        }}
+      />
+      {children[1]}
+    </aside>
+  );
+}
+
 function boardAnnotationShapes(annotations: BoardAnnotation[]): DrawShape[] {
   return annotations.map(annotation => ({ ...annotation, brush: 'annotation' }));
 }
@@ -2538,6 +2613,7 @@ function App() {
   const [renameDraft, setRenameDraft] = useState('');
   const [importMode, setImportMode] = useState<'current' | 'db' | 'review'>('current');
   const [portraitTab, setPortraitTab] = useState<'lichess' | 'stockfish' | 'moves'>('moves');
+  const [desktopLichessShare, setDesktopLichessShare] = useState(DESKTOP_SPLIT_DEFAULT);
   const [trainingSession, setTrainingSession] = useState<TrainingSession | null>(null);
   const [trainingStatsBySide, setTrainingStatsBySide] = useState<TrainingStatsState>(createEmptyTrainingStatsState());
   const [trainingLeafLastShownBySide, setTrainingLeafLastShownBySide] = useState<TrainingLeafLastShownState>(
@@ -3057,6 +3133,7 @@ function App() {
     setLichessArrowThreshold(persistedSettings.lichessArrowThreshold);
     setNextMissingMoveThreshold(persistedSettings.nextMissingMoveThreshold);
     setPlayerNextMissingMoveThreshold(persistedSettings.playerNextMissingMoveThreshold);
+    setDesktopLichessShare(persistedSettings.desktopLichessShare);
     setEngineDepth(persistedSettings.engineDepth);
     setEngineMultiPv(persistedSettings.engineMultiPv);
     setSelectedSpeeds(
@@ -3268,6 +3345,7 @@ function App() {
       suddenDeathMaxThinkTimeSec,
       nextMissingMoveThreshold,
       playerNextMissingMoveThreshold,
+      desktopLichessShare,
     };
 
     const timeout = window.setTimeout(() => {
@@ -3296,6 +3374,7 @@ function App() {
     lichessArrowThreshold,
     nextMissingMoveThreshold,
     playerNextMissingMoveThreshold,
+    desktopLichessShare,
     engineDepth,
     engineMultiPv,
     selectedSpeeds,
@@ -6139,6 +6218,7 @@ function App() {
       suddenDeathMaxThinkTimeSec,
       nextMissingMoveThreshold,
       playerNextMissingMoveThreshold,
+      desktopLichessShare,
     };
     return {
       version: 1,
@@ -8593,8 +8673,9 @@ function App() {
       <main className="layout">
         <section className="left-panel">
           <div className={`board-row ${isTrainingActive ? 'training-mode' : ''}`}>
-            {!isTrainingActive && <aside className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}>
-              <section className="lichess-scroll" aria-label="Lichess explorer">
+            {!isTrainingActive && <ExplorerPanel className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}
+              split={desktopLichessShare} onSplitChange={setDesktopLichessShare}>
+              <section className="lichess-scroll" id="lichess-explorer-panel" aria-label="Lichess explorer">
                 <div className="lichess-filters-bar desktop-only">
                   <button type="button" className="mode-icon-btn" aria-label="Lichess filters" title="Lichess filters"
                     onClick={() => setIsLichessFilterOpen(true)}><DbIcon /></button>
@@ -8938,7 +9019,7 @@ function App() {
                   {visibleEngineStatus && <span className="status">{visibleEngineStatus}</span>}
                 </div>
               </section>
-            </aside>}
+            </ExplorerPanel>}
 
             <div className="board-center">
               <div className="board-meta">

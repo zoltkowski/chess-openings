@@ -1729,7 +1729,7 @@ span.engine-pv-move {
 
   .lichess-panel {
     display: grid;
-    grid-template: minmax(0, 60fr) minmax(0, 40fr) / minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     overflow: hidden;
   }
 
@@ -1741,12 +1741,32 @@ span.engine-pv-move {
   }
 
   .stockfish-inline {
-    border-top: 1px solid #e5ebf3;
-    padding-top: 0.75rem;
+    padding-top: 0.35rem;
   }
 
-  .app.theme-dark .stockfish-inline {
-    border-color: #334155;
+  .explorer-divider {
+    display: grid;
+    place-items: center;
+    cursor: row-resize;
+    touch-action: none;
+    color: #94a3b8;
+  }
+
+  .explorer-divider::before {
+    content: '';
+    width: 2.5rem;
+    height: 2px;
+    border-radius: 1px;
+    background: currentColor;
+  }
+
+  .explorer-divider:is(:hover, :focus-visible) {
+    color: #60a5fa;
+  }
+
+  .explorer-divider:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: -2px;
   }
 }
 
