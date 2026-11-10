@@ -1739,7 +1739,7 @@ span.engine-pv-move {
 
   .lichess-panel {
     display: grid;
-    grid-template: repeat(2, minmax(0, 1fr)) / minmax(0, 1fr);
+    grid-template: minmax(0, 65fr) minmax(0, 35fr) / minmax(0, 1fr);
     overflow: hidden;
   }
 
@@ -1748,6 +1748,12 @@ span.engine-pv-move {
     overflow-y: auto;
     overflow-x: hidden;
     overscroll-behavior: contain;
+    scrollbar-width: none;
+  }
+
+  .lichess-scroll::-webkit-scrollbar,
+  .stockfish-inline::-webkit-scrollbar {
+    display: none;
   }
 
   .stockfish-inline {
