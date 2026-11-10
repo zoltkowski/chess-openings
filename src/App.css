@@ -837,6 +837,7 @@ select {
 }
 
 .player-repertoire-controls button,
+.player-check-moves-btn,
 .player-best-move {
   font-size: 0.8rem;
 }
@@ -844,6 +845,9 @@ select {
 .player-best-move {
   justify-self: start;
 }
+
+.player-stockfish-best { color: #1d4ed8; }
+.app.theme-dark .player-stockfish-best { color: #93c5fd; }
 
 .player-repertoire-status {
   font-size: 0.8rem;
@@ -1713,9 +1717,15 @@ span.engine-pv-move {
   position: relative;
 }
 
-.lichess-filters-bar {
+.lichess-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
   margin-bottom: 0.35rem;
-  text-align: right;
+}
+
+.lichess-filters-btn {
+  margin-left: auto;
 }
 
 @media (orientation: landscape) {

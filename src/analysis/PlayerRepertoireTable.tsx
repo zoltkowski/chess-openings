@@ -6,6 +6,7 @@ export type PlayerMoveRow = {
   san: string;
   note?: string;
   score?: string;
+  best?: boolean;
   provisional?: boolean;
   kind?: 'repertoire' | 'mistake';
   frequency?: string;
@@ -32,7 +33,8 @@ export function PlayerRepertoireTable({ rows, complete, side, positionGames, onM
         return (
           <button type="button" className="player-repertoire-row lichess-clickable-row" data-kind={row.kind} key={row.uci} onClick={() => onMove(row.uci)}>
             <span className="player-repertoire-move">
-              <strong>{row.san}</strong>
+              <strong className={row.best ? 'player-stockfish-best' : undefined}
+                title={row.best ? 'Best move according to Stockfish' : undefined}>{row.san}</strong>
               {row.score && <span title={row.provisional ? 'Provisional Stockfish evaluation' : undefined}>
                 {row.provisional && '≈'}{playerScoreForWhite(row.score, side)}
               </span>}

@@ -6940,6 +6940,7 @@ function App() {
   const playerRows: PlayerMoveRow[] = [];
   const playerMoveCounts = new Map<string, number>();
   const playerBestMove = playerToMove ? playerAssessment?.best.bestMove : null;
+  const showPlayerMoveCheck = playerToMove && !mistakeReview && !opponentReviewOpen && !isFindMissingSearchRunning;
   let playerBestSan: string | undefined;
   if (isPlayerExplorer) {
     const seen = new Map(playerExplorerPositionMoves.map(move => [move.uci, move]));
@@ -6959,7 +6960,8 @@ function App() {
       if (playerToMove) playerMoveCounts.set(uci, move ? move.white + move.draws + move.black : 0);
       const inRepertoire = playerRepertoireMoves?.has(uci);
       const evaluation = playerToMove ? playerAssessment?.moves[uci] : undefined;
-      const mistake = (evaluation?.confirmedLoss ?? 0) >= PLAYER_MISTAKE_LOSS;
+      const best = uci === playerBestMove;
+      const mistake = !best && (evaluation?.confirmedLoss ?? 0) >= PLAYER_MISTAKE_LOSS;
       let note = isBrowseMode ? undefined : inRepertoire ? 'In repertoire' : 'Outside repertoire';
       if (!playerToMove && !isBrowseMode) {
         const reply = explorerReplyFen(selectedBoardFen, uci);
@@ -6972,8 +6974,9 @@ function App() {
       }
       if (mistake) note = inRepertoire ? 'Weak repertoire move' : note ? 'Mistake outside repertoire' : 'Mistake';
       playerRows.push({
-        uci, san: toFigurineSan(san), note, score: evaluation?.score,
-        provisional: evaluation?.confirmedLoss === null, results,
+        uci, san: toFigurineSan(san), note, best,
+        score: best ? playerAssessment?.best.scoreText : evaluation?.score,
+        provisional: !best && evaluation?.confirmedLoss === null, results,
       });
     }
     playerRows.sort((a, b) => (b.results ? b.results.wins + b.results.draws + b.results.losses : 0) -
@@ -8676,8 +8679,15 @@ function App() {
             {!isTrainingActive && <ExplorerPanel className={`lichess-panel card portrait-pane ${portraitTab === 'lichess' ? 'active' : ''}`}
               split={desktopLichessShare} onSplitChange={setDesktopLichessShare}>
               <section className="lichess-scroll" id="lichess-explorer-panel" aria-label="Lichess explorer">
-                <div className="lichess-filters-bar desktop-only">
-                  <button type="button" className="mode-icon-btn" aria-label="Lichess filters" title="Lichess filters"
+                <div className={`lichess-toolbar${showPlayerMoveCheck ? '' : ' desktop-only'}`}>
+                  {showPlayerMoveCheck && <button type="button" className="player-check-moves-btn"
+                    disabled={!playerAssessmentRunning && (!stockfishLoaded || !playerMoveCounts.size ||
+                      !hasHydratedAppState || !playerHandle.trim() || isTreeEvalRunning || isExampleReplayActive ||
+                      Boolean(analysisGameProgress) || Boolean(trainingSession))}
+                    onClick={() => void assessPlayerMoves(playerMoveCounts)}>
+                    {playerAssessmentRunning ? 'Stop checking' : 'Check moves'}
+                  </button>}
+                  <button type="button" className="mode-icon-btn lichess-filters-btn desktop-only" aria-label="Lichess filters" title="Lichess filters"
                     onClick={() => setIsLichessFilterOpen(true)}><DbIcon /></button>
                 </div>
                 {opponentReview && (
@@ -8764,13 +8774,6 @@ function App() {
                       {isFindMissingSearchRunning && <button type="button" onClick={() => findMissingControllerRef.current?.abort()}>
                         Stop search
                       </button>}
-                      {playerToMove && !isFindMissingSearchRunning && <button type="button"
-                        disabled={!playerAssessmentRunning && (!stockfishLoaded || !playerMoveCounts.size ||
-                          !hasHydratedAppState || !playerHandle.trim() || isTreeEvalRunning || isExampleReplayActive ||
-                          Boolean(analysisGameProgress) || Boolean(trainingSession) || isFindMissingSearchRunning)}
-                        onClick={() => void assessPlayerMoves(playerMoveCounts)}>
-                        {playerAssessmentRunning ? 'Stop checking' : 'Check moves'}
-                      </button>}
                       {playerAfterLine && !isFindMissingSearchRunning && Boolean(explorerData?.moves.length) && (
                         <button type="button" disabled={!stockfishLoaded || playerAssessmentRunning || isTreeEvalRunning ||
                           isExampleReplayActive || Boolean(trainingSession) || Boolean(analysisGameProgress)}
@@ -8803,7 +8806,7 @@ function App() {
                       {playerAfterLine && !playerRows.length && Boolean(explorerData?.moves.length) &&
                         !isFindMissingSearchRunning && !playerSearchNote && <div>End of the line · check your replies to reveal problems.</div>}
                     </div>}
-                    {!opponentReviewOpen && playerAssessment && playerBestMove && playerBestSan && (
+                    {!opponentReviewOpen && playerAssessment && playerBestMove && playerBestSan && !playerRows.some(row => row.best) && (
                       <button type="button" className="player-best-move" onClick={() => playPlayerMove(playerBestMove)}>
                         {STOCKFISH_ENGINE_LABEL} best: {toFigurineSan(playerBestSan)} {playerScoreForWhite(playerAssessment.best.scoreText, activeSide)}
                       </button>
