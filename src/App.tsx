@@ -2525,6 +2525,9 @@ function App() {
   const [movesArrowGroupNeedsCompact, setMovesArrowGroupNeedsCompact] = useState(false);
   const topArrowGroupRef = useRef<HTMLDivElement>(null);
   const movesArrowGroupRef = useRef<HTMLDivElement>(null);
+  const moveToolbarRef = useRef<HTMLDivElement>(null);
+  const portraitForwardRef = useRef<HTMLButtonElement>(null);
+  const [hidePortraitForward, setHidePortraitForward] = useState(false);
   const [engineLines, setEngineLines] = useState<EngineLine[]>([]);
   const [maiaStockfishComparison, setMaiaStockfishComparison] = useState<MaiaStockfishComparison | null>(null);
   const [stockfishLinesFen, setStockfishLinesFen] = useState(START_POS_FEN);
@@ -2752,6 +2755,9 @@ function App() {
   const isBrowseMode = !activeRepertoire;
   const isReadOnlyRepertoire = Boolean(activeRepertoire && !isEditingRepertoire &&
     !(trainingSession && trainingSession.side === activeSide));
+  useEffect(() => {
+    if (!isEditingRepertoire) setMoveCommentEditor(null);
+  }, [isEditingRepertoire]);
   const activeRepertoireName = activeRepertoire?.name ?? 'Review mode';
   const bookRepertoireIndex = useMemo(
     () => buildBookRepertoireIndex([...repertoiresBySide.white, ...repertoiresBySide.black]),
@@ -7220,6 +7226,31 @@ function App() {
     update();
     return () => observer.disconnect();
   }, [showMixedEngines, canGoForward, portraitTab, isTrainingActive, isExampleReplayActive]);
+  useLayoutEffect(() => {
+    const row = moveToolbarRef.current;
+    const forward = portraitForwardRef.current;
+    if (!row || !forward || !window.matchMedia('(orientation: portrait)').matches) {
+      setHidePortraitForward(false);
+      return;
+    }
+    const update = () => {
+      const style = getComputedStyle(row);
+      const available = row.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      const children = [...row.children].filter(child => child === forward ||
+        (child.getClientRects().length > 0 && getComputedStyle(child).display !== 'none'));
+      const width = children.reduce((total, child) => {
+        const childStyle = getComputedStyle(child);
+        return total + child.getBoundingClientRect().width +
+          (child.classList.contains('arrow-toggle-group') ? 0 : (parseFloat(childStyle.marginLeft) || 0)) +
+          (parseFloat(childStyle.marginRight) || 0);
+      }, 0) + Math.max(0, children.length - 1) * parseFloat(style.columnGap);
+      setHidePortraitForward(width > available + 1);
+    };
+    const observer = new ResizeObserver(update);
+    [row, ...row.children].forEach(element => observer.observe(element));
+    update();
+    return () => observer.disconnect();
+  }, [canGoForward, portraitTab, isTrainingActive, isExampleReplayActive, showMixedEngines]);
   const displayedBookMoves = useMemo(
     () => findBookMovesForGame(displayedMovePath, bookRepertoireIndex),
     [displayedMovePath, bookRepertoireIndex],
@@ -7602,6 +7633,10 @@ function App() {
   };
   const saveMoveComment = () => {
     if (!moveCommentEditor) return;
+    if (!isEditingRepertoire) {
+      setMoveCommentEditor(null);
+      return;
+    }
     const node = tree.nodes[moveCommentEditor.nodeId];
     const comment = moveCommentEditor.draft.trim() || undefined;
     if (node && node.comment !== comment) updateMoveTree({ ...tree, nodes: { ...tree.nodes, [node.id]: { ...node, comment } } });
@@ -8619,7 +8654,8 @@ function App() {
   const renderForwardReviewButton = (className = '') => canGoForward && (
     <button
       type="button"
-      className={`review-forward-btn mode-icon-btn has-submenu-dot ${className}`}
+      ref={className === 'portrait-only' ? portraitForwardRef : undefined}
+      className={`review-forward-btn mode-icon-btn has-submenu-dot ${className} ${className === 'portrait-only' && hidePortraitForward ? 'hide-when-wrapped' : ''}`}
       onClick={handleForwardClick}
       onContextMenu={handleForwardContextMenu}
       onPointerDown={handleForwardPointerDown}
@@ -9456,7 +9492,7 @@ function App() {
                 </>
               ) : (
                 <>
-                  <div className={`controls-row${isExampleReplayActive ? '' : ' move-toolbar'}`}>
+                  <div ref={moveToolbarRef} className={`controls-row${isExampleReplayActive ? '' : ' move-toolbar'}`}>
                     {isExampleReplayActive ? (
                       <>
                         <button
@@ -9760,7 +9796,7 @@ function App() {
                     Set as {REPERTOIRE_MOVE_LABELS[status].toLowerCase()}
                   </button>
                 ))}
-            {menuNode?.moveUci && !trainingSession && !isTreeEvalRunning && (
+            {menuNode?.moveUci && isEditingRepertoire && !trainingSession && !isTreeEvalRunning && (
               <button type="button" onClick={() => {
                 setMoveCommentEditor({ nodeId: menuNode.id, draft: menuNode.comment ?? '' });
                 setTreeOptionDeletePopup(null);
@@ -9775,7 +9811,7 @@ function App() {
         </>
       )}
 
-      {moveCommentEditor && (
+      {moveCommentEditor && isEditingRepertoire && (
         <div className="modal-backdrop" onClick={() => setMoveCommentEditor(null)}>
           <form className="modal-card stockfish-quick-modal move-comment-editor" role="dialog" aria-modal="true"
             aria-labelledby="move-comment-title" onClick={event => event.stopPropagation()}
