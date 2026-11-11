@@ -58,6 +58,20 @@ import {
 } from './analysis/playerRepertoire';
 
 type Side = 'white' | 'black';
+type RepertoireMode = 'review' | 'edit';
+
+function RepertoireSelectButton({ name, className, mode, onSelect }: {
+  name: string;
+  className?: string;
+  mode: RepertoireMode | null;
+  onSelect: (mode: RepertoireMode) => void;
+}) {
+  const press = useLongPressAction(() => onSelect('edit'), () => onSelect('review'));
+  return <button type="button" className={className} title={`${name} — kliknij: przegląd, przytrzymaj lub kliknij prawym: edycja`}
+    aria-label={`${name}, ${mode === 'edit' ? 'tryb edycji' : mode === 'review' ? 'tryb przeglądu' : 'nieaktywne'}`}
+    {...press}>{name}</button>;
+}
+
 type LichessSource = 'lichess' | 'masters' | 'player';
 type ExplorerDates = PlayerHistoryDates;
 const MISTAKE_HISTORY_WINDOWS = [1, 3, 6, 12] as const;
@@ -2451,6 +2465,10 @@ function App() {
     white: null,
     black: null,
   });
+  const [repertoireModeBySide, setRepertoireModeBySide] = useState<Record<Side, RepertoireMode>>({
+    white: 'review',
+    black: 'review',
+  });
   const [repertoireSide, setRepertoireSide] = useState<'white' | 'black'>('white');
   const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode);
   const [isTempBoardFlipped, setIsTempBoardFlipped] = useState(false);
@@ -2710,6 +2728,7 @@ function App() {
   const activeRepertoireId = activeRepertoireIdBySide[activeSide];
   const activeRepertoire =
     activeRepertoireId ? activeRepertoireList.find((item) => item.id === activeRepertoireId) : null;
+  const isEditingRepertoire = Boolean(activeRepertoire && repertoireModeBySide[activeSide] === 'edit');
   const isBrowseMode = !activeRepertoire;
   const activeRepertoireName = activeRepertoire?.name ?? 'Review mode';
   const bookRepertoireIndex = useMemo(
@@ -3273,7 +3292,7 @@ function App() {
       const next = { ...prev };
       (['white', 'black'] as Side[]).forEach((side) => {
         const activeId = activeRepertoireIdBySide[side];
-        if (!activeId) return;
+        if (!activeId || repertoireModeBySide[side] !== 'edit') return;
         const idx = prev[side].findIndex((entry) => entry.id === activeId);
         if (idx < 0) return;
         const current = prev[side][idx];
@@ -3291,7 +3310,7 @@ function App() {
       });
       return changed ? next : prev;
     });
-  }, [hasHydratedAppState, trees, selectedNodeBySide, activeRepertoireIdBySide]);
+  }, [hasHydratedAppState, trees, selectedNodeBySide, activeRepertoireIdBySide, repertoireModeBySide]);
 
   useEffect(() => {
     if (!hasHydratedAppState) return;
@@ -6600,6 +6619,7 @@ function App() {
       ...prev,
       [side]: next.id,
     }));
+    setRepertoireModeBySide((prev) => ({ ...prev, [side]: 'edit' }));
     setTrees((prev) => ({
       ...prev,
       [side]: next.tree,
@@ -6616,12 +6636,13 @@ function App() {
     setStatus(`Created repertoire "${next.name}" (${side})`);
   };
 
-  const loadRepertoire = (repertoireId: string, side: Side = activeSide, preservePosition = false) => {
+  const loadRepertoire = (repertoireId: string, side: Side = activeSide, preservePosition = false,
+    mode: RepertoireMode = 'review') => {
     const entry = repertoiresBySide[side].find((item) => item.id === repertoireId);
     if (!entry) return;
     const currentFenKey = positionFenKey(selectedNode.fen);
     const preservedNodeId =
-      preservePosition
+      (preservePosition || activeRepertoireIdBySide[side] === repertoireId)
         ? Object.values(entry.tree.nodes).find((node) => positionFenKey(node.fen) === currentFenKey)?.id ?? null
         : null;
     const nextSelectedId = preservedNodeId ?? (entry.tree.nodes[entry.selectedNodeId] ? entry.selectedNodeId : entry.tree.rootId);
@@ -6631,6 +6652,7 @@ function App() {
       ...prev,
       [side]: entry.id,
     }));
+    setRepertoireModeBySide((prev) => ({ ...prev, [side]: mode }));
     setTrees((prev) => ({
       ...prev,
       [side]: entry.tree,
@@ -9028,7 +9050,7 @@ function App() {
             <div className="board-center">
               <div className="board-meta">
                 <div className="board-head-row">
-                  <div className="opening-title" title={openingFullTitle}>
+                  <div className={`opening-title ${!isBrowseMode ? (isEditingRepertoire ? 'editing-repertoire' : 'reviewing-repertoire') : ''}`} title={openingFullTitle}>
                     {openingTitleContent}
                   </div>
                   <button className="hamburger-btn board-options-btn" aria-label="Options menu" onClick={() => setIsOptionsOpen(true)}>
@@ -9361,7 +9383,7 @@ function App() {
                       ⚙
                     </button>
                   </div>
-                  <div className="training-repertoire-name" title={isBrowseMode ? `${activeSide}: whole db` : activeRepertoireName}>
+                  <div className={`training-repertoire-name ${isEditingRepertoire ? 'editing-repertoire' : ''}`} title={isBrowseMode ? `${activeSide}: whole db` : activeRepertoireName}>
                     {isBrowseMode ? `${activeSide}: whole db` : `${activeSide}: ${activeRepertoireName}`}
                   </div>
                   <div className="controls-row">
@@ -9639,20 +9661,13 @@ function App() {
                       </div>
                       <div className="repertoire-hit-list">
                         {repertoiresAtPosition.map((item) => (
-                          <button
+                          <RepertoireSelectButton
                             key={item.id}
-                            type="button"
-                            className={`repertoire-hit-item ${item.isActive ? 'active' : ''}`}
-                            onClick={() => {
-                              if (item.isActive) {
-                                enterBrowseMode(activeSide);
-                                return;
-                              }
-                              loadRepertoire(item.id, boardOrientation, true);
-                            }}
-                          >
-                            {item.name}
-                          </button>
+                            name={item.name}
+                            mode={item.isActive ? repertoireModeBySide[boardOrientation] : null}
+                            className={`repertoire-hit-item ${item.isActive ? 'active' : ''} ${item.isActive && repertoireModeBySide[boardOrientation] === 'edit' ? 'editing-repertoire' : ''}`}
+                            onSelect={(mode) => loadRepertoire(item.id, boardOrientation, true, mode)}
+                          />
                         ))}
                       </div>
                     </div>
@@ -10127,7 +10142,7 @@ function App() {
         <div className="modal-backdrop" onClick={() => { if (!isTreeEvalRunning) setIsOptionsOpen(false); }}>
           <div className="modal-card options-modal" onClick={(e) => e.stopPropagation()}>
             <div
-              className={`current-repertoire ${!isBrowseMode ? 'active-repertoire' : ''}`}
+              className={`current-repertoire ${!isBrowseMode ? 'active-repertoire' : ''} ${isEditingRepertoire ? 'editing-repertoire' : ''}`}
               title={activeRepertoireName}
             >
               {isBrowseMode ? activeRepertoireName : `${activeSide}: ${activeRepertoireName}`}
@@ -10153,6 +10168,9 @@ function App() {
               >
                 Rotate board
               </button>
+              {!isBrowseMode && <button disabled={isTreeEvalRunning} onClick={() => enterBrowseMode(activeSide)}>
+                Review all repertoires
+              </button>}
               <button
                 disabled={isTreeEvalRunning}
                 onClick={() => {
@@ -10393,13 +10411,13 @@ function App() {
                       </>
                     ) : (
                       <>
-                        <button
-                          type="button"
-                          className={entry.id === activeRepertoireIdBySide[loadRepertoireSide] ? 'active' : ''}
-                          onClick={() => loadRepertoire(entry.id, loadRepertoireSide)}
-                        >
-                          {entry.name}
-                        </button>
+                        <RepertoireSelectButton
+                          name={entry.name}
+                          mode={entry.id === activeRepertoireIdBySide[loadRepertoireSide] ? repertoireModeBySide[loadRepertoireSide] : null}
+                          className={entry.id === activeRepertoireIdBySide[loadRepertoireSide]
+                            ? `active ${repertoireModeBySide[loadRepertoireSide] === 'edit' ? 'editing-repertoire' : ''}` : ''}
+                          onSelect={(mode) => loadRepertoire(entry.id, loadRepertoireSide, false, mode)}
+                        />
                         <button
                           type="button"
                           aria-label="Rename repertoire"

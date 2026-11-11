@@ -723,6 +723,11 @@ select {
   -webkit-box-orient: vertical;
 }
 
+.opening-title.reviewing-repertoire { color: #15803d; }
+.opening-title.editing-repertoire { color: #b91c1c; }
+.app.theme-dark .opening-title.reviewing-repertoire { color: #4ade80; }
+.app.theme-dark .opening-title.editing-repertoire { color: #f87171; }
+
 .board-options-btn {
   flex-shrink: 0;
 }
@@ -1164,10 +1169,30 @@ select {
   background: #ecfdf5;
 }
 
+.repertoire-row > button.active {
+  color: #15803d;
+  font-weight: 700;
+  border-color: #22c55e;
+  background: #ecfdf5;
+}
+
 .current-repertoire.active-repertoire,
 .training-repertoire-name {
   color: #15803d;
   font-weight: 700;
+}
+
+.repertoire-hit-item.active.editing-repertoire,
+.current-repertoire.active-repertoire.editing-repertoire,
+.training-repertoire-name.editing-repertoire,
+.repertoire-row > button.active.editing-repertoire {
+  color: #b91c1c;
+  border-color: #ef4444;
+}
+
+.repertoire-hit-item.active.editing-repertoire,
+.repertoire-row > button.active.editing-repertoire {
+  background: #fef2f2;
 }
 
 .lichess-clickable-row {
@@ -2371,6 +2396,7 @@ select {
 }
 
 .app.theme-dark .repertoire-hit-item.active,
+.app.theme-dark .repertoire-row > button.active,
 .app.theme-dark .current-repertoire.active-repertoire,
 .app.theme-dark .training-repertoire-name {
   color: #4ade80;
@@ -2391,6 +2417,27 @@ select {
 .app.theme-dark .repertoire-hit-item.active {
   border-color: #22c55e;
   background: #052e16;
+}
+
+.app.theme-dark .repertoire-row > button.active {
+  border-color: #22c55e;
+  background: #052e16;
+}
+
+.app.theme-dark .repertoire-hit-item.active.editing-repertoire,
+.app.theme-dark .current-repertoire.active-repertoire.editing-repertoire,
+.app.theme-dark .training-repertoire-name.editing-repertoire,
+.app.theme-dark .repertoire-row > button.active.editing-repertoire {
+  color: #f87171;
+  border-color: #ef4444;
+}
+
+.app.theme-dark .repertoire-hit-item.active.editing-repertoire {
+  background: #450a0a;
+}
+
+.app.theme-dark .repertoire-row > button.active.editing-repertoire {
+  background: #450a0a;
 }
 
 .app.theme-dark .table-row,
