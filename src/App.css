@@ -2849,11 +2849,19 @@ select {
 
   .stockfish-panel.portrait-pane .ai-engine-controls {
     flex: 0 0 auto;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .stockfish-panel.portrait-pane .ai-engine-row-top {
     width: 100%;
-    flex-wrap: nowrap;
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+  }
+
+  .stockfish-panel.portrait-pane .ai-engine-select {
+    gap: 0.3rem;
   }
 
   .stockfish-panel.portrait-pane .ai-row-right {
@@ -2866,6 +2874,10 @@ select {
     min-width: 5.2rem;
     display: inline-flex;
     justify-content: flex-start;
+  }
+
+  .stockfish-panel.portrait-pane .ai-elo-slot:empty {
+    display: none;
   }
 
   .stockfish-panel.portrait-pane .ai-elo-select {
