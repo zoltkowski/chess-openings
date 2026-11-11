@@ -2293,11 +2293,14 @@ function Board(props: {
   annotations: BoardAnnotation[];
   annotationTarget?: string;
   drawing: boolean;
+  allowedMoveUcis?: string[];
+  disableDrawing?: boolean;
   onAnnotationsChange: (annotations: BoardAnnotation[]) => void;
   readOnly?: boolean;
   onMove: (orig: Key, dest: Key) => void;
 }) {
-  const { fen, orientation, lastMove, arrows, annotations, annotationTarget, drawing, onAnnotationsChange, readOnly, onMove } = props;
+  const { fen, orientation, lastMove, arrows, annotations, annotationTarget, drawing,
+    allowedMoveUcis, disableDrawing, onAnnotationsChange, readOnly, onMove } = props;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const apiRef = useRef<ChessgroundApi | null>(null);
   const onMoveRef = useRef(onMove);
@@ -2335,6 +2338,13 @@ function Board(props: {
     if (drawingGesture.current?.target !== annotationTarget) drawingGesture.current = null;
     const locked = readOnly || drawing;
     const preview = drawingGesture.current?.preview;
+    const allowedMoves = allowedMoveUcis && new Set(allowedMoveUcis.map(uci => uci.slice(0, 4)));
+    const legalDests = buildDests(fen);
+    const dests = allowedMoves
+      ? new Map([...legalDests].map(([orig, targets]) =>
+          [orig, targets.filter(dest => allowedMoves.has(`${orig}${dest}`))] as const)
+          .filter(([, targets]) => targets.length > 0))
+      : legalDests;
     apiRef.current?.set({
       fen: fullBoardFen(fen),
       orientation,
@@ -2346,7 +2356,7 @@ function Board(props: {
       movable: {
         color: locked ? undefined : 'both',
         free: false,
-        dests: locked ? new Map() : buildDests(fen),
+        dests: locked ? new Map() : dests,
         events: {
           after: (orig, dest) => onMove(orig, dest),
         },
@@ -2354,7 +2364,7 @@ function Board(props: {
       selectable: { enabled: !drawing },
       draggable: { enabled: !drawing },
       drawable: {
-        enabled: !annotationTarget,
+        enabled: !annotationTarget && !disableDrawing,
         visible: true,
         shapes: annotationTarget ? boardAnnotationShapes(preview ? [...annotations, preview] : annotations) : undefined,
         autoShapes: drawing ? [] : annotationTarget ? arrows : [...arrows, ...boardAnnotationShapes(annotations)],
@@ -2362,7 +2372,8 @@ function Board(props: {
       },
       lastMove,
     });
-  }, [fen, orientation, arrows, lastMove, readOnly, drawing, annotations, annotationTarget, onMove]);
+  }, [fen, orientation, arrows, lastMove, readOnly, drawing, annotations, annotationTarget,
+    allowedMoveUcis, disableDrawing, onMove]);
 
   const squareAtPointer = (event: PointerEvent<HTMLDivElement>) =>
     apiRef.current?.getKeyAtDomPos([event.clientX, event.clientY]);
@@ -2730,6 +2741,8 @@ function App() {
     activeRepertoireId ? activeRepertoireList.find((item) => item.id === activeRepertoireId) : null;
   const isEditingRepertoire = Boolean(activeRepertoire && repertoireModeBySide[activeSide] === 'edit');
   const isBrowseMode = !activeRepertoire;
+  const isReadOnlyRepertoire = Boolean(activeRepertoire && !isEditingRepertoire &&
+    !(trainingSession && trainingSession.side === activeSide));
   const activeRepertoireName = activeRepertoire?.name ?? 'Review mode';
   const bookRepertoireIndex = useMemo(
     () => buildBookRepertoireIndex([...repertoiresBySide.white, ...repertoiresBySide.black]),
@@ -5437,6 +5450,9 @@ function App() {
     const currentTree = trees[activeSide];
     const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;
     const currentNode = currentTree.nodes[currentSelectedId] ?? currentTree.nodes[currentTree.rootId];
+    if (isReadOnlyRepertoire && !currentNode.children.some(id =>
+      currentTree.nodes[id]?.moveUci === `${orig}${dest}${promotion === 'q' ? '' : promotion}` ||
+      currentTree.nodes[id]?.moveUci === `${orig}${dest}${promotion}`)) return;
     const reviewBoard = Boolean(reviewPositionOnBoard || opponentFindingOnBoard);
     const moveSourceFen = round?.chess.fen() ?? ((analysisScratchPosition || reviewBoard) && !isTrainingActive
       ? selectedBoardFen
@@ -5779,7 +5795,7 @@ function App() {
   };
 
   const playPlayerMove = (uci: string) => {
-    if (trainingSession || suddenDeathGameOver || isExampleReplayActive || isTreeEvalRunning) return;
+    if (trainingSession || suddenDeathGameOver || isExampleReplayActive || isTreeEvalRunning || isReadOnlyRepertoire) return;
     const chess = fenToChess(selectedBoardFen);
     try {
       const move = chess.move(uci);
@@ -7483,6 +7499,10 @@ function App() {
   };
 
   const deleteTreeOptionBranch = () => {
+    if (isReadOnlyRepertoire) {
+      setTreeOptionDeletePopup(null);
+      return;
+    }
     const popup = treeOptionDeletePopup;
     if (!popup) return;
     const nodeId = popup.nodeId;
@@ -7553,7 +7573,7 @@ function App() {
   };
 
   const updateMoveTree = (nextTree: MoveTree) => {
-    if (nextTree === tree || trainingSession || isTreeEvalRunning) return;
+    if (nextTree === tree || trainingSession || isTreeEvalRunning || isReadOnlyRepertoire) return;
     setUndoStackBySide(prev => ({
       ...prev,
       [activeSide]: [...prev[activeSide], { tree, selectedNodeId: selectedNode.id }].slice(-200),
@@ -8401,7 +8421,7 @@ function App() {
 
   const isTreeBoard = !trainingSession && !hasExampleReplayBoardOverride && !suddenDeathGameOver &&
     !analysisScratchPosition && !browseMistakePosition && !browseOpponentPosition;
-  const canAnnotateBoard = hasHydratedAppState && isTreeBoard && !isGameReviewRunning && !isTreeEvalRunning;
+  const canAnnotateBoard = hasHydratedAppState && isTreeBoard && !isGameReviewRunning && !isTreeEvalRunning && !isReadOnlyRepertoire;
   const annotationPositionKey = `${activeSide}|${positionFenKey(selectedNode.fen)}`;
   const annotationTarget = JSON.stringify([activeRepertoireId, selectedNode.id, annotationPositionKey]);
   const savedAnnotations = isTreeBoard ? (isBrowseMode ? browseAnnotations[annotationPositionKey] ?? []
@@ -9067,6 +9087,8 @@ function App() {
                 annotations={boardPreview ? [] : savedAnnotations}
                 annotationTarget={canAnnotateBoard && !boardPreview ? annotationTarget : undefined}
                 drawing={isDrawingAnnotations}
+                allowedMoveUcis={isReadOnlyRepertoire ? childNodes.map(node => node.moveUci).filter((uci): uci is string => Boolean(uci)) : undefined}
+                disableDrawing={isReadOnlyRepertoire}
                 onAnnotationsChange={saveAnnotations}
                 readOnly={Boolean(suddenDeathGameOver || (isSuddenDeathActive && (suddenDeathThinking || toTurnColor(boardFen) !== activeSide)))}
                 onMove={makeMove}
