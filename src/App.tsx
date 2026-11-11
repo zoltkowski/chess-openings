@@ -8843,23 +8843,15 @@ function App() {
                   </div>
                 )}
                 {!mistakeReview && lichessStatus === 'limited' && !explorerData && (
-                  <div className="status lichess-rate-limit-note">
+                  <div className="status lichess-api-note">
                     {`Lichess API error (429), ${lichessData ? 'showing cached data' : 'no cached data'}`}
                   </div>
                 )}
                 {!mistakeReview && !usingLocalExplorer && !lichessAuthRequired && lichessApiIssueNote && (!explorerData || isPlayerExplorer) && (
-                  <div className="status lichess-rate-limit-note">{lichessApiIssueNote}</div>
+                  <div className="status lichess-api-note">{lichessApiIssueNote}</div>
                 )}
                 {!mistakeReview && !usingLocalExplorer && lichessAuthRequired && (
-                  <div className="status lichess-auth-note">
-                    <span>Lichess token missing or invalid (401).</span>
-                    <button
-                      type="button"
-                      onClick={() => setIsLichessFilterOpen(true)}
-                    >
-                      Open options
-                    </button>
-                  </div>
+                  <div className="status lichess-api-note">Lichess token missing or invalid (401).</div>
                 )}
                 {!mistakeReview && (!opponentReviewOpen || showingOpponentResult) && (explorerData || isPlayerExplorer) && (
                   <>

@@ -1523,19 +1523,11 @@ span.engine-pv-move {
   gap: 0.4rem;
 }
 
-.lichess-rate-limit-note {
+.lichess-api-note {
   display: block;
   margin-top: 0.2rem;
   font-size: 0.78rem;
   opacity: 0.92;
-}
-
-.lichess-auth-note {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-  margin-top: 0.2rem;
 }
 
 .player-handle-row {
