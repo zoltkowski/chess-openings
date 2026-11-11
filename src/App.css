@@ -1162,6 +1162,12 @@ select {
   font-size: 0.74rem;
 }
 
+.repertoire-hit-item:not(.active),
+.repertoire-row > button:first-child:not(.active) {
+  color: #64748b;
+  background: #f1f5f9;
+}
+
 .repertoire-hit-item.active {
   color: #15803d;
   font-weight: 700;
@@ -2417,6 +2423,12 @@ select {
 .app.theme-dark .repertoire-hit-item.active {
   border-color: #22c55e;
   background: #052e16;
+}
+
+.app.theme-dark .repertoire-hit-item:not(.active),
+.app.theme-dark .repertoire-row > button:first-child:not(.active) {
+  color: #94a3b8;
+  background: #334155;
 }
 
 .app.theme-dark .repertoire-row > button.active {

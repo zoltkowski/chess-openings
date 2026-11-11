@@ -67,7 +67,7 @@ function RepertoireSelectButton({ name, className, mode, onSelect }: {
   onSelect: (mode: RepertoireMode) => void;
 }) {
   const press = useLongPressAction(() => onSelect('edit'), () => onSelect('review'));
-  return <button type="button" className={className} title={`${name} — kliknij: przegląd, przytrzymaj lub kliknij prawym: edycja`}
+  return <button type="button" className={className} title={`${name} — kliknij: przegląd otwarcia lub całej bazy, przytrzymaj lub kliknij prawym: edycja`}
     aria-label={`${name}, ${mode === 'edit' ? 'tryb edycji' : mode === 'review' ? 'tryb przeglądu' : 'nieaktywne'}`}
     {...press}>{name}</button>;
 }
@@ -6616,6 +6616,18 @@ function App() {
 
   const loadRepertoire = (repertoireId: string, side: Side = activeSide, preservePosition = false,
     mode: RepertoireMode = 'review') => {
+    if (mode === 'review' && activeRepertoireIdBySide[side] === repertoireId &&
+      repertoireModeBySide[side] === 'review') {
+      // Keep the current position so the same tile stays visible, now gray.
+      setActiveRepertoireIdBySide((prev) => ({ ...prev, [side]: null }));
+      setUndoStackBySide((prev) => ({ ...prev, [side]: [] }));
+      setTrainingSession((prev) => (prev?.side === side ? null : prev));
+      setAnalysisScratchPosition(null);
+      setShowAnalysisReport(false);
+      setIsLoadRepertoireOpen(false);
+      setIsOptionsOpen(false);
+      return;
+    }
     const entry = repertoiresBySide[side].find((item) => item.id === repertoireId);
     if (!entry) return;
     const currentFenKey = positionFenKey(selectedNode.fen);
