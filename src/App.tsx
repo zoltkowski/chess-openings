@@ -6586,28 +6586,6 @@ function App() {
     }
   };
 
-  const enterBrowseMode = (side: Side = activeSide) => {
-    const emptyTree = createEmptyTree(side);
-    if (analysisGameProgress) {
-      analysisGameCancelRef.current = true;
-      analysisReviewAbortRef.current?.abort();
-      cancelMaiaEvaluations();
-      stockfishRef.current?.postMessage('stop');
-    }
-    setActiveRepertoireIdBySide((prev) => ({
-      ...prev,
-      [side]: null,
-    }));
-    setTrees((prev) => ({ ...prev, [side]: emptyTree }));
-    setSelectedNodeBySide((prev) => ({ ...prev, [side]: emptyTree.rootId }));
-    setUndoStackBySide((prev) => ({ ...prev, [side]: [] }));
-    setTrainingSession((prev) => (prev?.side === side ? null : prev));
-    setAnalysisScratchPosition(null);
-    setShowAnalysisReport(false);
-    setAnalysisMaiaNotice(null);
-    setIsOptionsOpen(false);
-  };
-
   const createNewRepertoire = (side: Side = activeSide) => {
     const name = normalizeRepertoireName(newRepertoireName);
     const next = createEmptyRepertoire(side, name);
@@ -10168,9 +10146,6 @@ function App() {
               >
                 Rotate board
               </button>
-              {!isBrowseMode && <button disabled={isTreeEvalRunning} onClick={() => enterBrowseMode(activeSide)}>
-                Review all repertoires
-              </button>}
               <button
                 disabled={isTreeEvalRunning}
                 onClick={() => {
