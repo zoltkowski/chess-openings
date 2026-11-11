@@ -1643,6 +1643,15 @@ function buildPath(tree: MoveTree, nodeId: string): MoveNode[] {
   return path;
 }
 
+function treeThroughNode(tree: MoveTree, nodeId: string): MoveTree {
+  const path = buildPath(tree, nodeId);
+  const nodes: Record<string, MoveNode> = {};
+  path.forEach((node, index) => {
+    nodes[node.id] = { ...node, children: path[index + 1] ? [path[index + 1].id] : [] };
+  });
+  return { ...tree, nodes };
+}
+
 function buildMainLinePath(tree: MoveTree): MoveNode[] {
   const root = tree.nodes[tree.rootId];
   if (!root) return [];
@@ -6634,7 +6643,10 @@ function App() {
     mode: RepertoireMode = 'review') => {
     if (mode === 'review' && activeRepertoireIdBySide[side] === repertoireId &&
       repertoireModeBySide[side] === 'review') {
-      // Keep the current position so the same tile stays visible, now gray.
+      // Database review keeps only the line to the current position.
+      const currentTree = trees[side];
+      const currentNodeId = selectedNodeBySide[side] ?? currentTree.rootId;
+      setTrees((prev) => ({ ...prev, [side]: treeThroughNode(currentTree, currentNodeId) }));
       setActiveRepertoireIdBySide((prev) => ({ ...prev, [side]: null }));
       setUndoStackBySide((prev) => ({ ...prev, [side]: [] }));
       setTrainingSession((prev) => (prev?.side === side ? null : prev));
