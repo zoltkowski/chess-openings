@@ -66,8 +66,8 @@ function RepertoireSelectButton({ name, className, mode, onSelect }: {
   mode: RepertoireMode | null;
   onSelect: (mode: RepertoireMode) => void;
 }) {
-  const press = useLongPressAction(() => onSelect('edit'), () => onSelect('review'));
-  return <button type="button" className={className} title={`${name} — kliknij: przegląd otwarcia lub całej bazy, przytrzymaj lub kliknij prawym: edycja`}
+  const press = useLongPressAction(() => onSelect(mode === 'edit' ? 'review' : 'edit'), () => onSelect('review'));
+  return <button type="button" className={className} title={`${name} — kliknij: przegląd otwarcia lub całej bazy, przytrzymaj lub kliknij prawym: zmień tryb edycji`}
     aria-label={`${name}, ${mode === 'edit' ? 'tryb edycji' : mode === 'review' ? 'tryb przeglądu' : 'nieaktywne'}`}
     {...press}>{name}</button>;
 }
