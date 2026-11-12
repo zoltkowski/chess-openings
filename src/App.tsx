@@ -2599,6 +2599,7 @@ function App() {
     black: [],
   });
   const [hasHydratedAppState, setHasHydratedAppState] = useState(false);
+  const [storageLoadFailed, setStorageLoadFailed] = useState(false);
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
   const [analysisGameProgress, setAnalysisGameProgress] = useState<GameAnalysisProgress | null>(null);
   const analysisGameActiveRef = useRef(false);
@@ -3254,6 +3255,7 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     const hydrateAppState = async () => {
       setStatus('Loading local repertoire...');
       try {
@@ -3272,6 +3274,9 @@ function App() {
           await idbGet<TrainingLeafLastShownState>(APP_TRAINING_LEAF_LAST_SHOWN_KEY),
         );
         const persistedGameAnalysis = await idbGet<GameAnalysisReport>(APP_GAME_ANALYSIS_REPORT_KEY);
+        const assessments = await idbGet<PlayerAssessments>(APP_PLAYER_ASSESSMENTS_KEY).catch(() => null);
+
+        if (cancelled) return;
 
         if (persistedSettings) applyPersistedSettingsState(persistedSettings);
         applyPersistedDatabaseState(persisted);
@@ -3283,17 +3288,19 @@ function App() {
             status: persistedGameAnalysis.status === 'running' ? 'partial' : persistedGameAnalysis.status,
           });
         }
-        const assessments = await idbGet<PlayerAssessments>(APP_PLAYER_ASSESSMENTS_KEY).catch(() => null);
         if (assessments) setPlayerAssessments(assessments);
         setStatus('Ready');
-      } catch {
-        setStatus('Local storage load failed');
-      } finally {
         setHasHydratedAppState(true);
+      } catch {
+        if (!cancelled) {
+          setStatus('Local storage load failed');
+          setStorageLoadFailed(true);
+        }
       }
     };
 
     void hydrateAppState();
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -8740,6 +8747,20 @@ function App() {
   );
 
   const showDesktopMoveActions = !isExampleReplayActive && !suddenDeathGameOver;
+
+  if (storageLoadFailed) {
+    return (
+      <div className={`app ${themeMode === 'dark' ? 'theme-dark' : ''}`}>
+        <main className="layout">
+          <section className="card" role="alert">
+            <h1>Local data could not be loaded</h1>
+            <p>Saved repertoires have not been changed. Reload the app to try again.</p>
+            <button type="button" onClick={() => window.location.reload()}>Reload app</button>
+          </section>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className={`app ${themeMode === 'dark' ? 'theme-dark' : ''}`}>
