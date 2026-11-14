@@ -60,7 +60,7 @@ select {
   margin-left: auto;
 }
 
-.move-list .controls-row > button:not(.hamburger-btn):not(.icon-toggle-btn):not(.continue-training-btn):not(.stop-training-btn):not(.back-btn):not(.flashcard-toggle-btn):not(.sudden-death-toggle-btn) {
+.move-list .controls-row > button:not(.hamburger-btn):not(.icon-toggle-btn):not(.stop-training-btn):not(.back-btn):not(.flashcard-toggle-btn):not(.sudden-death-toggle-btn) {
   width: var(--move-control-width, 2.6rem);
   min-width: var(--move-control-width, 2.6rem);
   height: 2.2rem;
@@ -1631,11 +1631,6 @@ span.engine-pv-move {
   margin-bottom: 0.35rem;
 }
 
-.move-list .controls-row > button.continue-training-btn {
-  min-width: 8rem;
-  width: 8rem;
-}
-
 .move-list .controls-row > button.next-missing-btn {
   width: auto;
   min-width: 3rem;
@@ -2162,6 +2157,12 @@ span.engine-pv-move {
 
 .repertoire-row > button:first-child {
   text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.repertoire-inactive-name {
+  padding: 0.35rem 0.6rem;
+  overflow-wrap: anywhere;
 }
 
 button {
@@ -2474,6 +2475,40 @@ select {
 
 .app.theme-dark button:hover {
   background: #334155;
+}
+
+@media (orientation: landscape) {
+  .portrait-tabbar.with-desktop-training-action {
+    display: flex;
+    justify-content: flex-end;
+    width: min(100%, 760px);
+    margin-inline: auto;
+  }
+
+  .portrait-tabbar.with-desktop-training-action > button {
+    display: none;
+  }
+
+  .portrait-tabbar.with-desktop-training-action > :is(.continue-portrait-btn, .hint-portrait-btn) {
+    display: inline-flex;
+    width: auto;
+    min-width: 5.5rem;
+    padding-inline: 0.65rem;
+  }
+
+  .portrait-tabbar.with-desktop-training-action:has(.continue-portrait-btn) > .hint-portrait-btn {
+    display: none;
+  }
+
+  .app .portrait-tabbar > button.continue-portrait-btn {
+    background: #166534;
+    border-color: #15803d;
+    color: #fff;
+  }
+
+  .app .portrait-tabbar > button.continue-portrait-btn:hover {
+    background: #14532d;
+  }
 }
 
 .app.theme-dark input,

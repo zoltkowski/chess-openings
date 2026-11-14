@@ -380,6 +380,7 @@ type LegacyPersistedAppState = {
 type RepertoireEntry = {
   id: string;
   name: string;
+  enabled: boolean;
   tree: MoveTree;
   selectedNodeId: string;
 };
@@ -630,6 +631,7 @@ function createEmptyRepertoire(side: Side, name: string): RepertoireEntry {
   return {
     id: createRepertoireId(side),
     name: normalizeRepertoireName(name),
+    enabled: true,
     tree,
     selectedNodeId: tree.rootId,
   };
@@ -750,6 +752,7 @@ function normalizePersistedState(value: unknown): PersistedAppState | null {
         return valid.map((entry, index) => ({
           ...entry,
           name: normalizeRepertoireName(entry.name || `${side} repertoire ${index + 1}`),
+          enabled: entry.enabled !== false,
           selectedNodeId: entry.tree.nodes[entry.selectedNodeId] ? entry.selectedNodeId : entry.tree.rootId,
         }));
       }
@@ -772,8 +775,8 @@ function normalizePersistedState(value: unknown): PersistedAppState | null {
         black: blackList,
       },
       activeRepertoireIdBySide: {
-        white: whiteActive && whiteList.some((entry) => entry.id === whiteActive) ? whiteActive : null,
-        black: blackActive && blackList.some((entry) => entry.id === blackActive) ? blackActive : null,
+        white: whiteActive && whiteList.some((entry) => entry.id === whiteActive && entry.enabled) ? whiteActive : null,
+        black: blackActive && blackList.some((entry) => entry.id === blackActive && entry.enabled) ? blackActive : null,
       },
     };
   }
@@ -791,12 +794,14 @@ function normalizePersistedState(value: unknown): PersistedAppState | null {
   const whiteRepertoire: RepertoireEntry = {
     id: createRepertoireId('white'),
     name: 'Imported white repertoire',
+    enabled: true,
     tree: whiteTree,
     selectedNodeId: whiteTree.nodes[parsedV1.selectedNodeBySide.white] ? parsedV1.selectedNodeBySide.white : whiteTree.rootId,
   };
   const blackRepertoire: RepertoireEntry = {
     id: createRepertoireId('black'),
     name: 'Imported black repertoire',
+    enabled: true,
     tree: blackTree,
     selectedNodeId: blackTree.nodes[parsedV1.selectedNodeBySide.black] ? parsedV1.selectedNodeBySide.black : blackTree.rootId,
   };
@@ -2748,7 +2753,11 @@ function App() {
   const forwardLongPressHandledRef = useRef(false);
 
   const activeSide: Side = repertoireSide;
-  const activeRepertoireList = repertoiresBySide[activeSide];
+  const enabledRepertoiresBySide = useMemo(() => ({
+    white: repertoiresBySide.white.filter((entry) => entry.enabled),
+    black: repertoiresBySide.black.filter((entry) => entry.enabled),
+  }), [repertoiresBySide]);
+  const activeRepertoireList = enabledRepertoiresBySide[activeSide];
   const activeRepertoireId = activeRepertoireIdBySide[activeSide];
   const activeRepertoire =
     activeRepertoireId ? activeRepertoireList.find((item) => item.id === activeRepertoireId) : null;
@@ -2761,8 +2770,8 @@ function App() {
   }, [isEditingRepertoire]);
   const activeRepertoireName = activeRepertoire?.name ?? 'Review mode';
   const bookRepertoireIndex = useMemo(
-    () => buildBookRepertoireIndex([...repertoiresBySide.white, ...repertoiresBySide.black]),
-    [repertoiresBySide],
+    () => buildBookRepertoireIndex([...enabledRepertoiresBySide.white, ...enabledRepertoiresBySide.black]),
+    [enabledRepertoiresBySide],
   );
   const playerRepertoire = bookRepertoireIndex.find(entry => entry.id === activeRepertoireId);
   const boardOrientation: 'white' | 'black' =
@@ -2774,9 +2783,9 @@ function App() {
     (side: Side) => {
       const sideActiveRepertoireId = activeRepertoireIdBySide[side];
       if (sideActiveRepertoireId) return repertoireHasMoves(trees[side]);
-      return repertoiresBySide[side].some((repertoire) => repertoireHasMoves(repertoire.tree));
+      return enabledRepertoiresBySide[side].some((repertoire) => repertoireHasMoves(repertoire.tree));
     },
-    [activeRepertoireIdBySide, trees, repertoiresBySide],
+    [activeRepertoireIdBySide, trees, enabledRepertoiresBySide],
   );
   const canStartTrainingForActiveSide = hasSideTrainingContent(activeSide);
   const tree = trees[activeSide];
@@ -2895,12 +2904,12 @@ function App() {
     [selectedNode.children, tree.nodes],
   );
 
-  const collectMergedMoveOptionsAtFen = (side: Side, fen: string, includeTrainingAlternatives?: boolean): BrowseMoveOption[] => {
+  const collectMergedMoveOptionsAtFen = useCallback((side: Side, fen: string, includeTrainingAlternatives?: boolean): BrowseMoveOption[] => {
     const byUci = new Map<string, { moveSan: string; repertoireNames: Set<string> }>();
     const targetFenKey = positionFenKey(fen);
     const filterOwnMoves = includeTrainingAlternatives !== undefined && toTurnColor(fen) === side;
 
-    for (const repertoire of repertoiresBySide[side]) {
+    for (const repertoire of enabledRepertoiresBySide[side]) {
       const nodes = Object.values(repertoire.tree.nodes).filter((node) => positionFenKey(node.fen) === targetFenKey);
       if (nodes.length === 0) continue;
       for (const node of nodes) {
@@ -2925,12 +2934,12 @@ function App() {
         repertoireNames: [...value.repertoireNames],
       }))
       .sort((a, b) => b.repertoireNames.length - a.repertoireNames.length || a.moveSan.localeCompare(b.moveSan));
-  };
+  }, [enabledRepertoiresBySide]);
 
   const browseMoveOptions = useMemo<BrowseMoveOption[]>(() => {
     if (!isBrowseMode) return [];
     return collectMergedMoveOptionsAtFen(activeSide, selectedNode.fen, trainingForActive ? trainAlternativeMoves : undefined);
-  }, [isBrowseMode, selectedNode.fen, repertoiresBySide, activeSide, trainingForActive, trainAlternativeMoves]);
+  }, [isBrowseMode, selectedNode.fen, collectMergedMoveOptionsAtFen, activeSide, trainingForActive, trainAlternativeMoves]);
 
   const displayedChildNodes = useMemo<MoveNode[]>(() => {
     if (!isBrowseMode) return childNodes;
@@ -2946,7 +2955,7 @@ function App() {
 
   const repertoiresAtPosition = useMemo(() => {
     const targetFenKey = positionFenKey(selectedNode.fen);
-    return repertoiresBySide[boardOrientation]
+    return enabledRepertoiresBySide[boardOrientation]
       .filter((repertoire) => repertoireHasMoves(repertoire.tree))
       .filter((repertoire) =>
         Object.values(repertoire.tree.nodes).some((node) => positionFenKey(node.fen) === targetFenKey),
@@ -2961,7 +2970,7 @@ function App() {
         if (!a.isActive && b.isActive) return 1;
         return a.name.localeCompare(b.name);
       });
-  }, [selectedNode.fen, repertoiresBySide, boardOrientation, activeSide, activeRepertoireIdBySide]);
+  }, [selectedNode.fen, enabledRepertoiresBySide, boardOrientation, activeSide, activeRepertoireIdBySide]);
 
   const historyPlayer = playerHandle.trim().toLowerCase();
   const savedPlayerHistory = playerHistory?.player === historyPlayer ? playerHistory.data : null;
@@ -2975,12 +2984,12 @@ function App() {
     ? repertoireDeviations?.get(bookPositionFenKey(selectedNode.fen)) : undefined;
   const historyRepertoireKey = useMemo(() => {
     const positions = new Set<string>();
-    for (const entry of [...repertoiresBySide.white, ...repertoiresBySide.black]) {
+    for (const entry of [...enabledRepertoiresBySide.white, ...enabledRepertoiresBySide.black]) {
       if (!repertoireHasMoves(entry.tree)) continue;
       for (const fen of historyPositionsForTree(entry.tree)) positions.add(fen);
     }
     return JSON.stringify([...positions].sort());
-  }, [repertoiresBySide]);
+  }, [enabledRepertoiresBySide]);
   const getExplorerUrl = useCallback((fen: string, historyDates?: ExplorerDates, source = lichessSource) => {
     const params = new URLSearchParams({ fen: fullBoardFen(fen), variant: FIXED_VARIANT, color: activeSide });
     if (source === 'player') {
@@ -4317,7 +4326,7 @@ function App() {
 
   const getScopeIdsForTrainingPosition = (side: Side, fen: string) => {
     const fenKey = positionFenKey(fen);
-    const repertoireScopeIds = repertoiresBySide[side]
+    const repertoireScopeIds = enabledRepertoiresBySide[side]
       .filter((repertoire) => repertoireHasMoves(repertoire.tree))
       .filter((repertoire) =>
         Object.values(repertoire.tree.nodes).some((node) => positionFenKey(node.fen) === fenKey),
@@ -4858,7 +4867,7 @@ function App() {
     const assessment = playerAssessments[playerAssessmentKey(playerHandle, side, position)];
     if (!assessment) return base;
     const ids = scopeId === TRAINING_SCOPE_WHOLE_DB
-      ? repertoiresBySide[side].map(entry => entry.id) : [scopeId.slice('repo:'.length)];
+      ? enabledRepertoiresBySide[side].map(entry => entry.id) : [scopeId.slice('repo:'.length)];
     const repertoireMoves = new Set(bookRepertoireIndex.flatMap(entry =>
       ids.includes(entry.id) ? [...(entry.movesByFen.get(position) ?? [])] : []));
     const answers = trainingStatsBySide[side]?.[scopeId]?.[positionFenKey(fen)]?.recentAnswers ?? [];
@@ -4868,7 +4877,7 @@ function App() {
   const collectBrowseChildFenKeys = (side: Side, fen: string) => {
     const targetFenKey = positionFenKey(fen);
     const childFenKeys = new Set<string>();
-    for (const repertoire of repertoiresBySide[side]) {
+    for (const repertoire of enabledRepertoiresBySide[side]) {
       const matchingNodes = Object.values(repertoire.tree.nodes).filter((node) => positionFenKey(node.fen) === targetFenKey);
       for (const node of matchingNodes) {
         for (const childId of node.children) {
@@ -4958,7 +4967,7 @@ function App() {
 
     const rootFenKey = positionFenKey(rootNode.fen);
     const candidateByFen = new Map<string, string>();
-    for (const repertoire of repertoiresBySide[side]) {
+    for (const repertoire of enabledRepertoiresBySide[side]) {
       const matchingRoots = Object.values(repertoire.tree.nodes).filter((node) => positionFenKey(node.fen) === rootFenKey);
       for (const repoRoot of matchingRoots) {
         const stack = [repoRoot.id];
@@ -6495,6 +6504,7 @@ function App() {
         importedBySide[side].push({
           id: createRepertoireId(side),
           name: normalizeRepertoireName(baseName),
+          enabled: true,
           tree: treeForSide,
           selectedNodeId: treeForSide.rootId,
         });
@@ -6654,6 +6664,8 @@ function App() {
 
   const loadRepertoire = (repertoireId: string, side: Side = activeSide, preservePosition = false,
     mode: RepertoireMode = 'review') => {
+    const entry = enabledRepertoiresBySide[side].find((item) => item.id === repertoireId);
+    if (!entry) return;
     if (mode === 'review' && activeRepertoireIdBySide[side] === repertoireId &&
       repertoireModeBySide[side] === 'review') {
       // Database review keeps only the line to the current position.
@@ -6669,8 +6681,6 @@ function App() {
       setIsOptionsOpen(false);
       return;
     }
-    const entry = repertoiresBySide[side].find((item) => item.id === repertoireId);
-    if (!entry) return;
     const currentFenKey = positionFenKey(selectedNode.fen);
     const preservedNodeId =
       (preservePosition || activeRepertoireIdBySide[side] === repertoireId)
@@ -6696,6 +6706,27 @@ function App() {
     setTrainingSession((prev) => (prev?.side === side ? null : prev));
     setIsLoadRepertoireOpen(false);
     setIsOptionsOpen(false);
+  };
+
+  const toggleRepertoireEnabled = (entry: RepertoireEntry, side: Side) => {
+    const isLoaded = activeRepertoireIdBySide[side] === entry.id;
+    if (trainingSession?.side === side && (isLoaded || !activeRepertoireIdBySide[side])) stopTraining();
+    if (entry.enabled && isLoaded) {
+      const emptyTree = createEmptyTree(side);
+      setActiveRepertoireIdBySide((prev) => ({ ...prev, [side]: null }));
+      setTrees((prev) => ({ ...prev, [side]: emptyTree }));
+      setSelectedNodeBySide((prev) => ({ ...prev, [side]: emptyTree.rootId }));
+      setUndoStackBySide((prev) => ({ ...prev, [side]: [] }));
+      if (side === activeSide) {
+        setAnalysisScratchPosition(null);
+        setShowAnalysisReport(false);
+        setTreeOptionDeletePopup(null);
+      }
+    }
+    setRepertoiresBySide((prev) => ({
+      ...prev,
+      [side]: prev[side].map((item) => item.id === entry.id ? { ...item, enabled: !item.enabled } : item),
+    }));
   };
 
   const startRenamingRepertoire = (repertoireId: string, side: Side = activeSide) => {
@@ -6735,14 +6766,12 @@ function App() {
     const confirmed = window.confirm(`Delete repertoire "${entry.name}"? This cannot be undone.`);
     if (!confirmed) return;
 
-    const remaining = repertoiresBySide[side].filter((item) => item.id !== repertoireId);
-
     setRepertoiresBySide((prev) => ({
       ...prev,
       [side]: prev[side].filter((item) => item.id !== repertoireId),
     }));
 
-    if (remaining.length === 0) {
+    if (repertoiresBySide[side].length === 1 || activeRepertoireIdBySide[side] === repertoireId) {
       const emptyTree = createEmptyTree(side);
       setActiveRepertoireIdBySide((prev) => ({
         ...prev,
@@ -6755,29 +6784,6 @@ function App() {
       setSelectedNodeBySide((prev) => ({
         ...prev,
         [side]: emptyTree.rootId,
-      }));
-      setUndoStackBySide((prev) => ({ ...prev, [side]: [] }));
-      setTrainingSession((prev) => (prev?.side === side ? null : prev));
-      if (renamingRepertoireId === repertoireId) {
-        cancelRenamingRepertoire();
-      }
-      setStatus(`Deleted repertoire "${entry.name}"`);
-      return;
-    }
-
-    if (activeRepertoireIdBySide[side] === repertoireId) {
-      const fallback = remaining[0];
-      setActiveRepertoireIdBySide((prev) => ({
-        ...prev,
-        [side]: null,
-      }));
-      setTrees((prev) => ({
-        ...prev,
-        [side]: fallback.tree,
-      }));
-      setSelectedNodeBySide((prev) => ({
-        ...prev,
-        [side]: fallback.selectedNodeId,
       }));
       setUndoStackBySide((prev) => ({ ...prev, [side]: [] }));
       setTrainingSession((prev) => (prev?.side === side ? null : prev));
@@ -7566,6 +7572,7 @@ function App() {
       }
       setRepertoiresBySide((prev) => {
         const nextSideList = prev[activeSide].map((entry) => {
+          if (!entry.enabled) return entry;
           let nextTree = entry.tree;
           let changed = false;
           while (true) {
@@ -7675,7 +7682,7 @@ function App() {
     }
 
     const rootFenKey = positionFenKey(root.fen);
-    return repertoiresBySide[trainingSession.side]
+    return enabledRepertoiresBySide[trainingSession.side]
       .filter((repertoire) => repertoireHasMoves(repertoire.tree))
       .reduce((repoSum, repertoire) => {
         const memo = new Map<string, number>();
@@ -7689,7 +7696,7 @@ function App() {
         );
         return repoSum + leavesFromRepo;
       }, 0);
-  }, [trainingSession, activeSide, trees, isBrowseMode, repertoiresBySide, trainAlternativeMoves]);
+  }, [trainingSession, activeSide, trees, isBrowseMode, enabledRepertoiresBySide, trainAlternativeMoves]);
 
   const trainingAnsweredLines = useMemo(() => {
     if (!trainingSession || trainingSession.side !== activeSide) return 0;
@@ -7699,6 +7706,12 @@ function App() {
     if (!trainingSession || trainingSession.side !== activeSide) return false;
     return hasSideTrainingContent(trainingSession.side);
   }, [trainingSession, activeSide, hasSideTrainingContent]);
+  const showTrainingContinue = isTrainingActive &&
+    isTrainingLineEnd &&
+    hasTrainingContent &&
+    trainingAnsweredLines < trainingTotalLines &&
+    !trainingSession?.flashcardMode &&
+    !trainingSession?.suddenDeathMode;
   const trainingCorrectCount = trainingSession?.side === activeSide ? trainingSession.correctCount : 0;
   const trainingErrorCount = trainingSession?.side === activeSide ? trainingSession.errorCount : 0;
   const trainingAttemptCount = trainingCorrectCount + trainingErrorCount;
@@ -7784,7 +7797,7 @@ function App() {
   const collectTreeEvalTargets = (onlyMissing: boolean): Array<{ repoId: string | null; nodeId: string; fen: string }> => {
     const hasEval = (node: MoveNode) => typeof node.stockfishEval === 'string' && node.stockfishEval.trim().length > 0;
     if (isBrowseMode) {
-      return repertoiresBySide[activeSide].flatMap((repertoire) =>
+      return enabledRepertoiresBySide[activeSide].flatMap((repertoire) =>
         Object.values(repertoire.tree.nodes)
           .filter((node) => !onlyMissing || !hasEval(node))
           .map((node) => ({ repoId: repertoire.id, nodeId: node.id, fen: node.fen })),
@@ -8062,6 +8075,7 @@ function App() {
     if (isBrowseMode) {
       setRepertoiresBySide((prev) => {
         const next = prev[side].map((entry) => {
+          if (!entry.enabled) return entry;
           const nextNodes: Record<string, MoveNode> = {};
           let changed = false;
           Object.entries(entry.tree.nodes).forEach(([nodeId, node]) => {
@@ -8121,14 +8135,14 @@ function App() {
   const treeEvalScopeStats = useMemo(() => {
     const hasEval = (node: MoveNode) => typeof node.stockfishEval === 'string' && node.stockfishEval.trim().length > 0;
     if (isBrowseMode) {
-      const nodes = repertoiresBySide[activeSide].flatMap((entry) => Object.values(entry.tree.nodes));
+      const nodes = enabledRepertoiresBySide[activeSide].flatMap((entry) => Object.values(entry.tree.nodes));
       const missing = nodes.reduce((acc, node) => acc + (hasEval(node) ? 0 : 1), 0);
       return { total: nodes.length, missing };
     }
     const nodes = Object.values(trees[activeSide].nodes);
     const missing = nodes.reduce((acc, node) => acc + (hasEval(node) ? 0 : 1), 0);
     return { total: nodes.length, missing };
-  }, [isBrowseMode, repertoiresBySide, trees, activeSide]);
+  }, [isBrowseMode, enabledRepertoiresBySide, trees, activeSide]);
 
   const dbStatsBySide = useMemo(() => {
     const hasEval = (node: MoveNode) => typeof node.stockfishEval === 'string' && node.stockfishEval.trim().length > 0;
@@ -9162,7 +9176,7 @@ function App() {
                 readOnly={Boolean(suddenDeathGameOver || (isSuddenDeathActive && (suddenDeathThinking || toTurnColor(boardFen) !== activeSide)))}
                 onMove={makeMove}
               />
-              <div className="portrait-tabbar">
+              <div className={`portrait-tabbar${showTrainingContinue || showHintButton ? ' with-desktop-training-action' : ''}`}>
                 {!isTrainingActive && isExampleReplayActive && (
                   <>
                     <button
@@ -9283,12 +9297,7 @@ function App() {
                     <FlashcardIcon />
                   </button>
                 )}
-                {isTrainingActive &&
-                  isTrainingLineEnd &&
-                  hasTrainingContent &&
-                  trainingAnsweredLines < trainingTotalLines &&
-                  !trainingSession?.flashcardMode &&
-                  !trainingSession?.suddenDeathMode && (
+                {showTrainingContinue && (
                   <button type="button" className="continue-portrait-btn" onClick={restartTrainingLine}>
                     Continue
                   </button>
@@ -9498,17 +9507,6 @@ function App() {
                       <span className="status">{`Overall success rate: ${trainingRepoOverallSuccessPct}%`}</span>
                     </div>
                   )}
-                  <div className="controls-row">
-                    {isTrainingLineEnd &&
-                      hasTrainingContent &&
-                      trainingAnsweredLines < trainingTotalLines &&
-                      !trainingSession?.flashcardMode &&
-                      !trainingSession?.suddenDeathMode && (
-                      <button type="button" className="continue-training-btn desktop-only" onClick={restartTrainingLine}>
-                        Continue
-                      </button>
-                    )}
-                  </div>
                   {activeMoveComment}
                 </>
               ) : (
@@ -10489,13 +10487,24 @@ function App() {
                       </>
                     ) : (
                       <>
-                        <RepertoireSelectButton
-                          name={entry.name}
-                          mode={entry.id === activeRepertoireIdBySide[loadRepertoireSide] ? repertoireModeBySide[loadRepertoireSide] : null}
-                          className={entry.id === activeRepertoireIdBySide[loadRepertoireSide]
-                            ? `active ${repertoireModeBySide[loadRepertoireSide] === 'edit' ? 'editing-repertoire' : ''}` : ''}
-                          onSelect={(mode) => loadRepertoire(entry.id, loadRepertoireSide, false, mode)}
-                        />
+                        {entry.enabled ? (
+                          <RepertoireSelectButton
+                            name={entry.name}
+                            mode={entry.id === activeRepertoireIdBySide[loadRepertoireSide] ? repertoireModeBySide[loadRepertoireSide] : null}
+                            className={entry.id === activeRepertoireIdBySide[loadRepertoireSide]
+                              ? `active ${repertoireModeBySide[loadRepertoireSide] === 'edit' ? 'editing-repertoire' : ''}` : ''}
+                            onSelect={(mode) => loadRepertoire(entry.id, loadRepertoireSide, false, mode)}
+                          />
+                        ) : (
+                          <span className="repertoire-inactive-name">{entry.name}</span>
+                        )}
+                        <button
+                          type="button"
+                          aria-label={`${entry.enabled ? 'Deactivate' : 'Activate'} ${entry.name}`}
+                          onClick={() => toggleRepertoireEnabled(entry, loadRepertoireSide)}
+                        >
+                          {entry.enabled ? 'Deactivate' : 'Activate'}
+                        </button>
                         <button
                           type="button"
                           aria-label="Rename repertoire"
