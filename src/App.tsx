@@ -7327,62 +7327,56 @@ function App() {
   const canGoForward = isBrowseMode && !isTrainingActive && !isSuddenDeathActive &&
     selectedMoveIndex >= 0 && selectedMoveIndex < displayedMovePath.length - 1;
   useLayoutEffect(() => {
-    const group = movesArrowGroupRef.current;
-    const row = group?.parentElement;
-    const topGroup = topArrowGroupRef.current;
-    if (!showMixedEngines || !group || !row || !topGroup) {
-      setMovesArrowGroupNeedsCompact(false);
-      return;
-    }
-
-    const preceding = [...row.children].filter(child => child !== group);
-    const update = () => {
-      if (topGroup.getClientRects().length > 0) {
-        setMovesArrowGroupNeedsCompact(false);
-        return;
-      }
-      const firstArrow = group.firstElementChild;
-      if (!firstArrow || !group.getClientRects().length) return;
-
-      const rowStyle = getComputedStyle(row);
-      const rowRight = row.getBoundingClientRect().right - parseFloat(rowStyle.paddingRight) - parseFloat(rowStyle.borderRightWidth);
-      const lastControl = preceding.filter(child => child.getClientRects().length > 0).at(-1);
-      const available = lastControl
-        ? rowRight - lastControl.getBoundingClientRect().right - parseFloat(rowStyle.columnGap)
-        : row.clientWidth - parseFloat(rowStyle.paddingLeft) - parseFloat(rowStyle.paddingRight);
-      // Measure the full group even while the two engine buttons are replaced by one.
-      const fullWidth = 4 * firstArrow.getBoundingClientRect().width + 3 * parseFloat(getComputedStyle(group).columnGap);
-      setMovesArrowGroupNeedsCompact(available < fullWidth);
-    };
-    const observer = new ResizeObserver(update);
-    [row, topGroup, ...preceding].forEach(element => observer.observe(element));
-    update();
-    return () => observer.disconnect();
-  }, [showMixedEngines, canGoForward, portraitTab, isTrainingActive, isExampleReplayActive]);
-  useLayoutEffect(() => {
     const row = moveToolbarRef.current;
+    const group = movesArrowGroupRef.current;
+    const topGroup = topArrowGroupRef.current;
     const forward = portraitForwardRef.current;
-    if (!row || !forward || !window.matchMedia('(orientation: portrait)').matches) {
+    if (!row || !group) {
+      setMovesArrowGroupNeedsCompact(false);
       setHidePortraitForward(false);
       return;
     }
+
+    const portrait = window.matchMedia('(orientation: portrait)');
     const update = () => {
-      const style = getComputedStyle(row);
-      const available = row.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-      const children = [...row.children].filter(child => child === forward ||
-        (child.getClientRects().length > 0 && getComputedStyle(child).display !== 'none'));
-      const width = children.reduce((total, child) => {
+      if (!portrait.matches) {
+        setMovesArrowGroupNeedsCompact(false);
+        setHidePortraitForward(false);
+        return;
+      }
+      if (!row.getClientRects().length) return;
+
+      const rowStyle = getComputedStyle(row);
+      const available = row.clientWidth - parseFloat(rowStyle.paddingLeft) - parseFloat(rowStyle.paddingRight);
+      const gap = parseFloat(rowStyle.columnGap);
+      const controls = [...row.children].filter(child => child !== group && child.getClientRects().length > 0);
+      const controlsWidth = controls.reduce((total, child) => {
         const childStyle = getComputedStyle(child);
         return total + child.getBoundingClientRect().width +
-          (child.classList.contains('arrow-toggle-group') ? 0 : (parseFloat(childStyle.marginLeft) || 0)) +
+          (parseFloat(childStyle.marginLeft) || 0) +
           (parseFloat(childStyle.marginRight) || 0);
-      }, 0) + Math.max(0, children.length - 1) * parseFloat(style.columnGap);
-      setHidePortraitForward(width > available + 1);
+      }, 0) + Math.max(0, controls.length - 1) * gap;
+      const arrowsInPanel = group.getClientRects().length > 0;
+      const arrowWidth = group.firstElementChild?.getBoundingClientRect().width ?? 0;
+      const arrowGap = parseFloat(getComputedStyle(group).columnGap);
+      // Use the same widths whether the buttons currently fit or have already wrapped.
+      const widthWithArrows = (count: number) =>
+        controlsWidth + (controls.length ? gap : 0) + count * arrowWidth + (count - 1) * arrowGap;
+      const compact = arrowsInPanel && showMixedEngines && widthWithArrows(4) > available;
+      const width = !arrowsInPanel ? controlsWidth
+        : showMixedEngines ? widthWithArrows(compact ? 3 : 4)
+          : controlsWidth + (controls.length ? gap : 0) + group.getBoundingClientRect().width;
+      setMovesArrowGroupNeedsCompact(compact);
+      setHidePortraitForward(Boolean(forward && width > available));
     };
     const observer = new ResizeObserver(update);
-    [row, ...row.children].forEach(element => observer.observe(element));
+    [row, ...row.children, ...(topGroup ? [topGroup] : [])].forEach(element => observer.observe(element));
+    portrait.addEventListener('change', update);
     update();
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      portrait.removeEventListener('change', update);
+    };
   }, [canGoForward, portraitTab, isTrainingActive, isExampleReplayActive, showMixedEngines]);
   const displayedBookMoves = useMemo(
     () => findBookMovesForGame(displayedMovePath, bookRepertoireIndex),
