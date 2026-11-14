@@ -1,7 +1,12 @@
 import { Chess } from 'chess.js';
 
 type Color = 'white' | 'black';
-type Game = {
+export type PlayerGame = {
+  source: 'lichess' | 'chesscom';
+  account: string;
+  whiteRating?: number;
+  blackRating?: number;
+  url?: string;
   id: string;
   createdAt: number;
   color: Color;
@@ -14,7 +19,8 @@ type Game = {
 export type PlayerGameHistory = {
   syncedAt: number;
   oldestOngoing?: number;
-  games: Game[];
+  completedMonths?: string[];
+  games: PlayerGame[];
   reviewIndex?: {
     version: 1;
     positions: Set<string>;
@@ -31,7 +37,7 @@ type ExportedGame = {
   status: string;
   winner?: Color;
   moves?: string;
-  players?: Partial<Record<Color, { user?: { id?: string; name?: string } }>>;
+  players?: Partial<Record<Color, { user?: { id?: string; name?: string }; rating?: number }>>;
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -59,7 +65,10 @@ export async function syncPlayerGameHistory(
   const reader = response.body?.getReader();
   if (!reader) throw new Error('Lichess returned no game stream.');
 
-  const games = new Map((previous?.games ?? []).filter(game => game.createdAt >= cutoff).map(game => [game.id, game]));
+  const games = new Map((previous?.games ?? []).filter(game => game.createdAt >= cutoff).map(game => {
+    const normalized = game.source ? game : { ...game, id: `lichess:${game.id}`, source: 'lichess' as const, account: player };
+    return [normalized.id, normalized] as const;
+  }));
   let oldestOngoing: number | undefined;
   const ingest = (line: string) => {
     if (!line.trim()) return;
@@ -78,10 +87,10 @@ export async function syncPlayerGameHistory(
     const color = playerId('white') === player ? 'white' : playerId('black') === player ? 'black' : undefined;
     if (!color) return;
     const { id, createdAt, speed, rated, winner, moves } = game;
-    const saved = games.get(id);
+    const saved = games.get(`lichess:${id}`);
     if (saved && saved.createdAt === createdAt && saved.color === color && saved.speed === speed &&
       saved.rated === rated && saved.winner === winner && saved.moves === moves) return;
-    games.set(id, { id, createdAt, speed, rated, winner, moves, color });
+    games.set(`lichess:${id}`, { id: `lichess:${id}`, source: 'lichess', account: player, createdAt, speed, rated, winner, moves, color, whiteRating: game.players?.white?.rating, blackRating: game.players?.black?.rating });
   };
   const decoder = new TextDecoder();
   let remainder = '';
@@ -128,11 +137,11 @@ const pieceCount = (fen: string) => fen.split(' ', 1)[0].match(/[a-z]/gi)?.lengt
 const positionKey = (fen: string) => fen.split(' ', 4).join(' ');
 
 async function collectPostings(
-  games: Game[],
+  games: PlayerGame[],
   positions: ReadonlySet<string>,
   includeReplies: boolean,
   signal: AbortSignal,
-  shouldReplay: (game: Game, offset: number) => boolean,
+  shouldReplay: (game: PlayerGame, offset: number) => boolean,
 ): Promise<Postings> {
   signal.throwIfAborted();
   const postings: Postings = new Map();
@@ -218,7 +227,7 @@ export async function preprocessPlayerGameHistory(
   return { ...history, reviewIndex: { version: 1, positions: coveredPositions, postings: additions } };
 }
 
-function gameMatches(game: Game, cutoff: number, color: Color, speeds: readonly string[], modes: readonly string[]) {
+function gameMatches(game: PlayerGame, cutoff: number, color: Color, speeds: readonly string[], modes: readonly string[]) {
   return game.createdAt >= cutoff && game.color === color && (!speeds.length || speeds.includes(game.speed)) &&
     (!modes.length || modes.includes(game.rated ? 'rated' : 'casual'));
 }
@@ -256,7 +265,7 @@ function createPlayerHistoryQuery(
     const cutoff = Math.max(playerGameHistoryStart(Date.now()), dates.sinceTimestamp ?? 0);
     const totals = { white: 0, draws: 0, black: 0 };
     const moves: MoveStats[] = [];
-    const recent: { game: Game; uci: string }[] = [];
+    const recent: { game: PlayerGame; uci: string }[] = [];
     for (const [uci, posting] of postings?.get(fen) ?? []) {
       const move = { uci, san: posting.san, white: 0, draws: 0, black: 0, lastPlayedAt: 0 };
       for (const offset of posting.games) {
@@ -278,7 +287,7 @@ function createPlayerHistoryQuery(
       }
       if (move.white || move.draws || move.black) moves.push(move);
     }
-    const recentGames = recent.map(({ game: { id, createdAt, winner, speed }, uci }) => ({ id, createdAt, winner, speed, uci }));
+    const recentGames = recent.map(({ game: { id, createdAt, winner, speed, source, account, url }, uci }) => ({ id, createdAt, winner, speed, source, account, url, uci }));
     return { ...totals, moves, recentGames };
   };
 }

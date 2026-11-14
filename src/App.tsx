@@ -41,9 +41,14 @@ import { isTouchContextMenu, useLongPressAction, useLongPressMenu } from './useL
 import { mainMoveId, repertoireMoveStatus, setRepertoireMoveStatus, trainingMoveIds,
   type BoardAnnotation, type MoveNode, type MoveTree, type RepertoireMoveStatus } from './repertoireMoves';
 import {
-  indexPlayerGameHistory, playerGameHistoryStart, playerHistoryCovers, playerHistoryIndexIsCurrent,
+  indexPlayerGameHistory, playerGameHistoryStart, playerHistoryCovers,
   playerRepertoireDeviations, preprocessPlayerGameHistory, syncPlayerGameHistory, type PlayerGameHistory, type PlayerHistoryDates,
 } from './analysis/playerGameHistory';
+import { syncChessComHistory } from './analysis/chessComHistory';
+import { usePositionTraining } from './training/usePositionTraining';
+import { chooseTrainingReply, DAILY_MINUTES, indexTrainingRepertoires, nextTrainingDue,
+  planDailyTraining, trainingPositionKey, type TrainingPrompt, type ReviewOutcome } from './training/schedule';
+import { lastSeen, openingDailyCandidates, trainingRecurrence } from './training/openingFeed';
 import {
   PLAYER_MISTAKE_LOSS,
   hasPlayedMistake,
@@ -296,7 +301,15 @@ type UndoSnapshot = {
   selectedNodeId: string;
 };
 
+type DailyTraining = {
+  prompts: TrainingPrompt[];
+  index: number;
+  outcomes: ReviewOutcome[];
+  identity: string;
+};
+
 type TrainingSession = {
+  daily?: DailyTraining;
   side: Side;
   rootNodeId: string;
   entryNodeId: string;
@@ -404,6 +417,7 @@ type PersistedSettingsState = {
   isTempBoardFlipped: boolean;
   lichessSource: LichessSource;
   playerHandle: string;
+  chessComHandle: string;
   playerSpeeds: string[];
   lichessApiToken: string;
   dateRange: DateRange;
@@ -869,6 +883,7 @@ function normalizePersistedSettings(value: unknown): PersistedSettingsState | nu
       MODES.includes(mode as (typeof MODES)[number]),
     ),
     playerHandle: typeof parsed.playerHandle === 'string' ? parsed.playerHandle : '',
+    chessComHandle: typeof parsed.chessComHandle === 'string' ? parsed.chessComHandle : '',
     playerSpeeds: Array.isArray(parsed.playerSpeeds)
       ? PLAYER_SPEEDS.filter(speed => parsed.playerSpeeds.includes(speed)) : [...PLAYER_SPEEDS],
     lichessApiToken: typeof (parsed as Partial<PersistedSettingsState>).lichessApiToken === 'string'
@@ -2574,6 +2589,8 @@ function App() {
   const [isLichessTokenEditorOpen, setIsLichessTokenEditorOpen] = useState(false);
   const [lichessSource, setLichessSource] = useState<LichessSource>(initialLichessSource);
   const [playerHandle, setPlayerHandle] = useState(initialPlayerHandle);
+  const [chessComHandle, setChessComHandle] = useState('');
+  const [historySourceStatus, setHistorySourceStatus] = useState<Record<string, string>>({});
   const [playerHistory, setPlayerHistory] = useState<{ player: string; data: PlayerGameHistory } | null>(null);
   const [playerHistorySyncing, setPlayerHistorySyncing] = useState(false);
   const [playerHistoryError, setPlayerHistoryError] = useState('');
@@ -2779,6 +2796,12 @@ function App() {
   const newRepertoireSide: Side = boardOrientation;
   const loadRepertoireSide: Side = boardOrientation;
   const loadableRepertoiresForBoardSide = repertoiresBySide[loadRepertoireSide];
+  const activeTrainingRepertoires = useMemo(
+    () => indexTrainingRepertoires(enabledRepertoiresBySide, trainAlternativeMoves),
+    [enabledRepertoiresBySide, trainAlternativeMoves],
+  );
+  const daily = trainingSession?.side === activeSide ? trainingSession.daily : undefined;
+  const dailyPrompt = daily?.prompts[daily.index];
   const hasSideTrainingContent = useCallback(
     (side: Side) => {
       const sideActiveRepertoireId = activeRepertoireIdBySide[side];
@@ -2843,14 +2866,14 @@ function App() {
     suddenDeathCurrentFen && trainingSession?.side === activeSide && trainingSession.suddenDeathMode,
   );
   const hasExampleReplayBoardOverride = Boolean(exampleReplay && exampleReplay.side === activeSide);
-  const boardFen = suddenDeathReviewPosition?.fen ?? (hasExampleReplayBoardOverride
+  const boardFen = dailyPrompt?.fen ?? suddenDeathReviewPosition?.fen ?? (hasExampleReplayBoardOverride
     ? (exampleReplay as ExampleReplayState).fens[(exampleReplay as ExampleReplayState).currentIndex]
     : hasSuddenDeathBoardOverride
       ? (suddenDeathCurrentFen as string)
       : selectedBoardFen);
   const showLichessArrowsOnBoard = showLichessArrows && (!lichessArrowsOpponentOnly || toTurnColor(boardFen) !== activeSide);
   const playerPositionKey = bookPositionFenKey(selectedBoardFen);
-  const playerReviewKey = playerAssessmentKey(playerHandle, activeSide, playerPositionKey);
+  const playerReviewKey = playerAssessmentKey(chessComHandle.trim() ? `lichess:${playerHandle.trim().toLowerCase()}|chesscom:${chessComHandle.trim().toLowerCase()}` : playerHandle,  activeSide, playerPositionKey);
   const playerAssessment = playerAssessments[playerReviewKey];
   const playerRepertoireMoves = playerRepertoire?.movesByFen.get(playerPositionKey);
   const maiaPositionFen = fullBoardFen(suddenDeathReviewPosition?.fen ?? selectedBoardFen);
@@ -2913,7 +2936,10 @@ function App() {
       const nodes = Object.values(repertoire.tree.nodes).filter((node) => positionFenKey(node.fen) === targetFenKey);
       if (nodes.length === 0) continue;
       for (const node of nodes) {
-        const children = filterOwnMoves ? trainingMoveIds(repertoire.tree, node, true, includeTrainingAlternatives) : node.children;
+        const isTrainingLookup = includeTrainingAlternatives !== undefined;
+        const activeChildren = node.children.filter(id => !repertoire.tree.nodes[id]?.inactiveStatus);
+        const children = filterOwnMoves ? trainingMoveIds(repertoire.tree, node, true, includeTrainingAlternatives).filter(id => activeChildren.includes(id))
+          : isTrainingLookup ? activeChildren : node.children;
         for (const childId of children) {
           const child = repertoire.tree.nodes[childId];
           if (!child?.moveUci || !child.moveSan) continue;
@@ -2972,7 +2998,9 @@ function App() {
       });
   }, [selectedNode.fen, enabledRepertoiresBySide, boardOrientation, activeSide, activeRepertoireIdBySide]);
 
-  const historyPlayer = playerHandle.trim().toLowerCase();
+  const lichessPlayer = playerHandle.trim().toLowerCase();
+  const chessComPlayer = chessComHandle.trim().toLowerCase();
+  const historyPlayer = chessComPlayer ? `lichess:${lichessPlayer}|chesscom:${chessComPlayer}` : lichessPlayer;
   const savedPlayerHistory = playerHistory?.player === historyPlayer ? playerHistory.data : null;
   const repertoireDeviations = useMemo(() => {
     if (!showMistakeArrows || isBrowseMode || !savedPlayerHistory?.reviewIndex) return null;
@@ -3036,10 +3064,10 @@ function App() {
   }, [isPlayerExplorer, savedPlayerHistory, mistakeReview, opponentReview, trainingSession, playerPositionKey,
     activeSide, playerSpeeds, selectedModes, dateRange, explorerRequestKey]);
   const networkExplorerData = lichessDataRequestKey === explorerRequestKey &&
-    (!isPlayerExplorer || historyPlayer) ? lichessData : null;
+    (!isPlayerExplorer || lichessPlayer) ? lichessData : null;
   const localExplorerData = isPlayerExplorer && localExplorer?.requestKey === explorerRequestKey &&
     localExplorer.games === savedPlayerHistory?.games ? localExplorer.data : null;
-  const usingLocalExplorer = !opponentFindingOnBoard && Boolean(localExplorerData && (dateRange !== '3y' || !networkExplorerData));
+  const usingLocalExplorer = !opponentFindingOnBoard && Boolean(localExplorerData);
   const explorerData = opponentFindingOnBoard?.data ?? (usingLocalExplorer ? localExplorerData : networkExplorerData);
   const lichessTotal = explorerData ? explorerGameCount(explorerData) : 0;
   const playerExplorerPositionMoves = useMemo(() => {
@@ -3049,10 +3077,10 @@ function App() {
     if (!playerAfterLine) return moves;
     return moves.filter(move => {
       const reply = explorerReplyFen(selectedBoardFen, move.uci);
-      return reply && hasPlayedMistake(playerAssessments[playerAssessmentKey(playerHandle, activeSide, bookPositionFenKey(reply))]);
+      return reply && hasPlayedMistake(playerAssessments[playerAssessmentKey(historyPlayer, activeSide, bookPositionFenKey(reply))]);
     });
   }, [isPlayerExplorer, explorerData, selectedBoardFen, opponentFindingOnBoard,
-    playerAfterLine, playerAssessments, playerHandle, activeSide]);
+    playerAfterLine, playerAssessments, historyPlayer, activeSide]);
 
   const autoArrows = useMemo<DrawShape[]>(() => {
     if (reviewPositionOnBoard && !analysisScratchFen) {
@@ -3192,6 +3220,7 @@ function App() {
     setIsTempBoardFlipped(persistedSettings.isTempBoardFlipped);
     setLichessSource(persistedSettings.lichessSource);
     setPlayerHandle(persistedSettings.playerHandle);
+    setChessComHandle(persistedSettings.chessComHandle);
     setPlayerSpeeds(persistedSettings.playerSpeeds.length ? persistedSettings.playerSpeeds : [...PLAYER_SPEEDS]);
     setLichessApiToken(persistedSettings.lichessApiToken);
     setDateRange(persistedSettings.dateRange);
@@ -3310,7 +3339,7 @@ function App() {
 
     void hydrateAppState();
     return () => { cancelled = true; };
-  }, []);
+  }, [applyPersistedDatabaseState, applyPersistedSettingsState]);
 
   useEffect(() => {
     if ((selectedEngine === 'stockfish' || (showMixedEngines && engineRunning && !isGameReviewRunning)) &&
@@ -3389,6 +3418,7 @@ function App() {
       isTempBoardFlipped,
       lichessSource,
       playerHandle,
+      chessComHandle,
       playerSpeeds,
       lichessApiToken,
       dateRange,
@@ -3439,6 +3469,7 @@ function App() {
     isTempBoardFlipped,
     lichessSource,
     playerHandle,
+    chessComHandle,
     playerSpeeds,
     lichessApiToken,
     dateRange,
@@ -3820,7 +3851,7 @@ function App() {
     setLichessRateLimitedUntil((prev) => Math.max(prev ?? 0, nextUntil));
     setLichessApiIssueNote('');
     setLichessStatus('limited');
-  }, [applyPersistedDatabaseState, applyPersistedSettingsState]);
+  }, []);
 
   const waitForLichessRateSlot = useCallback(async (signal?: AbortSignal) => {
     let release!: () => void;
@@ -3848,87 +3879,121 @@ function App() {
     first: Math.min(stats.first, game.createdAt),
     last: Math.max(stats.last, game.createdAt),
   }), { count: 0, first: Number.POSITIVE_INFINITY, last: 0 });
+  const historyRetryAtRef = useRef(new Map<string, number>());
   useEffect(() => {
-    if (!hasHydratedAppState || !isLichessFilterOpen || lichessSource !== 'player' || !historyPlayer ||
-      playerHistory?.player === historyPlayer) return;
-    let cancelled = false;
-    void idbGet<PlayerGameHistory>(`player-game-history-v1:${historyPlayer}`).then(data => {
-      if (!cancelled && data) setPlayerHistory({ player: historyPlayer, data });
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [hasHydratedAppState, historyPlayer, isLichessFilterOpen, lichessSource, playerHistory?.player]);
-  useEffect(() => {
-    const force = playerHistoryRefresh !== playerHistoryRefreshHandledRef.current;
-    if (!hasHydratedAppState || !historyPlayer || (isLichessFilterOpen && !force)) {
-      setPlayerHistorySyncing(false);
-      setPlayerHistoryError('');
-      return;
-    }
+    if (!hasHydratedAppState || !historyPlayer) return;
     const controller = new AbortController();
     const { signal } = controller;
-    const key = `player-game-history-v1:${historyPlayer}`;
     const positions = new Set<string>(JSON.parse(historyRepertoireKey));
-    const publish = (data: PlayerGameHistory) => {
-      if (signal.aborted) return;
-      setPlayerHistory(previous => {
-        if (previous?.player !== historyPlayer) return { player: historyPlayer, data };
-        if (previous.data.syncedAt > data.syncedAt || (previous.data.syncedAt === data.syncedAt &&
-          (playerHistoryIndexIsCurrent(previous.data, positions) || !playerHistoryIndexIsCurrent(data, positions)))) return previous;
-        return { player: historyPlayer, data };
-      });
-    };
-    const store = async (data: PlayerGameHistory) => {
+    const sources = [
+      ...(lichessPlayer ? [{ source: 'lichess' as const, account: lichessPlayer, key: `player-game-history-v1:${lichessPlayer}` }] : []),
+      ...(chessComPlayer ? [{ source: 'chesscom' as const, account: chessComPlayer, key: `player-game-history-chesscom-v1:${chessComPlayer}` }] : []),
+    ];
+    const histories = new Map<string, PlayerGameHistory>();
+    let mergedHistory: PlayerGameHistory | null = null;
+    let cachesLoaded = false;
+    const publish = async () => {
       signal.throwIfAborted();
-      let stored = data;
-      await idbUpdate<PlayerGameHistory>(key, previous => {
-        if (previous && (signal.aborted || previous.syncedAt > data.syncedAt)) stored = previous;
-        return stored;
-      });
+      const games = sources.flatMap(source => histories.get(source.source)?.games ?? []);
+      const sameGames = mergedHistory && mergedHistory.games.length === games.length &&
+        games.every((game, index) => mergedHistory?.games[index] === game);
+      const syncedAt = Math.max(0, ...[...histories.values()].map(data => data.syncedAt));
+      if (sameGames && mergedHistory?.syncedAt === syncedAt) return mergedHistory;
+      const merged: PlayerGameHistory = { syncedAt,
+        games: sameGames ? mergedHistory!.games : games };
+      const indexed = await preprocessPlayerGameHistory(merged, positions, signal, mergedHistory ?? merged);
       signal.throwIfAborted();
-      publish(stored);
-      return stored;
+      mergedHistory = indexed;
+      setPlayerHistory({ player: historyPlayer, data: indexed });
+      return indexed;
     };
-    const sync = (force: boolean, maxAge = PLAYER_HISTORY_SYNC_INTERVAL_MS) => {
+    const sync = (force: boolean) => {
       if (signal.aborted || playerHistoryJobRef.current || findMissingControllerRef.current) return;
-      let saved: PlayerGameHistory | null = null;
-      let releaseHistory: (data: PlayerGameHistory | null) => void;
-      const ready = new Promise<PlayerGameHistory | null>(resolve => { releaseHistory = resolve; });
+      let release: (data: PlayerGameHistory | null) => void = () => {};
+      const ready = new Promise<PlayerGameHistory | null>(resolve => { release = resolve; });
       const job = { player: historyPlayer, ready };
       playerHistoryJobRef.current = job;
       const run = async () => {
-        saved = await idbGet<PlayerGameHistory>(key);
-        signal.throwIfAborted();
-        if (saved) publish(saved);
-        if (saved && !playerHistoryIndexIsCurrent(saved, positions)) {
-          setPlayerHistorySyncing(true);
-          setPlayerHistoryError('');
-          saved = await store(await preprocessPlayerGameHistory(saved, positions, signal));
+        if (!cachesLoaded) for (const source of sources) {
+          const saved = await idbGet<PlayerGameHistory>(source.key);
+          signal.throwIfAborted();
+          if (saved) {
+            if (source.source === 'lichess') saved.games = saved.games.map(game => game.source ? game : {
+              ...game, id: `lichess:${game.id}`, source: 'lichess' as const, account: source.account,
+            });
+            histories.set(source.source, saved);
+            if (saved.syncedAt) setHistorySourceStatus(previous => ({ ...previous,
+              [source.source]: `Last sync: ${new Date(saved.syncedAt).toLocaleString()}` }));
+          }
         }
-        if (saved) releaseHistory(saved);
-        if (!force && saved && Date.now() - saved.syncedAt < maxAge) return saved;
-        setPlayerHistorySyncing(true);
-        setPlayerHistoryError('');
-        const latest = await syncPlayerGameHistory(historyPlayer, saved, signal, async (url, requestSignal) => {
-          const allowed = await waitForLichessRateSlot(requestSignal);
-          requestSignal.throwIfAborted();
-          if (!allowed) throw new Error('Lichess rate limit. Try again later.');
-          const headers = new Headers({ Accept: 'application/x-ndjson' });
-          if (lichessApiToken.trim()) headers.set('Authorization', `Bearer ${lichessApiToken.trim()}`);
-          const response = await fetch(url, { signal: requestSignal, headers });
-          if (response.status === 429) registerLichessRateLimit(response.headers.get('Retry-After'));
-          if (!response.ok) throw new Error(`Lichess game export failed (${response.status}).`);
-          return response;
-        });
-        signal.throwIfAborted();
-        const stored = await store(await preprocessPlayerGameHistory(latest, positions, signal, saved ?? latest));
-        if (force || !saved || stored.games.length !== saved.games.length ||
-          stored.games.some((game, i) => game.id !== saved?.games[i]?.id)) setExplorerRefresh(value => value + 1);
-        return stored;
+        cachesLoaded = true;
+        if (histories.size) release(await publish());
+        for (const source of sources) {
+          signal.throwIfAborted();
+          const saved = histories.get(source.source) ?? null;
+          const retryKey = `${source.source}:${source.account}`;
+          if (Date.now() < (historyRetryAtRef.current.get(retryKey) ?? 0)) continue;
+          if (!force && saved && Date.now() - saved.syncedAt < PLAYER_HISTORY_SYNC_INTERVAL_MS) {
+            continue;
+          }
+          setPlayerHistorySyncing(true);
+          setHistorySourceStatus(previous => ({ ...previous, [source.source]: 'Syncing…' }));
+          const store = async (data: PlayerGameHistory) => {
+            signal.throwIfAborted();
+            let stored = data;
+            await idbUpdate<PlayerGameHistory>(source.key, previous => {
+              if (previous && (signal.aborted || previous.syncedAt > data.syncedAt)) stored = previous;
+              return stored;
+            });
+            signal.throwIfAborted();
+            histories.set(source.source, stored);
+          };
+          try {
+            const request = async (url: string, requestSignal: AbortSignal) => {
+              if (source.source === 'lichess') {
+                const allowed = await waitForLichessRateSlot(requestSignal);
+                if (!allowed) throw new Error('Rate limited; try again later.');
+              }
+              const headers = new Headers();
+              if (source.source === 'lichess') {
+                headers.set('Accept', 'application/x-ndjson');
+                if (lichessApiToken.trim()) headers.set('Authorization', `Bearer ${lichessApiToken.trim()}`);
+              }
+              const response = await fetch(url, { signal: requestSignal, headers });
+              if (response.status === 429) {
+                const retryAfter = response.headers.get('Retry-After');
+                const seconds = retryAfter ? Number(retryAfter) : NaN;
+                const date = retryAfter ? Date.parse(retryAfter) : NaN;
+                const delay = Number.isFinite(seconds) ? seconds * 1000 : Number.isFinite(date) ? date - Date.now() : 60_000;
+                historyRetryAtRef.current.set(retryKey, Date.now() + Math.max(60_000, delay));
+                if (source.source === 'lichess') registerLichessRateLimit(retryAfter);
+              }
+              if (!response.ok) throw new Error(`HTTP ${response.status}${response.status === 429 ? ' (rate limited; try again later)' : ''}`);
+              return response;
+            };
+            const latest = source.source === 'lichess'
+              ? await syncPlayerGameHistory(source.account, saved, signal, request)
+              : await syncChessComHistory(source.account, saved, signal, request, store);
+            await store(latest);
+            historyRetryAtRef.current.delete(retryKey);
+            const oldIds = new Set(saved?.games.map(game => game.id) ?? []);
+            const added = latest.games.filter(game => !oldIds.has(game.id)).length;
+            setHistorySourceStatus(previous => ({ ...previous, [source.source]: `Last sync: ${new Date(latest.syncedAt).toLocaleString()} · ${added} new games` }));
+            release(await publish());
+            if (added) setExplorerRefresh(value => value + 1);
+          } catch (error) {
+            signal.throwIfAborted();
+            historyRetryAtRef.current.set(retryKey, Math.max(historyRetryAtRef.current.get(retryKey) ?? 0,
+              Date.now() + PLAYER_HISTORY_SYNC_INTERVAL_MS));
+            setHistorySourceStatus(previous => ({ ...previous, [source.source]: getErrorMessage(error, 'Sync failed.') }));
+            if (histories.size) await publish();
+          }
+        }
       };
       void run().catch(error => {
-        if (!signal.aborted) setPlayerHistoryError(getErrorMessage(error, 'Could not sync Lichess games.'));
-        return saved;
-      }).then(releaseHistory!).finally(() => {
+        if (!signal.aborted) setPlayerHistoryError(getErrorMessage(error, 'Could not load game history.'));
+      }).finally(() => {
+        release(null);
         if (playerHistoryJobRef.current === job) playerHistoryJobRef.current = null;
         if (!signal.aborted) {
           if (force) playerHistoryRefreshHandledRef.current = playerHistoryRefresh;
@@ -3936,23 +4001,19 @@ function App() {
         }
       });
     };
-    setPlayerHistorySyncing(false);
+    setHistorySourceStatus({});
     setPlayerHistoryError('');
-    sync(force);
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') sync(false, PLAYER_HISTORY_SYNC_CHECK_MS);
-    };
-    const timer = isLichessFilterOpen ? undefined : window.setInterval(() => {
-      if (document.visibilityState === 'visible') sync(false);
-    }, PLAYER_HISTORY_SYNC_CHECK_MS);
-    if (!isLichessFilterOpen) document.addEventListener('visibilitychange', onVisible);
+    sync(playerHistoryRefresh !== playerHistoryRefreshHandledRef.current);
+    const onVisible = () => { if (document.visibilityState === 'visible') sync(false); };
+    const timer = window.setInterval(onVisible, PLAYER_HISTORY_SYNC_CHECK_MS);
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       controller.abort();
       if (playerHistoryJobRef.current?.player === historyPlayer) playerHistoryJobRef.current = null;
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [hasHydratedAppState, historyPlayer, isLichessFilterOpen, lichessApiToken, playerHistoryRefresh,
+  }, [hasHydratedAppState, historyPlayer, lichessPlayer, chessComPlayer, lichessApiToken, playerHistoryRefresh,
     historyRepertoireKey, registerLichessRateLimit, waitForLichessRateSlot]);
 
   const ensureLichessResponseCacheLoaded = useCallback(async () => {
@@ -4324,7 +4385,7 @@ function App() {
     );
   };
 
-  const getScopeIdsForTrainingPosition = (side: Side, fen: string) => {
+  const getScopeIdsForTrainingPosition = useCallback((side: Side, fen: string) => {
     const fenKey = positionFenKey(fen);
     const repertoireScopeIds = enabledRepertoiresBySide[side]
       .filter((repertoire) => repertoireHasMoves(repertoire.tree))
@@ -4333,9 +4394,9 @@ function App() {
       )
       .map((repertoire) => `repo:${repertoire.id}`);
     return [TRAINING_SCOPE_WHOLE_DB, ...repertoireScopeIds];
-  };
+  }, [enabledRepertoiresBySide]);
 
-  const appendTrainingAnswer = (
+  const appendTrainingAnswer = useCallback((
     side: Side,
     fen: string,
     scopeIds: string[],
@@ -4372,7 +4433,7 @@ function App() {
         [side]: nextSideStats,
       };
     });
-  };
+  }, [trainingStatsQueueLength]);
 
   const runStockfishSingleQuery = useCallback(async (params: {
     fen: string;
@@ -4602,9 +4663,38 @@ function App() {
     }
   };
 
+  const queryOpeningMove = useCallback<Parameters<typeof usePositionTraining>[0]['query']>(async input => {
+    if (engineRunningRef.current || isSearchingRef.current || playerAssessmentJobRef.current || treeEvalAwaiterRef.current || findMissingControllerRef.current) {
+      throw new Error('Stockfish is busy.');
+    }
+    return runStockfishSingleQuery({
+      ...input, depth: engineDepth, engineChoice: 'stockfish', preserveInteractiveLines: true,
+    });
+  }, [engineDepth, runStockfishSingleQuery]);
+  const positionTraining = usePositionTraining({
+    identity: historyPlayer, loaded: hasHydratedAppState, games: savedPlayerHistory?.games,
+    active: activeTrainingRepertoires, read: idbGet, write: idbSet, query: queryOpeningMove,
+    idle: Boolean(stockfishLoaded && !engineRunning && !trainingSession && !exampleReplay &&
+      !suddenDeathGameOver && !isGameReviewRunning && !isTreeEvalRunning && !playerAssessmentRunning &&
+      !isFindMissingSearchRunning && !isFindingCommonMistakes),
+  });
+  const dailyCandidates = useMemo(() => openingDailyCandidates(
+    activeTrainingRepertoires, positionTraining.evidence, activeSide, activeRepertoireIdBySide[activeSide] ?? null,
+    key => {
+      if (historyPlayer) return 0;
+      const answers = trainingStatsBySide[activeSide][TRAINING_SCOPE_WHOLE_DB]?.[key]?.recentAnswers ?? [];
+      return answers.length ? answers.filter(value => value === 0).length / answers.length : 0;
+    },
+  ), [activeTrainingRepertoires, positionTraining.evidence, activeSide, activeRepertoireIdBySide, historyPlayer, trainingStatsBySide]);
+  const dailyPlan = useMemo(() => planDailyTraining(dailyCandidates, positionTraining.reviews, positionTraining.clock),
+    [dailyCandidates, positionTraining.reviews, positionTraining.clock]);
+  const nextDailyDue = dailyPlan.length ? positionTraining.clock : nextTrainingDue(
+    positionTraining.reviews, dailyCandidates.map(entry => entry.prompt.key), positionTraining.clock,
+  );
+
   const assessPlayerPosition = async (fen: string, moves: ReadonlyMap<string, number>, signal: AbortSignal,
     reuse: boolean, saveNoticeKey?: string) => {
-    const key = playerAssessmentKey(playerHandle, activeSide, bookPositionFenKey(fen));
+    const key = playerAssessmentKey(historyPlayer, activeSide, bookPositionFenKey(fen));
     const previous = playerAssessments[key];
     const pending = [...moves].filter(([uci]) => !reuse || !previous?.moves[uci]);
     const observed = { ...previous?.observed };
@@ -4862,9 +4952,11 @@ function App() {
   };
 
   const flashcardWeight = (side: Side, scopeId: string, fen: string) => {
-    const base = Math.max(1, 101 - getScopeSuccessRate(side, scopeId, fen));
+    const review = positionTraining.reviews[trainingPositionKey(fen)];
+    const dueBonus = review && review.dueAt <= positionTraining.clock ? 80 : 0;
+    const base = dueBonus + Math.max(1, 101 - (historyPlayer && !review ? 0 : getScopeSuccessRate(side, scopeId, fen)));
     const position = bookPositionFenKey(fen);
-    const assessment = playerAssessments[playerAssessmentKey(playerHandle, side, position)];
+    const assessment = playerAssessments[playerAssessmentKey(historyPlayer, side, position)];
     if (!assessment) return base;
     const ids = scopeId === TRAINING_SCOPE_WHOLE_DB
       ? enabledRepertoiresBySide[side].map(entry => entry.id) : [scopeId.slice('repo:'.length)];
@@ -5123,6 +5215,24 @@ function App() {
     }
   };
 
+  const replyWeight = (side: Side, fen: string, uci: string) => {
+    const key = trainingPositionKey(fen);
+    const posting = savedPlayerHistory?.reviewIndex?.postings.get(key)?.get(uci);
+    const encounters = posting?.games.reduce((count, offset) =>
+      count + Number(savedPlayerHistory?.games[offset]?.color === side), 0) ?? 0;
+    let nextKey: string;
+    try {
+      nextKey = trainingPositionKey(fenToChess(fen).move(uci).after);
+    } catch {
+      return { encounters, trouble: 0 };
+    }
+    const review = positionTraining.reviews[nextKey];
+    const mistakes = positionTraining.evidence.mistakes.get(nextKey) ?? [];
+    const trouble = (review && review.outcome !== 'first' ? 1 : 0) +
+      mistakes.reduce((count, move) => count + Math.min(2, move.count), 0);
+    return { encounters, trouble };
+  };
+
   const advanceTrainingPosition = (
     side: Side,
     rootNodeId: string,
@@ -5142,9 +5252,9 @@ function App() {
       if (turnColor === side) break;
 
       if (isBrowseMode) {
-        const options = collectMergedMoveOptionsAtFen(side, cursor.fen);
+        const options = collectMergedMoveOptionsAtFen(side, cursor.fen, trainAlternativeMoves);
         if (options.length === 0) break;
-        const randomOption = options[Math.floor(Math.random() * options.length)];
+        const randomOption = chooseTrainingReply(options, option => replyWeight(side, cursor.fen, option.moveUci))!;
         const moveUci = randomOption.moveUci;
         const existingChildId = cursor.children.find((id) => sideTree.nodes[id]?.moveUci === moveUci);
         if (existingChildId) {
@@ -5183,8 +5293,9 @@ function App() {
         continue;
       }
 
-      if (cursor.children.length === 0) break;
-      const randomChildId = cursor.children[Math.floor(Math.random() * cursor.children.length)];
+      const children = cursor.children.filter(id => sideTree.nodes[id]?.moveUci && !sideTree.nodes[id].inactiveStatus);
+      const randomChildId = chooseTrainingReply(children, id => replyWeight(side, cursor.fen, sideTree.nodes[id].moveUci!));
+      if (!randomChildId) break;
       cursorId = randomChildId;
     }
 
@@ -5293,6 +5404,63 @@ function App() {
     setPortraitTab('moves');
   };
 
+  const recordTrainingPosition = (fen: string, outcome: ReviewOutcome) => {
+    const key = trainingPositionKey(fen);
+    const latestMistake = Math.max(0, ...(positionTraining.evidence.mistakes.get(key) ?? []).map(lastSeen));
+    positionTraining.record(key, outcome, latestMistake);
+  };
+
+  const startDailyTraining = () => {
+    if (trainingSession || isGameReviewRunning || isTreeEvalRunning || exampleReplay || suddenDeathGameOver ||
+      playerAssessmentJobRef.current || !positionTraining.ready || !dailyPlan.length) return;
+    const entryNodeId = selectedNode.id;
+    setEngineRunningEnabled(false);
+    setIsTrainingStatsMenuOpen(false);
+    setHoveredEngineMove(null);
+    setAnalysisScratchPosition(null);
+    setTrainingSession({
+      daily: { prompts: dailyPlan, index: 0, outcomes: [], identity: historyPlayer },
+      side: activeSide, rootNodeId: entryNodeId, entryNodeId, flashcardMode: false, suddenDeathMode: false,
+      suddenDeathBaseEvalCp: null, hintRequested: false, hintVisible: false, hintMoveUci: null,
+      completedLeafNodeIds: [], errorCount: 0, correctCount: 0,
+      currentPromptFen: dailyPlan[0].fen, currentPromptHadError: false, currentPromptScopeIds: [],
+    });
+    setPortraitTab('moves');
+  };
+
+  const finishDailyPosition = (outcome: ReviewOutcome) => {
+    if (!dailyPrompt || !daily || daily.identity !== historyPlayer) return;
+    const latestMistake = Math.max(0, ...(positionTraining.evidence.mistakes.get(dailyPrompt.key) ?? []).map(lastSeen));
+    positionTraining.record(dailyPrompt.key, outcome, latestMistake);
+    setTrainingSession(previous => previous?.daily === daily ? {
+      ...previous,
+      daily: { ...daily, index: daily.index + 1, outcomes: [...daily.outcomes, outcome] },
+      currentPromptFen: daily.prompts[daily.index + 1]?.fen ?? null,
+      currentPromptHadError: false, hintRequested: false, hintVisible: false, hintMoveUci: null,
+    } : previous);
+  };
+
+  const answerDailyPosition = (orig: Key, dest: Key, promotion: 'q' | 'r' | 'b' | 'n') => {
+    if (!dailyPrompt || !trainingSession || daily?.identity !== historyPlayer) return;
+    let move: Move;
+    try {
+      move = new Chess(dailyPrompt.fen).move({ from: orig, to: dest, promotion });
+    } catch {
+      return;
+    }
+    if (dailyPrompt.answers.includes(move.from + move.to + (move.promotion ?? ''))) {
+      finishDailyPosition(trainingSession.hintVisible ? 'assisted' : trainingSession.currentPromptHadError ? 'corrected' : 'first');
+      return;
+    }
+    if (!trainingSession.currentPromptHadError) {
+      const latestMistake = Math.max(0, ...(positionTraining.evidence.mistakes.get(dailyPrompt.key) ?? []).map(lastSeen));
+      positionTraining.record(dailyPrompt.key, 'missed', latestMistake);
+    }
+    setTrainingSession(previous => previous?.daily === daily ? {
+      ...previous, currentPromptHadError: true, hintRequested: true, hintMoveUci: dailyPrompt.answers[0],
+    } : previous);
+  };
+
   const startSuddenDeathTraining = () => {
     const side = activeSide;
     const rootNodeId = selectedNode.id;
@@ -5321,7 +5489,7 @@ function App() {
   };
 
   const toggleSuddenDeathMode = () => {
-    if (suddenDeathGameOver || playerAssessmentJobRef.current) return;
+    if (daily || suddenDeathGameOver || playerAssessmentJobRef.current) return;
     if (!trainingSession) {
       startSuddenDeathTraining();
       return;
@@ -5382,7 +5550,7 @@ function App() {
   };
 
   const toggleFlashcardMode = () => {
-    if (!trainingSession) return;
+    if (!trainingSession || daily) return;
     const nextFlashcardMode = !trainingSession.flashcardMode;
     const side = trainingSession.side;
     const rootNodeId = trainingSession.rootNodeId;
@@ -5407,18 +5575,16 @@ function App() {
     }
   };
 
-  const getActiveTrainingStatsScopeId = (side: Side) =>
-    isBrowseMode || !activeRepertoireIdBySide[side] ? TRAINING_SCOPE_WHOLE_DB : `repo:${activeRepertoireIdBySide[side]}`;
-
-  const getTrainingLeafKey = (node: MoveNode) => {
-    if (isBrowseMode) return `fen:${positionFenKey(node.fen)}`;
-    return `node:${node.id}`;
-  };
+  const getActiveTrainingStatsScopeId = useCallback((side: Side) =>
+    isBrowseMode || !activeRepertoireIdBySide[side] ? TRAINING_SCOPE_WHOLE_DB : `repo:${activeRepertoireIdBySide[side]}`,
+  [isBrowseMode, activeRepertoireIdBySide]);
 
   const clearActiveTrainingStatistics = () => {
     const scopeId = getActiveTrainingStatsScopeId(activeSide);
     const confirmed = window.confirm('Clear training statistics for current scope?');
     if (!confirmed) return;
+    positionTraining.clear([...activeTrainingRepertoires[activeSide]].filter(([, position]) =>
+      isBrowseMode || (activeRepertoireId && position.repertoireIds.has(activeRepertoireId))).map(([key]) => key));
     setTrainingStatsBySide((prev) => {
       const sideStats = prev[activeSide];
       if (!sideStats[scopeId]) return prev;
@@ -5444,6 +5610,7 @@ function App() {
   const clearAllTrainingStatistics = () => {
     const confirmed = window.confirm('Clear all training statistics?');
     if (!confirmed) return;
+    positionTraining.clear();
     setTrainingStatsBySide(createEmptyTrainingStatsState());
     setTrainingLeafLastShownBySide(createEmptyTrainingLeafLastShownState());
   };
@@ -5475,6 +5642,10 @@ function App() {
   };
 
   const makeMove = (orig: Key, dest: Key, promotion: 'q' | 'r' | 'b' | 'n' = 'q') => {
+    if (daily) {
+      answerDailyPosition(orig, dest, promotion);
+      return;
+    }
     if (suddenDeathGameOver || (exampleReplay && exampleReplay.side === activeSide)) return;
     const round = isSuddenDeathActive ? suddenDeathRoundRef.current : null;
     if (isSuddenDeathActive && (!round || suddenDeathThinking || toTurnColor(round.chess.fen()) !== activeSide)) return;
@@ -5596,6 +5767,7 @@ function App() {
             : exceedsDrop(evaluation);
           if (!lost && !terminal) return false;
           appendTrainingAnswer(activeSide, promptFen, promptScopeIds, lost ? 0 : 1);
+          recordTrainingPosition(promptFen, lost ? "missed" : "first");
           reviewSuddenDeathRound(round, activeSide, terminal ? 'terminal' : 'drop');
           return true;
         };
@@ -5619,6 +5791,7 @@ function App() {
             if (suddenDeathRoundRef.current !== round || finishPosition(replyEval)) return;
 
             appendTrainingAnswer(activeSide, promptFen, promptScopeIds, 1);
+            recordTrainingPosition(promptFen, "first");
             setTrainingSession((prev) =>
               prev && prev.side === activeSide && prev.suddenDeathMode
                 ? {
@@ -5645,91 +5818,33 @@ function App() {
       if (trainingOptions.length === 0) return;
 
       const isAllowedMove = trainingOptions.includes(uci);
+      const scoredFen = trainingSession.currentPromptFen ?? currentNode.fen;
+      const scoredScopeIds = trainingSession.currentPromptScopeIds.length
+        ? trainingSession.currentPromptScopeIds : getScopeIdsForTrainingPosition(activeSide, scoredFen);
+      const firstAttempt = !trainingSession.currentPromptHadError;
+      if (!isAllowedMove) {
+        if (firstAttempt) {
+          appendTrainingAnswer(activeSide, scoredFen, scoredScopeIds, 0);
+          recordTrainingPosition(scoredFen, 'missed');
+        }
+        const hintMoveUci = trainingOptions[Math.floor(Math.random() * trainingOptions.length)] ?? null;
+        setTrainingSession(previous => previous?.side === activeSide ? {
+          ...previous, hintRequested: true, hintMoveUci, currentPromptHadError: true,
+          errorCount: previous.errorCount + Number(firstAttempt),
+        } : previous);
+        return;
+      }
+
+      if (firstAttempt) appendTrainingAnswer(activeSide, scoredFen, scoredScopeIds, 1);
+      recordTrainingPosition(scoredFen, trainingSession.hintVisible ? 'assisted' : firstAttempt ? 'first' : 'corrected');
+      setTrainingSession(previous => previous?.side === activeSide ? {
+        ...previous, correctCount: previous.correctCount + Number(firstAttempt),
+        hintRequested: false, hintVisible: false, hintMoveUci: null,
+      } : previous);
       if (trainingSession.flashcardMode) {
-        const scoredFen = trainingSession.currentPromptFen ?? currentNode.fen;
-        const scoredScopeIds =
-          trainingSession.currentPromptScopeIds.length > 0
-            ? trainingSession.currentPromptScopeIds
-            : getScopeIdsForTrainingPosition(activeSide, scoredFen);
-        if (!isAllowedMove) {
-          if (!trainingSession.currentPromptHadError) {
-            appendTrainingAnswer(activeSide, scoredFen, scoredScopeIds, 0);
-          }
-          const hintMoveUci = trainingOptions[Math.floor(Math.random() * trainingOptions.length)] ?? null;
-          setTrainingSession((prev) =>
-            prev && prev.side === activeSide
-              ? {
-                  ...prev,
-                  hintRequested: true,
-                  hintVisible: prev.hintVisible,
-                  hintMoveUci,
-                  errorCount: prev.errorCount + 1,
-                  currentPromptHadError: true,
-                }
-              : prev,
-          );
-          return;
-        }
-        if (!trainingSession.currentPromptHadError) {
-          appendTrainingAnswer(activeSide, scoredFen, scoredScopeIds, 1);
-        }
-        setTrainingSession((prev) =>
-          prev && prev.side === activeSide
-            ? {
-                ...prev,
-                hintRequested: false,
-                hintVisible: false,
-                hintMoveUci: null,
-                correctCount: prev.correctCount + 1,
-                currentPromptHadError: false,
-              }
-            : prev,
-        );
         advanceFlashcardPosition(activeSide, trainingSession.rootNodeId, currentTree);
         return;
       }
-
-      if (!isAllowedMove) {
-        if (!trainingSession.currentPromptHadError) {
-          const scoredFen = trainingSession.currentPromptFen ?? currentNode.fen;
-          const scoredScopeIds =
-            trainingSession.currentPromptScopeIds.length > 0
-              ? trainingSession.currentPromptScopeIds
-              : getScopeIdsForTrainingPosition(activeSide, scoredFen);
-          appendTrainingAnswer(activeSide, scoredFen, scoredScopeIds, 0);
-        }
-        const hintMoveUci = trainingOptions[Math.floor(Math.random() * trainingOptions.length)] ?? null;
-        setTrainingSession((prev) =>
-          prev && prev.side === activeSide
-            ? {
-              ...prev,
-              hintRequested: true,
-              hintVisible: false,
-              hintMoveUci,
-              errorCount: prev.errorCount + 1,
-              currentPromptHadError: true,
-            }
-          : prev,
-      );
-        return;
-      }
-
-      const scoredFen = trainingSession.currentPromptFen ?? currentNode.fen;
-      const scoredScopeIds =
-        trainingSession.currentPromptScopeIds.length > 0
-          ? trainingSession.currentPromptScopeIds
-          : getScopeIdsForTrainingPosition(activeSide, scoredFen);
-      if (!trainingSession.currentPromptHadError) {
-        appendTrainingAnswer(activeSide, scoredFen, scoredScopeIds, 1);
-      }
-      setTrainingSession((prev) =>
-        prev && prev.side === activeSide
-          ? {
-              ...prev,
-              correctCount: prev.correctCount + 1,
-            }
-          : prev,
-      );
 
       let nextTreeForTraining = currentTree;
       let nextNodeIdForTraining = existingChildId;
@@ -5978,7 +6093,7 @@ function App() {
     const player = lichessSource === 'player';
     const minFrequency = player ? playerNextMissingMoveThreshold : nextMissingMoveThreshold;
     if (!hasOpponentReviewNodes || isTrainingActive || isSuddenDeathActive || isExampleReplayActive || isTreeEvalRunning ||
-      (player && !playerHandle.trim())) return;
+      (player && !historyPlayer)) return;
     if (opponentReview && isFindMissingSearchRunning) {
       setOpponentReview(prev => prev && (prev.index + 1 < prev.findings.length
         ? { ...prev, index: prev.index + 1, waitingForNext: false }
@@ -6071,7 +6186,7 @@ function App() {
   };
 
   const findCommonMistakes = async (direction: -1 | 1 = 1) => {
-    if (!playerHandle.trim() || !stockfishLoaded || !hasMistakeReviewNodes || !hasHydratedAppState ||
+    if (!historyPlayer || !stockfishLoaded || !hasMistakeReviewNodes || !hasHydratedAppState ||
       trainingSession || isTreeEvalRunning || analysisGameProgress || isExampleReplayActive ||
       findMissingControllerRef.current || playerAssessmentJobRef.current) return;
     setPortraitTab('lichess');
@@ -6265,6 +6380,7 @@ function App() {
       isTempBoardFlipped,
       lichessSource,
       playerHandle,
+      chessComHandle,
       playerSpeeds,
       lichessApiToken,
       dateRange,
@@ -6882,10 +6998,14 @@ function App() {
   const isSuddenDeathActive = Boolean(
     trainingSession && trainingSession.side === activeSide && trainingSession.suddenDeathMode,
   );
+  useEffect(() => {
+    if (daily && daily.identity !== historyPlayer) setTrainingSession(null);
+  }, [daily, historyPlayer]);
+
   const isTrainingActive = Boolean(
     trainingSession && trainingSession.side === activeSide && !trainingSession.suddenDeathMode,
   );
-  const boardLastMove = suddenDeathReviewPosition
+  const boardLastMove = daily ? undefined : suddenDeathReviewPosition
     ? suddenDeathReviewPosition.move?.squares
     : hasExampleReplayBoardOverride
     ? (exampleReplay as ExampleReplayState).lastMoves[(exampleReplay as ExampleReplayState).currentIndex] ?? undefined
@@ -6907,8 +7027,8 @@ function App() {
       ),
     [repertoiresBySide],
   );
-  const showHintButton = Boolean(isTrainingActive && trainingSession?.hintRequested);
-  const isTrainingLineEnd = isTrainingActive && (isBrowseMode
+  const showHintButton = Boolean(isTrainingActive && trainingSession?.hintRequested && (!daily || !trainingSession.hintVisible));
+  const isTrainingLineEnd = isTrainingActive && !daily && (isBrowseMode
     ? browseMoveOptions.length === 0
     : trainingMoveIds(tree, selectedNode, toTurnColor(selectedNode.fen) === activeSide, trainAlternativeMoves).length === 0);
   const isMobileClient = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
@@ -7179,10 +7299,10 @@ function App() {
     }
   };
   const canRunFindMissingSearch =
-    hasOpponentReviewNodes && (!isPlayerExplorer || Boolean(playerHandle.trim())) &&
+    hasOpponentReviewNodes && (!isPlayerExplorer || Boolean(historyPlayer)) &&
     !isFindMissingSearchRunning && !isSuddenDeathActive && !isTreeEvalRunning && !playerAssessmentRunning;
   const hasNextOpponentFinding = Boolean(opponentReview && opponentReview.index + 1 < opponentReview.findings.length);
-  const canFindCommonMistakes = Boolean(playerHandle.trim() && hasMistakeReviewNodes) && stockfishLoaded &&
+  const canFindCommonMistakes = Boolean(historyPlayer && hasMistakeReviewNodes) && stockfishLoaded &&
     !isFindMissingSearchRunning && !playerAssessmentRunning && !isTreeEvalRunning &&
     hasHydratedAppState && !trainingSession && !isExampleReplayActive && !analysisGameProgress;
   const mistakeRows: PlayerMoveRow[] = reviewPosition?.moves.map(move => {
@@ -7755,7 +7875,7 @@ function App() {
     const currentNode = sideTree.nodes[selectedNode.id];
     if (!currentNode) return;
     const scopeId = getActiveTrainingStatsScopeId(activeSide);
-    const leafKey = getTrainingLeafKey(currentNode);
+    const leafKey = isBrowseMode ? `fen:${positionFenKey(currentNode.fen)}` : `node:${currentNode.id}`;
     const shownAt = Date.now();
     setTrainingLeafLastShownBySide((prev) => {
       const sideEntries = prev[activeSide];
@@ -7772,18 +7892,6 @@ function App() {
         },
       };
     });
-    // If this leaf hasn't been recorded as completed in this session yet,
-    // append a training answer indicating whether it was reached without errors.
-    const alreadyCompleted = trainingSession.completedLeafNodeIds.includes(currentNode.id);
-    if (!alreadyCompleted) {
-      const scopeIds =
-        trainingSession.currentPromptScopeIds && trainingSession.currentPromptScopeIds.length > 0
-          ? trainingSession.currentPromptScopeIds
-          : getScopeIdsForTrainingPosition(activeSide, currentNode.fen);
-      const answer: 0 | 1 = trainingSession.currentPromptHadError ? 0 : 1;
-      appendTrainingAnswer(activeSide, currentNode.fen, scopeIds, answer);
-    }
-
     setTrainingSession((prev) => {
       if (!prev || prev.side !== activeSide) return prev;
       if (prev.completedLeafNodeIds.includes(currentNode.id)) return prev;
@@ -7792,7 +7900,8 @@ function App() {
         completedLeafNodeIds: [...prev.completedLeafNodeIds, currentNode.id],
       };
     });
-  }, [trainingSession, activeSide, isTrainingLineEnd, selectedNode.id, trees, isBrowseMode, activeRepertoireIdBySide]);
+  }, [trainingSession, activeSide, isTrainingLineEnd, selectedNode.id, trees, isBrowseMode,
+    getActiveTrainingStatsScopeId]);
 
   const collectTreeEvalTargets = (onlyMissing: boolean): Array<{ repoId: string | null; nodeId: string; fen: string }> => {
     const hasEval = (node: MoveNode) => typeof node.stockfishEval === 'string' && node.stockfishEval.trim().length > 0;
@@ -8553,7 +8662,7 @@ function App() {
   const reviewScore = liveReviewLine?.scoreText ?? (reviewEvaluation?.hasScore ? reviewEvaluation.scoreText : null);
   const reviewPv = liveReviewLine?.pv || reviewEvaluation?.pv || reviewEvaluation?.bestMove || '';
   const reviewPvMoves = suddenDeathReviewPosition && reviewPv ? buildEnginePvMoves(suddenDeathReviewPosition.fen, reviewPv) : [];
-  const boardPreview = !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride && !isDrawingAnnotations ? hoveredEngineMove : null;
+  const boardPreview = !daily && !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride && !isDrawingAnnotations ? hoveredEngineMove : null;
   const activeMoveComment = !suddenDeathGameOver && selectedNode.comment && boardFen === selectedNode.fen && !analysisScratchFen
     ? <p className="active-move-comment">
         {selectedNode.moveSan && <><strong>{toFigurineSan(selectedNode.moveSan)}</strong>{' '}</>}
@@ -8761,6 +8870,48 @@ function App() {
   );
 
   const showDesktopMoveActions = !isExampleReplayActive && !suddenDeathGameOver;
+  const dailyUnavailable = Boolean(!positionTraining.ready || !dailyPlan.length || trainingSession ||
+    isGameReviewRunning || isTreeEvalRunning || isExampleReplayActive || suddenDeathGameOver || playerAssessmentRunning);
+  const dailyDueLabel = nextDailyDue === null ? 'No positions to review.' : nextDailyDue <= positionTraining.clock
+    ? 'Review available now' : `Next review ${new Date(nextDailyDue).toLocaleString()}`;
+  const dailyLaunch = (
+    <button type="button" disabled={!positionTraining.ready || Boolean(trainingSession)} onClick={() => {
+      if (dailyUnavailable) setIsTrainingStatsMenuOpen(true);
+      else startDailyTraining();
+    }} title={dailyDueLabel}>
+      Daily review
+    </button>
+  );
+  const openingFeedStatus = historyPlayer ? (
+    <div className="status daily-feed-status">
+      Recent opening review: {positionTraining.evidence.mistakes.size} mistake positions,{' '}
+      {positionTraining.evidence.soundDeviations.length} sound deviations,{' '}
+      {positionTraining.evidence.missing.length} unprepared opponent replies.
+      {(positionTraining.pendingGames > 0 || positionTraining.pendingMoves > 0) &&
+        ` Pending: ${positionTraining.pendingGames} games and ${positionTraining.pendingMoves} moves.`}
+    </div>
+  ) : null;
+  const dailyGame = dailyPrompt?.game;
+  const dailyGameUrl = dailyGame?.source === 'lichess' && /^lichess:[A-Za-z0-9]{8}$/.test(dailyGame.id)
+    ? `https://lichess.org/${dailyGame.id.slice('lichess:'.length)}`
+    : dailyGame?.url && /^https:\/\/www\.chess\.com\/game\//.test(dailyGame.url) ? dailyGame.url : null;
+  const dailyGameLabel = dailyGame && `${dailyGame.source === 'lichess' ? 'Lichess' : 'Chess.com'} · ${new Date(dailyGame.createdAt).toLocaleDateString()}`;
+  const dailySummary = daily && !dailyPrompt ? (() => {
+    const count = (outcome: ReviewOutcome) => daily.outcomes.filter(value => value === outcome).length;
+    const recurrence = trainingRecurrence(positionTraining.evidence, positionTraining.reviews,
+      new Set(dailyCandidates.map(candidate => candidate.prompt.key)));
+    return (
+      <div className="daily-review-panel">
+        <strong>Daily review complete</strong>
+        <span>{`${count('first')}/${daily.outcomes.length} correct on the first attempt`}</span>
+        <span>{`${count('corrected')} corrected · ${count('assisted')} with a hint · ${count('missed')} skipped`}</span>
+        <span>{dailyDueLabel}</span>
+        {recurrence.opportunities > 0 &&
+          <span>{`Since review: ${recurrence.mistakes} repeated mistakes in ${recurrence.opportunities} checked opportunities`}</span>}
+        <button type="button" onClick={stopTraining}>Done</button>
+      </div>
+    );
+  })() : null;
 
   if (storageLoadFailed) {
     return (
@@ -8805,7 +8956,7 @@ function App() {
                 <div className={`lichess-toolbar${showPlayerMoveCheck ? '' : ' desktop-only'}`}>
                   {showPlayerMoveCheck && <button type="button" className="player-check-moves-btn"
                     disabled={!playerAssessmentRunning && (!stockfishLoaded || !playerMoveCounts.size ||
-                      !hasHydratedAppState || !playerHandle.trim() || isTreeEvalRunning || isExampleReplayActive ||
+                      !hasHydratedAppState || !historyPlayer || isTreeEvalRunning || isExampleReplayActive ||
                       Boolean(analysisGameProgress) || Boolean(trainingSession))}
                     onClick={() => void assessPlayerMoves(playerMoveCounts)}>
                     {playerAssessmentRunning ? 'Stop checking' : 'Check moves'}
@@ -8913,8 +9064,8 @@ function App() {
                       </div>
                     )}
                     {!opponentReviewOpen && <div role="status" className="player-repertoire-status">
-                      {!playerHandle.trim() ? 'Enter your Lichess username in the database options.'
-                        : usingLocalExplorer ? (!lichessTotal ? 'No synced games in this position.' : dateRange === '3y' ? 'Showing synced games from the last 12 months.' : '')
+                      {!historyPlayer ? 'Enter a username in the database options.'
+                        : usingLocalExplorer ? (!lichessTotal ? 'No synced games in this position.' : 'Showing synced Lichess and Chess.com games from the last 12 months.')
                         : lichessStatus === 'indexing' ? (explorerData?.queuePosition
                           ? `Partial results · Lichess queue: ${explorerData.queuePosition}` : 'Partial results · Lichess is indexing.')
                         : lichessStatus === 'refreshing' ? 'Showing saved results · refreshing…'
@@ -8965,7 +9116,7 @@ function App() {
                 {!mistakeReview && !usingLocalExplorer && !lichessAuthRequired && lichessApiIssueNote && (!explorerData || isPlayerExplorer) && (
                   <div className="status lichess-api-note">{lichessApiIssueNote}</div>
                 )}
-                {!mistakeReview && !usingLocalExplorer && lichessAuthRequired && (
+                {!mistakeReview && !usingLocalExplorer && lichessAuthRequired && (!isPlayerExplorer || lichessPlayer) && (
                   <div className="status lichess-api-note">Lichess token missing or invalid (401).</div>
                 )}
                 {!mistakeReview && (!opponentReviewOpen || showingOpponentResult) && (explorerData || isPlayerExplorer) && (
@@ -9170,10 +9321,10 @@ function App() {
                 annotations={boardPreview ? [] : savedAnnotations}
                 annotationTarget={canAnnotateBoard && !boardPreview ? annotationTarget : undefined}
                 drawing={isDrawingAnnotations}
-                allowedMoveUcis={isReadOnlyRepertoire ? childNodes.map(node => node.moveUci).filter((uci): uci is string => Boolean(uci)) : undefined}
-                disableDrawing={isReadOnlyRepertoire}
+                allowedMoveUcis={isReadOnlyRepertoire && !daily ? childNodes.map(node => node.moveUci).filter((uci): uci is string => Boolean(uci)) : undefined}
+                disableDrawing={isReadOnlyRepertoire || Boolean(daily)}
                 onAnnotationsChange={saveAnnotations}
-                readOnly={Boolean(suddenDeathGameOver || (isSuddenDeathActive && (suddenDeathThinking || toTurnColor(boardFen) !== activeSide)))}
+                readOnly={Boolean((daily && !dailyPrompt) || suddenDeathGameOver || (isSuddenDeathActive && (suddenDeathThinking || toTurnColor(boardFen) !== activeSide)))}
                 onMove={makeMove}
               />
               <div className={`portrait-tabbar${showTrainingContinue || showHintButton ? ' with-desktop-training-action' : ''}`}>
@@ -9258,6 +9409,7 @@ function App() {
                     </button>
                   </>
                 )}
+                {!trainingSession && !isExampleReplayActive && dailyLaunch}
                 {(!isExampleReplayActive || isTrainingActive) && (
                   <button
                     type="button"
@@ -9286,7 +9438,7 @@ function App() {
                     <SuddenDeathIcon />
                   </button>
                 )}
-                {isTrainingActive && (
+                {isTrainingActive && !daily && (
                   <button
                     type="button"
                     className={trainingSession?.flashcardMode ? 'active flashcard-toggle-btn mode-icon-btn' : 'flashcard-toggle-btn mode-icon-btn'}
@@ -9425,6 +9577,7 @@ function App() {
 
             <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''} ${isTrainingActive ? 'training-pane' : ''}`}>
               {!isTrainingActive && showDesktopMoveActions && <div className="controls-row desktop-only">
+                {dailyLaunch}
                 <button type="button" className="mode-icon-btn has-submenu-dot train-options-btn"
                   {...trainButtonMenu} aria-label="Train" title="Train (long press: options)"
                   disabled={!canStartTrainingForActiveSide}>
@@ -9448,7 +9601,26 @@ function App() {
                   </button>
                 </div>
               </div>}
-              {suddenDeathReviewPanel || (isTrainingActive ? (
+              {daily ? (dailySummary ?? (
+                <div className="daily-review-panel">
+                  <strong>{`Daily review · ${daily.index + 1}/${daily.prompts.length}`}</strong>
+                  <span>{dailyPrompt?.kind === 'mistake' ? 'Find a better move from your game.' : 'Play your repertoire move.'}</span>
+                  {dailyGameLabel && (dailyGameUrl
+                    ? <a href={dailyGameUrl} target="_blank" rel="noreferrer">{dailyGameLabel}</a>
+                    : <span>{dailyGameLabel}</span>)}
+                  {trainingSession?.currentPromptHadError && <span role="status">Try another move.</span>}
+                  <div className="controls-row">
+                    <button type="button" onClick={() => finishDailyPosition('missed')}>Skip</button>
+                    {trainingSession?.hintRequested && !trainingSession.hintVisible && (
+                      <button type="button" className="desktop-only"
+                        onClick={() => setTrainingSession(previous => previous ? { ...previous, hintVisible: true } : previous)}>
+                        Hint
+                      </button>
+                    )}
+                    <button type="button" className="desktop-only" onClick={stopTraining}>End review</button>
+                  </div>
+                </div>
+              )) : suddenDeathReviewPanel || (isTrainingActive ? (
                 <>
                   <div className="controls-row desktop-only">
                     <button type="button" className="stop-training-btn" onClick={stopTraining}>
@@ -9582,8 +9754,8 @@ function App() {
                         <button type="button" className={`mode-icon-btn find-mistakes-btn has-submenu-dot ${mistakeReview ? 'active' : ''}`}
                           {...mistakeHistoryMenu}
                           aria-disabled={!mistakeReview && !canFindCommonMistakes} aria-pressed={mistakeReviewOpen}
-                          aria-label="Find common mistakes" title={playerHandle.trim()
-                            ? 'Find common mistakes in your games (hold for time range)' : 'Set your Lichess username in Player settings (hold for time range)'}>
+                          aria-label="Find common mistakes" title={historyPlayer
+                            ? 'Find common mistakes in your games (hold for time range)' : 'Set a username in Player settings (hold for time range)'}>
                           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                             <circle cx="12" cy="12" r="8.5" />
                             <path d="m9 9 6 6m0-6-6 6" />
@@ -9893,6 +10065,17 @@ function App() {
         <div className="modal-backdrop" onClick={() => setIsTrainingStatsMenuOpen(false)}>
           <div className="modal-card stockfish-quick-modal" role="dialog" aria-modal="true" aria-labelledby="training-options-title" onClick={(event) => event.stopPropagation()}>
             <h3 id="training-options-title" className="eval-manager-title">Training options</h3>
+            <div className="daily-review-panel">
+              <button type="button" disabled={dailyUnavailable} onClick={startDailyTraining}>Daily review</button>
+              <span>{dailyPlan.length ? `${dailyPlan.length} positions · up to about ${DAILY_MINUTES} minutes` : dailyDueLabel}</span>
+              {openingFeedStatus}
+              {positionTraining.storageError && (
+                <div role="status">
+                  {positionTraining.storageError}
+                  {!positionTraining.ready && <button type="button" onClick={positionTraining.retryStorage}>Retry loading</button>}
+                </div>
+              )}
+            </div>
             <label className="inline-check">
               <input type="checkbox" checked={trainAlternativeMoves} disabled={isTrainingActive}
                 onChange={event => setTrainAlternativeMoves(event.target.checked)} />
@@ -10571,6 +10754,8 @@ function App() {
                         onChange={(e) => setPlayerHandle(e.target.value)}
                         placeholder="Lichess handle"
                       />
+                      <input className="player-handle-input" type="text" value={chessComHandle}
+                        onChange={(e) => setChessComHandle(e.target.value)} placeholder="Chess.com username" />
                     </span>
                   )}
                   {isPlayerExplorer && historyPlayer && (
@@ -10595,7 +10780,7 @@ function App() {
                       <strong>Synced games · last 12 months</strong>
                       {savedPlayerHistory && <span>{(playerHistoryStats?.count ?? 0).toLocaleString()} games</span>}
                     </div>
-                    {!historyPlayer ? <span>Enter a Lichess handle to sync your games.</span>
+                    {!historyPlayer ? <span>Enter a Lichess or Chess.com username to sync your games.</span>
                       : playerHistorySyncing ? <span>Syncing games…</span>
                       : playerHistoryError ? <span className="player-history-summary-error">{playerHistoryError}</span>
                       : !savedPlayerHistory ? <span>No games synced yet.</span>
@@ -10606,6 +10791,8 @@ function App() {
                           <span>Last sync: {new Date(savedPlayerHistory.syncedAt).toLocaleString()}</span>
                         </>
                       ) : <span>No completed games in the stored period.</span>}
+                    {lichessPlayer && <span>Lichess: {historySourceStatus.lichess ?? 'Waiting to sync'}</span>}
+                    {chessComPlayer && <span>Chess.com: {historySourceStatus.chesscom ?? 'Waiting to sync'}</span>}
                     <small>Date, speed, and mode filters change the displayed results. Game sync keeps all standard games from the last 12 months.</small>
                   </section>
                 )}

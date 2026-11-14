@@ -47,14 +47,14 @@ const { indexPlayerGameHistory, playerGameHistoryStart, playerHistoryCovers, pla
   chess.move('e4');
   const afterE4 = chess.fen().split(' ', 4).join(' ');
   const now = Date.now();
-  const game = { id: 'saved', createdAt: now - 2_000, color: 'white', speed: 'blitz', rated: true,
+  const game = { id: 'lichess:saved', source: 'lichess', account: 'test', createdAt: now - 2_000, color: 'white', speed: 'blitz', rated: true,
     winner: 'black', moves: 'Nf3 Nf6 Ng1 Ng8 e4 e5' };
   const legacy = { syncedAt: now - 1_000, games: [{ ...game, id: 'expired', createdAt: 1 }, game] };
   const positions = new Set([start]);
   const prepared = structuredClone(await preprocessPlayerGameHistory(legacy, positions, signal));
   assert(playerHistoryCovers(prepared, positions));
   assert(!playerHistoryCovers(prepared, [afterE4]), 'a position added to the repertoire needs backfill');
-  const exported = { ...game, variant: 'standard', status: 'mate', players: { white: { user: { id: 'test' } } } };
+  const exported = { ...game, id: 'saved', variant: 'standard', status: 'mate', players: { white: { user: { id: 'test' } } } };
   const imported = await syncPlayerGameHistory('test', prepared, signal, async () => new Response([
     JSON.stringify(exported),
     JSON.stringify({ ...exported, id: 'new', createdAt: now, winner: 'white', moves: 'e4 c5' }),
@@ -77,7 +77,7 @@ const { indexPlayerGameHistory, playerGameHistoryStart, playerHistoryCovers, pla
   const result = query(start);
   assert.equal(result.black, 1);
   assert.equal(result.white, 1);
-  assert.deepEqual(result.recentGames.map(({ id, uci }) => [id, uci]), [['new', 'e2e4'], ['saved', 'g1f3']]);
+  assert.deepEqual(result.recentGames.map(({ id, uci }) => [id, uci]), [['lichess:new', 'e2e4'], ['lichess:saved', 'g1f3']]);
   assert.equal(query(start, { until: '2000-01' }).moves.length, 0);
   const expanded = await preprocessPlayerGameHistory(updated, new Set([start, afterE4]), signal);
   const replies = await indexPlayerGameHistory(expanded, new Set([afterE4]), 'white', [], [], signal, false);
@@ -89,6 +89,52 @@ const { indexPlayerGameHistory, playerGameHistoryStart, playerHistoryCovers, pla
   assert.deepEqual(query(start, { sinceTimestamp: now - 1_000 }).moves.map(move => move.uci), ['e2e4']);
   assert.equal(playerGameHistoryStart(Date.UTC(2024, 2, 31), 1), Date.UTC(2024, 1, 29));
   assert.equal(playerGameHistoryStart(Date.UTC(2024, 1, 29)), Date.UTC(2023, 1, 28));
+}
+// Chess.com monthly archives retain completed losses and distinguish live/daily IDs.
+{
+  const { syncChessComHistory } = await import(moduleUrl('src/analysis/chessComHistory.ts'));
+  const signal = new AbortController().signal;
+  const now = new Date();
+  const month = now.toISOString().slice(0, 7).replace('-', '/');
+  const archive = `https://api.chess.com/pub/player/test/games/${month}`;
+  const game = { pgn: '[Event "test"]\n[Result "0-1"]\n\n1. e4 e5 0-1', end_time: Math.floor(Date.now() / 1000),
+    rules: 'chess', time_class: 'blitz', rated: true, white: { username: 'Test', result: 'abandoned', rating: 1200 },
+    black: { username: 'opponent', result: 'win', rating: 1250 } };
+  const requests = [];
+  const checkpoints = [];
+  const history = await syncChessComHistory('test', null, signal, async url => {
+    requests.push(url);
+    return Response.json(url.endsWith('/archives') ? { archives: [archive] } : { games: [
+      { ...game, url: 'https://www.chess.com/game/live/123' },
+      { ...game, url: 'https://www.chess.com/game/daily/123' },
+      { ...game, url: 'https://www.chess.com/game/live/124', white: { ...game.white, result: 'aborted' } },
+    ] });
+  }, async value => checkpoints.push(value));
+  assert.equal(requests.length, 2);
+  assert.equal(checkpoints.length, 1);
+  assert.equal(history.games.length, 2);
+  assert.equal(new Set(history.games.map(entry => entry.id)).size, 2);
+  assert(history.games.every(entry => entry.source === 'chesscom' && entry.account === 'test' && entry.winner === 'black'));
+  const previousDate = new Date(Date.now());
+  previousDate.setUTCDate(1);
+  previousDate.setUTCMonth(previousDate.getUTCMonth() - 2);
+  const oldMonth = previousDate.toISOString().slice(0, 7).replace('-', '/');
+  const oldArchive = `https://api.chess.com/pub/player/test/games/${oldMonth}`;
+  let checkpoint;
+  const oldGame = { ...game, end_time: Math.floor(previousDate.getTime() / 1000), url: 'https://www.chess.com/game/live/old' };
+  await assert.rejects(syncChessComHistory('test', null, signal, async url => {
+    if (url.endsWith('/archives')) return Response.json({ archives: [oldArchive, archive] });
+    if (url === oldArchive) return Response.json({ games: [oldGame] });
+    throw new Error('temporary failure');
+  }, async value => { checkpoint = value; }), /temporary failure/);
+  assert.equal(checkpoint.games.length, 1, 'completed month is saved on later failure');
+  const resumedRequests = [];
+  const resumed = await syncChessComHistory('test', checkpoint, signal, async url => {
+    resumedRequests.push(url);
+    return Response.json(url.endsWith('/archives') ? { archives: [oldArchive, archive] } : { games: [game] });
+  }, async () => {});
+  assert(!resumedRequests.includes(oldArchive), 'resume skips the saved old month');
+  assert.equal(resumed.games.length, 1, 'checkpointed game survives recovery');
 }
 const samples = (probabilities, levels = [1400,1800,2200]) => probabilities.map((probability,i) => ({rating:levels[i],probability}));
 const row = probabilities => ({ mover:'white',status:'complete',maiaStatus:'complete',lossPoints:0,
@@ -209,3 +255,94 @@ assert(checkedTemptation); assert(proof[0].greatFind,'verified narrow good mass 
 assert(proof[0].goodMassUpper<=.15); assert.equal(proof[0].humanAlternatives.find(m=>m.uci==='a2a3').lossPoints,30);
 assert.equal(proof[0].profileProbabilities.length,7);
 console.log('PASS: seven-level coverage; rare/style signals; quality gates; opportunity links; bounded quick review; cancellation; missing model; verified difficult-find alternatives; WDL.');
+
+const { indexTrainingRepertoires, trainingPositionKey, recordPositionReview, planDailyTraining, chooseTrainingReply } =
+  await import(moduleUrl('src/training/schedule.ts'));
+const { emptyOpeningFeed, intakeOpeningGames, finishOpeningAssessment, openingTrainingEvidence, openingDailyCandidates,
+  openingRepertoireSignature, nextOpeningAssessment, verifyOpeningMove, trainingRecurrence } =
+  await import(moduleUrl('src/training/openingFeed.ts'));
+{
+  const now = new Date(2026, 10, 11, 12).getTime();
+  const day = 86_400_000;
+  const fen = new Chess().fen();
+  const prompt = { fen, side: 'white', kind: 'repertoire', answers: ['e2e4'], key: trainingPositionKey(fen) };
+  assert.equal(trainingPositionKey('start'), prompt.key);
+  assert.equal(trainingPositionKey(fen.replace('0 1', '4 12')), prompt.key);
+  const first = recordPositionReview(undefined, 'first', now);
+  const sameDay = recordPositionReview(first, 'first', now + 60_000);
+  assert.equal(sameDay.stage, 1);
+  assert.equal(sameDay.dueAt, first.dueAt);
+  assert(sameDay.reviewedAt > first.reviewedAt);
+  assert.equal(planDailyTraining([{ prompt }, { prompt }], {}, now).length, 1);
+  assert.equal(planDailyTraining([{ prompt }], structuredClone({ [prompt.key]: first }), now).length, 0);
+  assert.equal(planDailyTraining([{ prompt }], structuredClone({ [prompt.key]: first }), now + day).length, 1);
+  assert.equal(recordPositionReview(first, 'first', now + day).stage, 2);
+  const corrected = recordPositionReview(recordPositionReview(first, 'missed', now), 'corrected', now + 10);
+  assert.equal(corrected.stage, 0);
+  assert.equal(corrected.outcome, 'corrected');
+  assert.equal(corrected.dueAt, now + 10 + day);
+  const laterMistake = { prompt, lastMistakeAt: now + 30_000, mistakeGames: 2 };
+  assert.equal(planDailyTraining([laterMistake], { [prompt.key]: first }, now + 60_000).length, 1);
+  assert.equal(planDailyTraining([laterMistake], { [prompt.key]: sameDay }, now + 60_000).length, 0);
+  assert.equal(chooseTrainingReply(['common', 'rare'], move => ({ encounters: move === 'common' ? 10_000 : 0, trouble: 0 }), () => .99), 'rare');
+
+  const tree = (firstSan, replySan, inactive = false) => {
+    const board = new Chess();
+    const firstMove = board.move(firstSan);
+    const replyMove = board.move(replySan);
+    return { rootId: 'root', nextId: 3, nodes: {
+      root: { id: 'root', parentId: null, fen: 'start', children: ['one'], moveUci: null, moveSan: null },
+      one: { id: 'one', parentId: 'root', fen: firstMove.after, children: ['two'],
+        moveUci: firstMove.lan, moveSan: firstMove.san, ...(inactive ? { inactiveStatus: 'historical' } : {}) },
+      two: { id: 'two', parentId: 'one', fen: replyMove.after, children: [],
+        moveUci: replyMove.lan, moveSan: replyMove.san },
+    } };
+  };
+  const e4 = { id: 'e4', tree: tree('e4', 'e5') };
+  const d4 = { id: 'd4', tree: tree('d4', 'd5') };
+  const disabled = indexTrainingRepertoires({ white: [d4], black: [] }, false);
+  const active = indexTrainingRepertoires({ white: [e4, d4, { id: 'inactive', tree: tree('f4', 'e5', true) }], black: [] }, false);
+  assert.equal(active.white.get(prompt.key).moves.has('f2f4'), false);
+  assert.notEqual(openingRepertoireSignature(active), openingRepertoireSignature(disabled));
+  const game = { id: 'lichess:game0001', source: 'lichess', account: 'person', color: 'white', moves: 'e4 e5 Qh5 Nc6 Bc4 Nf6',
+    createdAt: now - 100_000, rated: true, speed: 'blitz' };
+  const newer = { ...game, id: 'chesscom:two', source: 'chesscom', createdAt: now + 20_000,
+    url: 'https://www.chess.com/game/live/2' };
+  const sound = { ...game, id: 'lichess:game0003', moves: 'Nf3 d5' };
+  const missing = { ...game, id: 'chesscom:four', source: 'chesscom', moves: 'e4 c5 Nf3' };
+  const games = [newer, game, sound, missing];
+  const feed = intakeOpeningGames(emptyOpeningFeed, games, active);
+  assert.equal(intakeOpeningGames(structuredClone(feed), games, active).seenGames.length, 4);
+  const next = nextOpeningAssessment(feed, active, now);
+  assert.equal(next[1].uci, 'd1h5', 'prioritize unprepared moves at active positions and rank them by recency');
+  const [mistakeId, mistake] = Object.entries(feed.pending).find(([, item]) => item.uci === 'd1h5');
+  assert.equal(mistake.count, 2);
+  assert.deepEqual(mistake.games.map(entry => entry.id), [newer.id, game.id]);
+  assert.deepEqual(mistake.history, ['e2e4', 'e7e5']);
+  const result = await verifyOpeningMove(mistake, async input => {
+    assert.equal(input.positionCommand, 'position startpos moves e2e4 e7e5');
+    const bestMove = input.searchMoves?.[0] ?? 'g1f3';
+    return { hasScore: true, bestMove, pv: bestMove, depth: 14, evalCp: input.searchMoves ? -180 : 45,
+      scoreText: input.searchMoves ? '-1.80' : '+0.45' };
+  }, new AbortController().signal);
+  assert.equal(result.kind, 'mistake');
+  const checked = finishOpeningAssessment(feed, mistakeId, result, now);
+  assert.equal(checked.pending[mistakeId], undefined);
+  assert.equal(openingTrainingEvidence(checked, disabled, now).mistakes.size, 0);
+  const evidence = openingTrainingEvidence(checked, active, now);
+  assert(evidence.missing.some(move => move.uci === 'c7c5'));
+  const planned = openingDailyCandidates(active, evidence, 'white', 'e4', () => 0);
+  const tactic = planned.find(item => item.prompt.kind === 'mistake').prompt;
+  assert.deepEqual(tactic.answers, ['g1f3']);
+  assert.equal(tactic.game.url, newer.url);
+  assert.deepEqual(trainingRecurrence(evidence, { [tactic.key]: first }, new Set([tactic.key])),
+    { opportunities: 1, mistakes: 1 });
+  const retrying = finishOpeningAssessment(feed, mistakeId, null, now);
+  assert.equal(retrying.pending[mistakeId].failures, 1);
+  assert(retrying.pending[mistakeId].retryAt > now);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(() => verifyOpeningMove(mistake, async () => assert.fail('aborted job queried Stockfish'), controller.signal),
+    { name: 'AbortError' });
+}
+console.log('Training queue, scheduling and recurrence checks passed.');
