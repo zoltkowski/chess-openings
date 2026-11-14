@@ -961,14 +961,17 @@ select {
 .player-history-summary {
   display: grid;
   gap: 0.25rem;
+  min-width: 0;
   padding: 0.6rem 0.7rem;
   border: 1px solid #d5dce7;
   border-radius: 0.5rem;
   font-size: 0.85rem;
+  overflow-wrap: anywhere;
 }
 
 .player-history-summary-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 0.5rem;
@@ -1433,10 +1436,13 @@ span.engine-pv-move {
   align-items: start;
 }
 
-.filters-grid label {
+.filters-grid label,
+.filters-database,
+.filters-date-range {
   display: grid;
   gap: 0.3rem;
   align-self: start;
+  min-width: 0;
 }
 
 .filters-grid-player {
@@ -1469,15 +1475,37 @@ span.engine-pv-move {
   padding-inline: 0.25rem;
 }
 
-.filters-grid-player .player-handle-input {
-  max-width: 100%;
+.player-account-fields {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.25rem 0;
 }
 
-@media (max-width: 480px) {
+@media (max-width: 540px) {
+  .filters-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.85rem;
+  }
+
   .filters-grid-player {
     grid-template-areas:
-      "database dates"
-      "history history";
+      "database"
+      "dates"
+      "history";
+  }
+
+  .filters-modal .player-handle-input {
+    font-size: 1rem;
+    min-height: 2.5rem;
+  }
+
+  .filters-modal .date-range-toggle > button,
+  .filters-modal .database-toggle > button {
+    height: 2.5rem;
+  }
+
+  .filters-modal .checkbox-grid .inline-check {
+    min-height: 2rem;
   }
 }
 
@@ -1568,7 +1596,9 @@ span.engine-pv-move {
 }
 
 .player-handle-input {
-  width: 9.2rem;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
 }
 
 .token-editor-modal {
@@ -2070,9 +2100,14 @@ span.engine-pv-move {
 }
 
 .filters-modal {
+  box-sizing: border-box;
   width: min(620px, 100%);
   max-height: min(90dvh, calc(100dvh - 2rem));
   overscroll-behavior: contain;
+}
+
+.filters-modal > .card-head {
+  margin-bottom: 0.75rem;
 }
 
 .filters-modal-frequency {

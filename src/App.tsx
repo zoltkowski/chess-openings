@@ -8874,14 +8874,6 @@ function App() {
     isGameReviewRunning || isTreeEvalRunning || isExampleReplayActive || suddenDeathGameOver || playerAssessmentRunning);
   const dailyDueLabel = nextDailyDue === null ? 'No positions to review.' : nextDailyDue <= positionTraining.clock
     ? 'Review available now' : `Next review ${new Date(nextDailyDue).toLocaleString()}`;
-  const dailyLaunch = (
-    <button type="button" disabled={!positionTraining.ready || Boolean(trainingSession)} onClick={() => {
-      if (dailyUnavailable) setIsTrainingStatsMenuOpen(true);
-      else startDailyTraining();
-    }} title={dailyDueLabel}>
-      Daily review
-    </button>
-  );
   const openingFeedStatus = historyPlayer ? (
     <div className="status daily-feed-status">
       Recent opening review: {positionTraining.evidence.mistakes.size} mistake positions,{' '}
@@ -9409,7 +9401,6 @@ function App() {
                     </button>
                   </>
                 )}
-                {!trainingSession && !isExampleReplayActive && dailyLaunch}
                 {(!isExampleReplayActive || isTrainingActive) && (
                   <button
                     type="button"
@@ -9577,7 +9568,6 @@ function App() {
 
             <aside className={`move-list card portrait-pane ${portraitTab === 'moves' ? 'active' : ''} ${isTrainingActive ? 'training-pane' : ''}`}>
               {!isTrainingActive && showDesktopMoveActions && <div className="controls-row desktop-only">
-                {dailyLaunch}
                 <button type="button" className="mode-icon-btn has-submenu-dot train-options-btn"
                   {...trainButtonMenu} aria-label="Train" title="Train (long press: options)"
                   disabled={!canStartTrainingForActiveSide}>
@@ -10720,10 +10710,14 @@ function App() {
 
       {isLichessFilterOpen && (
         <div className="modal-backdrop" onClick={() => { setIsLichessFilterOpen(false); setIsLichessTokenEditorOpen(false); }}>
-          <div className="modal-card filters-modal" role="dialog" aria-modal="true" aria-label="Lichess filters" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-card filters-modal" role="dialog" aria-modal="true" aria-labelledby="lichess-filters-title" onClick={(e) => e.stopPropagation()}>
+            <div className="card-head">
+              <h2 id="lichess-filters-title">Lichess filters</h2>
+              <button type="button" onClick={() => setIsLichessFilterOpen(false)}>Close</button>
+            </div>
             <div>
               <div className={`filters-grid${isPlayerExplorer ? ' filters-grid-player' : ''}`}>
-                <label className="filters-database">
+                <div className="filters-database">
                   Lichess Database
                   <span className="toggle-group database-toggle">
                     <button
@@ -10745,18 +10739,30 @@ function App() {
                     </button>
                   </span>
                   {lichessSource === 'player' && (
-                    <span className="player-handle-row">
-                      <input
-                        className="player-handle-input"
-                        type="text"
-                        value={playerHandle}
-                        disabled={playerHistorySyncing}
-                        onChange={(e) => setPlayerHandle(e.target.value)}
-                        placeholder="Lichess handle"
-                      />
-                      <input className="player-handle-input" type="text" value={chessComHandle}
-                        onChange={(e) => setChessComHandle(e.target.value)} placeholder="Chess.com username" />
-                    </span>
+                    <div className="player-account-fields">
+                      <label>
+                        Lichess username
+                        <input
+                          className="player-handle-input"
+                          type="text"
+                          value={playerHandle}
+                          onChange={(e) => setPlayerHandle(e.target.value)}
+                          autoCapitalize="none"
+                          spellCheck={false}
+                        />
+                      </label>
+                      <label>
+                        Chess.com username
+                        <input
+                          className="player-handle-input"
+                          type="text"
+                          value={chessComHandle}
+                          onChange={(e) => setChessComHandle(e.target.value)}
+                          autoCapitalize="none"
+                          spellCheck={false}
+                        />
+                      </label>
+                    </div>
                   )}
                   {isPlayerExplorer && historyPlayer && (
                     <span className="player-handle-row">
@@ -10773,7 +10779,7 @@ function App() {
                       </button>
                     </span>
                   )}
-                </label>
+                </div>
                 {isPlayerExplorer && (
                   <section className="player-history-summary" aria-label="Synced game history">
                     <div className="player-history-summary-head">
@@ -10796,7 +10802,7 @@ function App() {
                     <small>Date, speed, and mode filters change the displayed results. Game sync keeps all standard games from the last 12 months.</small>
                   </section>
                 )}
-                <label className="filters-date-range">
+                <div className="filters-date-range">
                   Date range
                   <span className="toggle-group date-range-toggle">
                     {lichessSource === 'player' && (
@@ -10868,7 +10874,7 @@ function App() {
                       </button>
                     )}
                   </span>
-                </label>
+                </div>
               </div>
 
               {(lichessSource === 'lichess' || lichessSource === 'player') && (
