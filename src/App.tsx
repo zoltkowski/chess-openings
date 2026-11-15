@@ -8656,6 +8656,25 @@ function App() {
   const reviewScore = liveReviewLine?.scoreText ?? (reviewEvaluation?.hasScore ? reviewEvaluation.scoreText : null);
   const reviewPv = liveReviewLine?.pv || reviewEvaluation?.pv || reviewEvaluation?.bestMove || '';
   const reviewPvMoves = suddenDeathReviewPosition && reviewPv ? buildEnginePvMoves(suddenDeathReviewPosition.fen, reviewPv) : [];
+  const unplayedReply = suddenDeathGameOver && suddenDeathReviewPosition &&
+    suddenDeathGameOver.index === suddenDeathGameOver.positions.length - 1 &&
+    !suddenDeathReviewPosition.terminal && toTurnColor(suddenDeathReviewPosition.fen) !== suddenDeathGameOver.side
+    ? parseUciMove(reviewEvaluation?.bestMove ?? null) : undefined;
+  const reviewArrows: DrawShape[] = unplayedReply ? [
+    ...autoArrows.filter(arrow => arrow.orig !== unplayedReply[0] || arrow.dest !== unplayedReply[1]),
+    { orig: unplayedReply[0], dest: unplayedReply[1], brush: 'blue' },
+  ] : autoArrows;
+  const reviewChart = suddenDeathGameOver?.positions.map((position, index, positions) => {
+    const cp = position.terminal
+      ? position.terminal.startsWith('1–0') ? 600 : position.terminal.startsWith('0–1') ? -600 : 0
+      : position.evaluation?.hasScore ? position.evaluation.evalCp : null;
+    return cp === null ? null : {
+      x: 4 + 292 * index / Math.max(1, positions.length - 1),
+      y: 26 - 22 * Math.max(-600, Math.min(600, cp)) / 600,
+    };
+  });
+  const reviewChartPath = reviewChart?.map((point, index) =>
+    point ? `${reviewChart[index - 1] ? 'L' : 'M'} ${point.x} ${point.y}` : '').join(' ');
   const boardPreview = !daily && !hasExampleReplayBoardOverride && !hasSuddenDeathBoardOverride && !isDrawingAnnotations ? hoveredEngineMove : null;
   const activeMoveComment = !suddenDeathGameOver && selectedNode.comment && boardFen === selectedNode.fen && !analysisScratchFen
     ? <p className="active-move-comment">
@@ -8667,7 +8686,7 @@ function App() {
     <>
       <div className="controls-row sudden-death-review-controls">
         <strong>Sudden Death review</strong>
-        <button type="button" onClick={finishSuddenDeathReview}>Finish review</button>
+        <button type="button" onClick={finishSuddenDeathReview}>Close</button>
       </div>
       {suddenDeathGameOver.reason !== 'terminal' && <p className="status sudden-death-review-reason">
         {suddenDeathGameOver.reason === 'drop' ? 'The evaluation crossed the drop limit.' : 'The opponent’s reply was unavailable.'}
@@ -8683,14 +8702,26 @@ function App() {
         {suddenDeathGameOver.positions.map((position, index) => (
           <button key={index} type="button" aria-current={index === suddenDeathGameOver.index ? 'step' : undefined}
             className={`move-inline-item${index === suddenDeathGameOver.index ? ' analysis-selected' : ''}`}
-            onClick={() => selectSuddenDeathPosition(index)}>{position.move?.label ?? 'Start'}</button>
+            onClick={() => selectSuddenDeathPosition(index)}>
+            {position.move?.label ?? 'Start'}{' '}
+            <small className="sudden-death-move-score">
+              {position.terminal?.split(' · ')[0] ?? (position.evaluation?.hasScore ? position.evaluation.scoreText : '—')}
+            </small>
+          </button>
         ))}
       </div>
       <div className="game-analysis-comment">
         <div aria-live="polite">
           <strong>{suddenDeathReviewPosition?.terminal ?? (reviewScore ? `${STOCKFISH_ENGINE_LABEL} ${reviewScore}` : 'Stockfish evaluation unavailable')}</strong>
-          {reviewScore && <span className="status"> · White’s perspective</span>}
         </div>
+        {reviewChart?.some(Boolean) && <svg className="sudden-death-eval-chart" viewBox="0 0 300 52"
+          role="img" aria-label="Evaluation by move, scale from −6 to +6">
+          <title>Evaluation by move (−6 to +6)</title>
+          <path d="M 4 26 H 296" stroke="currentColor" opacity="0.3" />
+          <path d={reviewChartPath} fill="none" stroke="currentColor" strokeWidth="1.5" />
+          {reviewChart.map((point, index) => point && <circle key={index} cx={point.x} cy={point.y}
+            r={index === suddenDeathGameOver.index ? 3 : 1.25} fill="currentColor" />)}
+        </svg>}
         {reviewPvMoves.length > 0 && <div className="analysis-comment-line" aria-label="Stockfish continuation">
           {reviewPvMoves.map((move, index) => renderEngineMove(move, '', undefined, index))}
         </div>}
@@ -9303,7 +9334,7 @@ function App() {
                 fen={boardPreview?.fen ?? boardFen}
                 orientation={boardOrientation}
                 lastMove={boardPreview?.lastMove ?? boardLastMove}
-                arrows={boardPreview ? [] : trainingForActive ? trainingHintArrow : autoArrows}
+                arrows={boardPreview ? [] : trainingForActive ? trainingHintArrow : reviewArrows}
                 annotations={boardPreview ? [] : savedAnnotations}
                 annotationTarget={canAnnotateBoard && !boardPreview ? annotationTarget : undefined}
                 drawing={isDrawingAnnotations}
