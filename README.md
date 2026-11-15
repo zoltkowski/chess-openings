@@ -52,12 +52,19 @@ npm run build
 npx wrangler pages deploy dist
 ```
 
-## Persistence Model
+## Local data and manual backups
 
-The app does **not** persist books automatically.
+The app saves repertoires, settings, and training progress in the browser. Use
+**Options → Save backup** to export a JSON copy, then **Options → Restore backup**
+to load that copy on another device. Restore replaces the corresponding local
+data and reloads the app.
 
-Use:
-- `Options` -> `Import ... PGN` to load repertoire
-- `Options` -> `Export ... PGN` to save repertoire
+A backup includes both sides' repertoires, enabled and active selections,
+annotations, repertoire training statistics, position training for all profiles,
+settings, analysis context, and the last saved analysis report. In-progress
+exercise sessions and re-downloadable caches are outside the backup. If you
+configured a Lichess API token, the JSON contains it. Keep backup files private.
 
-Only imported data in the current session is kept in memory.
+Version 1 backups can still be restored. They leave existing position training
+and saved analysis on the receiving device in place. Use the PGN import and
+export commands to exchange individual repertoires.

@@ -45,7 +45,10 @@ import {
   playerRepertoireDeviations, preprocessPlayerGameHistory, syncPlayerGameHistory, type PlayerGameHistory, type PlayerHistoryDates,
 } from './analysis/playerGameHistory';
 import { syncChessComHistory } from './analysis/chessComHistory';
-import { usePositionTraining } from './training/usePositionTraining';
+import {
+  isPositionTrainingData, POSITION_TRAINING_KEY_PREFIX, usePositionTraining, waitForPositionTrainingWrites,
+  type PositionTrainingData,
+} from './training/usePositionTraining';
 import { chooseTrainingReply, DAILY_MINUTES, indexTrainingRepertoires, nextTrainingDue,
   planDailyTraining, trainingPositionKey, type TrainingPrompt, type ReviewOutcome } from './training/schedule';
 import { lastSeen, openingDailyCandidates, trainingRecurrence } from './training/openingFeed';
@@ -448,13 +451,22 @@ type PersistedSettingsState = {
   desktopLichessShare: number;
 };
 
-type BackupPayload = {
+type SavedAnalysisContext = { value: AnalysisContext; source: 'pgn' | 'manual' };
+
+type LegacyBackupPayload = {
   version: 1;
   exportedAt: string;
   appState: PersistedAppState;
   settings: PersistedSettingsState | null;
   trainingStats: TrainingStatsState;
   trainingLeafLastShown: TrainingLeafLastShownState;
+};
+
+type BackupPayload = Omit<LegacyBackupPayload, 'version'> & {
+  version: 2;
+  positionTraining: Record<string, PositionTrainingData>;
+  analysisContext: SavedAnalysisContext;
+  gameAnalysisReport: GameAnalysisReport | null;
 };
 
 const START_FEN = 'start';
@@ -500,6 +512,9 @@ const APP_TRAINING_LEAF_LAST_SHOWN_KEY = 'training-leaf-last-shown-v1';
 const APP_LICHESS_RESPONSE_CACHE_KEY = 'lichess-response-cache-v1';
 const APP_PLAYER_ASSESSMENTS_KEY = `player-assessments-v1-${STOCKFISH_VERSION}`;
 const APP_GAME_ANALYSIS_REPORT_KEY = 'game-analysis-report-v1';
+const APP_ANALYSIS_CONTEXT_KEY = 'analysis-context-v1';
+const pendingAppWrites = new Set<Promise<void>>();
+let restoringBackup = false;
 const BACKUP_FILE_PREFIX = 'opening-prep-backup-';
 const BACKUP_FILE_EXTENSION = '.json';
 const BACKUP_FILE_MIME_TYPE = 'application/json';
@@ -685,17 +700,53 @@ async function idbGet<T>(key: string): Promise<T | null> {
   });
 }
 
-async function idbSet<T>(key: string, value: T): Promise<void> {
+async function writeAppDb(write: (store: IDBObjectStore) => void): Promise<void> {
   const db = await openAppDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(APP_DB_STORE, 'readwrite');
-    const store = tx.objectStore(APP_DB_STORE);
-    const req = store.put(value, key);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
-    tx.oncomplete = () => db.close();
-    tx.onerror = () => db.close();
-    tx.onabort = () => db.close();
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onabort = () => { db.close(); reject(tx.error ?? new Error('Local database write aborted.')); };
+    try {
+      write(tx.objectStore(APP_DB_STORE));
+    } catch (error) {
+      tx.abort();
+      reject(error);
+    }
+  });
+}
+
+function idbSet<T>(key: string, value: T): Promise<void> {
+  if (restoringBackup) return Promise.resolve();
+  const pending = writeAppDb(store => { store.put(value, key); })
+    .finally(() => pendingAppWrites.delete(pending));
+  pendingAppWrites.add(pending);
+  return pending;
+}
+
+function positionTrainingKeyRange() {
+  return IDBKeyRange.bound(POSITION_TRAINING_KEY_PREFIX, `${POSITION_TRAINING_KEY_PREFIX}\uffff`);
+}
+
+async function readPositionTrainingBackup(): Promise<BackupPayload['positionTraining']> {
+  await waitForPositionTrainingWrites();
+  const db = await openAppDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(APP_DB_STORE, 'readonly');
+    const request = tx.objectStore(APP_DB_STORE).openCursor(positionTrainingKeyRange());
+    const scopes: BackupPayload['positionTraining'] = {};
+    tx.oncomplete = () => { db.close(); resolve(scopes); };
+    tx.onabort = () => { db.close(); reject(tx.error ?? new Error('Could not read saved training progress.')); };
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      if (!isPositionTrainingData(cursor.value)) {
+        reject(new Error('A saved profile contains invalid position training data.'));
+        tx.abort();
+        return;
+      }
+      scopes[String(cursor.key)] = cursor.value;
+      cursor.continue();
+    };
   });
 }
 
@@ -1061,26 +1112,64 @@ function readBackupTimestampFromFilename(filename: string) {
   return null;
 }
 
-function normalizeBackupPayload(value: unknown): BackupPayload | null {
-  if (!value || typeof value !== 'object') return null;
-  const parsed = value as Partial<BackupPayload>;
-  if (parsed.version !== 1) return null;
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function isSavedAnalysisContext(value: unknown): value is SavedAnalysisContext {
+  if (!isObjectRecord(value) || (value.source !== 'manual' && value.source !== 'pgn') ||
+    !isObjectRecord(value.value)) return false;
+  const { whiteRating, blackRating, ratingSystem, ratingPool, timeControl } = value.value;
+  return [whiteRating, blackRating].every(rating => rating === undefined || Number.isFinite(rating)) &&
+    (ratingSystem === undefined || ['lichess', 'chesscom', 'fide', 'other'].some(system => system === ratingSystem)) &&
+    (ratingPool === undefined || ['bullet', 'blitz', 'rapid', 'classical', 'unknown'].some(pool => pool === ratingPool)) &&
+    (timeControl === undefined || typeof timeControl === 'string');
+}
+
+function isBackupGameReport(value: unknown): value is GameAnalysisReport {
+  return isObjectRecord(value) && value.version === 2 && typeof value.gameKey === 'string' &&
+    (value.side === 'white' || value.side === 'black') &&
+    ['running', 'complete', 'partial', 'cancelled', 'error'].some(status => status === value.status) &&
+    typeof value.engine === 'string' && Number.isFinite(value.depth) && Number.isFinite(value.createdAt) &&
+    Array.isArray(value.results) && value.results.every(result => isObjectRecord(result) && typeof result.nodeId === 'string');
+}
+
+function isPositionTrainingBackup(value: unknown): value is BackupPayload['positionTraining'] {
+  return isObjectRecord(value) && Object.entries(value).every(([key, data]) =>
+    key.startsWith(POSITION_TRAINING_KEY_PREFIX) && isPositionTrainingData(data));
+}
+
+function normalizeBackupPayload(parsed: unknown): LegacyBackupPayload | BackupPayload | null {
+  if (!isObjectRecord(parsed)) return null;
+  if (parsed.version !== 1 && parsed.version !== 2) return null;
 
   const normalizedAppState = normalizePersistedState(parsed.appState);
   if (!normalizedAppState) return null;
   const normalizedSettings = parsed.settings ? normalizePersistedSettings(parsed.settings) : null;
-  const normalizedTrainingStats = normalizeTrainingStats(parsed.trainingStats) ?? createEmptyTrainingStatsState();
-  const normalizedLeafLastShown =
-    normalizeTrainingLeafLastShown(parsed.trainingLeafLastShown) ?? createEmptyTrainingLeafLastShownState();
+  const normalizedTrainingStats = normalizeTrainingStats(parsed.trainingStats);
+  const normalizedLeafLastShown = normalizeTrainingLeafLastShown(parsed.trainingLeafLastShown);
   const exportedAt = typeof parsed.exportedAt === 'string' ? parsed.exportedAt : new Date().toISOString();
 
-  return {
-    version: 1,
+  const common = {
     exportedAt,
     appState: normalizedAppState,
     settings: normalizedSettings,
-    trainingStats: normalizedTrainingStats,
-    trainingLeafLastShown: normalizedLeafLastShown,
+    trainingStats: normalizedTrainingStats ?? createEmptyTrainingStatsState(),
+    trainingLeafLastShown: normalizedLeafLastShown ?? createEmptyTrainingLeafLastShownState(),
+  };
+  if (parsed.version === 1) return { version: 1, ...common };
+
+  if (!normalizedSettings || !normalizedTrainingStats || !normalizedLeafLastShown ||
+    !isPositionTrainingBackup(parsed.positionTraining) ||
+    !isSavedAnalysisContext(parsed.analysisContext) ||
+    (parsed.gameAnalysisReport !== null && !isBackupGameReport(parsed.gameAnalysisReport))) return null;
+
+  return {
+    version: 2,
+    ...common,
+    positionTraining: parsed.positionTraining,
+    analysisContext: parsed.analysisContext,
+    gameAnalysisReport: parsed.gameAnalysisReport,
   };
 }
 
@@ -2521,12 +2610,17 @@ function App() {
   const [maiaResultKey, setMaiaResultKey] = useState('');
   const [analysisBenchmarkElo, setAnalysisBenchmarkElo] = useState(1800);
   const [analysisContext, setAnalysisContext] = useState<AnalysisContext>(() => {
-    try { return JSON.parse(localStorage.getItem('analysis-context') ?? '{}'); } catch { return {}; }
+    try {
+      const legacy: unknown = JSON.parse(localStorage.getItem('analysis-context') ?? '{}');
+      const context = { value: legacy, source: 'manual' };
+      return isSavedAnalysisContext(context) ? context.value : {};
+    } catch { return {}; }
   });
   const [analysisContextSource, setAnalysisContextSource] = useState<'pgn' | 'manual'>('manual');
-  const updateAnalysisContext = (value: AnalysisContext) => {
-    setAnalysisContext(value); setAnalysisContextSource('manual');
-    localStorage.setItem('analysis-context', JSON.stringify(value));
+  const updateAnalysisContext = (value: AnalysisContext, source: SavedAnalysisContext['source'] = 'manual') => {
+    setAnalysisContext(value);
+    setAnalysisContextSource(source);
+    void idbSet(APP_ANALYSIS_CONTEXT_KEY, { value, source }).catch(() => setStatus('Analysis context save failed'));
   };
   const analysisReviewAbortRef = useRef<AbortController | null>(null);
   const [stockfishEvalSeconds, setStockfishEvalSeconds] = useState(10);
@@ -3312,6 +3406,7 @@ function App() {
           await idbGet<TrainingLeafLastShownState>(APP_TRAINING_LEAF_LAST_SHOWN_KEY),
         );
         const persistedGameAnalysis = await idbGet<GameAnalysisReport>(APP_GAME_ANALYSIS_REPORT_KEY);
+        const persistedAnalysisContext = await idbGet<SavedAnalysisContext>(APP_ANALYSIS_CONTEXT_KEY);
         const assessments = await idbGet<PlayerAssessments>(APP_PLAYER_ASSESSMENTS_KEY).catch(() => null);
 
         if (cancelled) return;
@@ -3320,6 +3415,10 @@ function App() {
         applyPersistedDatabaseState(persisted);
         setTrainingStatsBySide(persistedTrainingStats ?? createEmptyTrainingStatsState());
         setTrainingLeafLastShownBySide(persistedTrainingLeafLastShown ?? createEmptyTrainingLeafLastShownState());
+        if (isSavedAnalysisContext(persistedAnalysisContext)) {
+          setAnalysisContext(persistedAnalysisContext.value);
+          setAnalysisContextSource(persistedAnalysisContext.source);
+        }
         if (persistedGameAnalysis?.version === 2) {
           setGameAnalysisReport({
             ...persistedGameAnalysis,
@@ -6366,7 +6465,10 @@ function App() {
     }
   };
 
-  const buildBackupPayload = (): BackupPayload => {
+  const buildBackupPayload = async (): Promise<BackupPayload> => {
+    const savedTraining = await readPositionTrainingBackup();
+    const currentTraining = positionTraining.backupScope;
+    if (currentTraining) savedTraining[currentTraining.key] = currentTraining.data;
     const settingsPayload: PersistedSettingsState = {
       version: 1,
       themeMode,
@@ -6411,7 +6513,7 @@ function App() {
       desktopLichessShare,
     };
     return {
-      version: 1,
+      version: 2,
       exportedAt: new Date().toISOString(),
       appState: {
         version: 2,
@@ -6422,16 +6524,20 @@ function App() {
       settings: settingsPayload,
       trainingStats: trainingStatsBySide,
       trainingLeafLastShown: trainingLeafLastShownBySide,
+      positionTraining: savedTraining,
+      analysisContext: { value: analysisContext, source: analysisContextSource },
+      gameAnalysisReport,
     };
   };
 
   const saveTextFileWithPickers = async (
-    content: string,
+    content: string | (() => Promise<string>),
     filename: string,
     mimeType: string,
     description: string,
     extensions: string[],
   ) => {
+    const readContent = () => typeof content === 'string' ? content : content();
     type PickerWindow = Window & {
       showDirectoryPicker?: () => Promise<{
         getFileHandle: (name: string, options?: { create?: boolean }) => Promise<{
@@ -6448,9 +6554,10 @@ function App() {
     const pickerWindow = window as PickerWindow;
     if (pickerWindow.showDirectoryPicker) {
       const dir = await pickerWindow.showDirectoryPicker();
+      const data = await readContent();
       const fileHandle = await dir.getFileHandle(filename, { create: true });
       const writable = await fileHandle.createWritable();
-      await writable.write(content);
+      await writable.write(data);
       await writable.close();
       return;
     }
@@ -6459,12 +6566,13 @@ function App() {
         suggestedName: filename,
         types: [{ description, accept: { [mimeType]: extensions } }],
       });
+      const data = await readContent();
       const writable = await fileHandle.createWritable();
-      await writable.write(content);
+      await writable.write(data);
       await writable.close();
       return;
     }
-    const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
+    const blob = new Blob([await readContent()], { type: `${mimeType};charset=utf-8` });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -6497,30 +6605,39 @@ function App() {
     const timestamp =
       readBackupTimestampFromFilename(file.name) ??
       (Number.isNaN(Date.parse(parsed.exportedAt)) ? parsed.exportedAt : new Date(parsed.exportedAt).toLocaleString());
+    const contents = parsed.version === 2
+      ? 'repertoires, settings, training progress and saved analysis'
+      : 'repertoires, settings and repertoire training progress';
     const confirmed = window.confirm(
-      `Replace local DB and training stats with this backup?\nTime: ${timestamp}\nFile: ${file.name}\n\nThis will overwrite local data.`,
+      `Restore ${contents} from this backup?\nTime: ${timestamp}\nFile: ${file.name}\n\nThis will overwrite the corresponding local data and reload the app.`,
     );
     if (!confirmed) {
       setStatus('Backup restore cancelled');
       return;
     }
 
-    applyPersistedDatabaseState(parsed.appState);
-    setTrainingStatsBySide(parsed.trainingStats);
-    setTrainingLeafLastShownBySide(parsed.trainingLeafLastShown);
-    if (parsed.settings) applyPersistedSettingsState(parsed.settings);
+    restoringBackup = true;
+    try {
+      await Promise.allSettled(pendingAppWrites);
+      await writeAppDb(store => {
+        store.put(parsed.appState, APP_STATE_KEY);
+        store.put(parsed.trainingStats, APP_TRAINING_STATS_KEY);
+        store.put(parsed.trainingLeafLastShown, APP_TRAINING_LEAF_LAST_SHOWN_KEY);
+        if (parsed.settings) store.put(parsed.settings, APP_SETTINGS_KEY);
+        if (parsed.version === 2) {
+          store.delete(positionTrainingKeyRange());
+          for (const [key, data] of Object.entries(parsed.positionTraining)) store.put(data, key);
+          store.put(parsed.analysisContext, APP_ANALYSIS_CONTEXT_KEY);
+          store.put(parsed.gameAnalysisReport, APP_GAME_ANALYSIS_REPORT_KEY);
+        }
+      });
+    } catch (error) {
+      restoringBackup = false;
+      throw error;
+    }
 
-    const writes: Promise<void>[] = [
-      idbSet(APP_STATE_KEY, parsed.appState),
-      idbSet(APP_TRAINING_STATS_KEY, parsed.trainingStats),
-      idbSet(APP_TRAINING_LEAF_LAST_SHOWN_KEY, parsed.trainingLeafLastShown),
-    ];
-    if (parsed.settings) writes.push(idbSet(APP_SETTINGS_KEY, parsed.settings));
-    await Promise.all(writes);
-
-    setStatus(`Backup restored (${file.name})`);
     window.alert(`Backup restored successfully.\n\nFile: ${file.name}`);
-    setIsOptionsOpen(false);
+    window.location.reload();
   };
 
   const saveBackupToFile = async () => {
@@ -6528,10 +6645,9 @@ function App() {
     setIsBackupIoRunning(true);
     setStatus('Saving backup...');
     try {
-      const payload = JSON.stringify(buildBackupPayload());
       const filename = createBackupFilename();
       await saveTextFileWithPickers(
-        payload,
+        async () => JSON.stringify(await buildBackupPayload()),
         filename,
         BACKUP_FILE_MIME_TYPE,
         'Opening prep backup',
@@ -6701,8 +6817,7 @@ function App() {
       timeControl: pgnHeaders.TimeControl,
       ratingPool: seconds === null ? 'unknown' : seconds < 180 ? 'bullet' : seconds < 480 ? 'blitz' : seconds < 1500 ? 'rapid' : 'classical',
     };
-    setAnalysisContext(context); setAnalysisContextSource('pgn');
-    localStorage.setItem('analysis-context', JSON.stringify(context));
+    updateAnalysisContext(context, 'pgn');
 
     const currentTree = trees[activeSide];
     const currentSelectedId = selectedNodeBySide[activeSide] ?? currentTree.rootId;

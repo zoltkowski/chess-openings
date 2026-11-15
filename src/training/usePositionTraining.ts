@@ -4,17 +4,34 @@ import { emptyOpeningFeed, finishOpeningAssessment, intakeOpeningGames, nextOpen
 import type { PlayerGame } from '../analysis/playerGameHistory';
 import { recordPositionReview, type PositionReview, type ActiveTrainingRepertoires, type ReviewOutcome } from './schedule';
 
-type Data = {
+export type PositionTrainingData = {
   version: 1;
   reviews: Record<string, PositionReview>;
   feed: OpeningFeed;
 };
-type Scope = { key: string; data: Data };
-const emptyData: Data = { version: 1, reviews: {}, feed: emptyOpeningFeed };
+type Scope = { key: string; data: PositionTrainingData };
+const emptyData: PositionTrainingData = { version: 1, reviews: {}, feed: emptyOpeningFeed };
 const noGames: readonly PlayerGame[] = [];
-const STORAGE_PREFIX = 'position-training-v1';
+export const POSITION_TRAINING_KEY_PREFIX = 'position-training-v1:';
 const MAX_REVIEWS = 10_000;
 const saveTails = new Map<string, Promise<void>>();
+
+export function isPositionTrainingData(value: unknown): value is PositionTrainingData {
+  const record = (item: unknown) => item !== null && typeof item === 'object' && !Array.isArray(item);
+  if (!record(value)) return false;
+  const { version, reviews, feed } = value as PositionTrainingData;
+  return version === 1 && record(reviews) && Object.values(reviews).every(review =>
+    record(review) && Number.isFinite(review.dueAt) && Number.isFinite(review.reviewedAt) &&
+    Number.isInteger(review.stage) && ['first', 'assisted', 'corrected', 'missed'].includes(review.outcome)
+  ) && record(feed) && feed.version === 1 &&
+    Array.isArray(feed.seenGames) && feed.seenGames.every(id => typeof id === 'string') &&
+    [feed.pending, feed.checked, feed.missing].every(entries => record(entries) &&
+      Object.values(entries).every(lead => record(lead) && Array.isArray(lead.games)));
+}
+
+export function waitForPositionTrainingWrites() {
+  return Promise.all(saveTails.values());
+}
 
 type Options = {
   identity: string;
@@ -28,7 +45,7 @@ type Options = {
 };
 
 export function usePositionTraining({ identity, loaded, games, active, idle, read, write, query }: Options) {
-  const key = `${STORAGE_PREFIX}:${identity ? JSON.stringify(identity) : 'local'}`;
+  const key = `${POSITION_TRAINING_KEY_PREFIX}${identity ? JSON.stringify(identity) : 'local'}`;
   const [scope, setScope] = useState<Scope | null>(null);
   const [error, setError] = useState<{ key: string; message: string } | null>(null);
   const [readAttempt, setReadAttempt] = useState(0);
@@ -57,13 +74,10 @@ export function usePositionTraining({ identity, loaded, games, active, idle, rea
     let stale = false;
     const restore = async () => {
       await saveTails.get(key);
-      const saved = await read<Data>(key);
-      const object = (value: unknown) => value && typeof value === "object" && !Array.isArray(value);
-      if (saved !== null && (saved.version !== 1 || !object(saved.reviews) || !object(saved.feed) ||
-        !Array.isArray(saved.feed.seenGames) || !object(saved.feed.pending) || !object(saved.feed.checked) ||
-        !object(saved.feed.missing))) throw new Error("Invalid stored training progress.");
+      const saved = await read<unknown>(key);
+      if (saved !== null && !isPositionTrainingData(saved)) throw new Error('Invalid stored training progress.');
       if (!stale) {
-        setScope({ key, data: saved?.version === 1 ? saved : emptyData });
+        setScope({ key, data: saved ?? emptyData });
         setError(null);
       }
     };
@@ -84,7 +98,7 @@ export function usePositionTraining({ identity, loaded, games, active, idle, rea
     void saving.finally(() => { if (saveTails.get(key) === saving) saveTails.delete(key); });
   }, [key, data, write]);
 
-  const update = useCallback((change: (previous: Data) => Data) => setScope(previous => {
+  const update = useCallback((change: (previous: PositionTrainingData) => PositionTrainingData) => setScope(previous => {
     if (previous?.key !== key) return previous;
     const next = change(previous.data);
     return next === previous.data ? previous : { key, data: next };
@@ -149,7 +163,8 @@ export function usePositionTraining({ identity, loaded, games, active, idle, rea
   const seen = useMemo(() => new Set(feed.seenGames), [feed.seenGames]);
   const pendingGames = recentGames.filter(game => active[game.color].size && !seen.has(game.id)).length;
   const pendingMoves = Object.values(feed.pending).filter(move => active[move.side].size).length;
-  return { ready: Boolean(data), storageError: error?.key === key ? error.message : '',
+  return { ready: Boolean(data), backupScope: data && data !== emptyData ? { key, data } : null,
+    storageError: error?.key === key ? error.message : '',
     retryStorage: () => setReadAttempt(attempt => attempt + 1),
     clock, evidence, reviews, record, clear, pendingGames, pendingMoves };
 }
